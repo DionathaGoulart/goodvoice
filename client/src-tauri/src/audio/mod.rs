@@ -4,11 +4,13 @@
 //! locking or logging on the callback path (styleguide.md, Rust conventions).
 //!
 //! [`device`] is the seam the rest of the client codes against; [`hardware`] is
-//! the `cpal` implementation behind it. Processing — AEC, noise suppression,
-//! VAD — is filled in by plan.md tasks 3.3–3.4.
+//! the `cpal` implementation behind it, and [`mixer`] is what that
+//! implementation does between the decode tasks and the speakers. Processing —
+//! AEC, noise suppression, VAD — is filled in by plan.md tasks 3.3–3.4.
 
 pub mod device;
 pub mod hardware;
+pub mod mixer;
 pub mod opus;
 
 use thiserror::Error;
