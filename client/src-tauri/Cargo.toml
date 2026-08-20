@@ -27,11 +27,28 @@ tauri-build = { version = "2.6", features = [] }
 [dependencies]
 tauri = { version = "2.11", features = [] }
 serde = { version = "1", features = ["derive"] }
+serde_json = "1"
 thiserror = "2"
 # `opus` over `audiopus` — see DR-3 in .harness/plan.md. It pulls
 # audiopus_sys 0.2, which vendors libopus and builds it with CMake, so no host
 # needs a system libopus or libclang.
 opus = "0.3"
+# The transport to the Realtime SFU (DR-7). Pure Rust, so it builds and runs on
+# the dev host as well as the Windows target. `rtc` is webrtc's own Sans-I/O
+# core, pinned to the same version: the codec and media types live there and
+# are only partly re-exported.
+webrtc = "0.20"
+rtc = "0.20"
+async-trait = "0.1"
+bytes = "1"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "sync"] }
+# rustls only: a desktop client should not depend on whatever OpenSSL the host
+# happens to ship.
+reqwest = { version = "0.12", default-features = false, features = [
+  "json",
+  "rustls-tls",
+] }
+anyhow = "1"
 
 [profile.release]
 codegen-units = 1

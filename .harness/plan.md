@@ -108,17 +108,21 @@ Goal: two clients talking through the SFU. Riskiest phase — spikes first.
   Verify: `cargo test -p goodvoice-client opus`.
   Done out of order — it is not [WIN] and does not depend on 2.1's outcome.
   See DR-3 (crate choice) and DR-4 (CMake pin).
-- [ ] **2.3 [WIN] webrtc-rs ↔ Cloudflare SFU spike** — `client/src-tauri/src/rtc/`.
+- [x] **2.3 webrtc-rs ↔ Cloudflare SFU spike** — `client/src-tauri/src/bin/rtc-spike.rs`.
   Prove webrtc-rs can complete ICE/DTLS with Realtime SFU and push an Opus track
   (PRD open question 2). This is the project's biggest unknown — if blocked,
   Decision Record + libwebrtc FFI evaluation, and STOP for user input.
   DoD: a published track from client A is pulled by a throwaway web page or second
   client. Verify: `cargo run --bin rtc-spike -- --room test` against Phase 1 deploy.
-  **Server half done:** the Worker proxy DR-2 called for is in —
+  **Server half:** the Worker proxy DR-2 called for is in —
   `POST /rooms/:code/sfu/tracks/new`, `PUT …/renegotiate`, `PUT …/tracks/close`,
   signed with the app secret, scoped to the caller's own session, and refusing
-  any track that pulls from a session outside the room (58 tests green). The
-  Rust spike itself still needs a Windows host.
+  any track that pulls from a session outside the room (58 tests green).
+  **Client half:** the spike runs both ends in one process — a speaker publishes
+  a 440 Hz tone as `mic`, a listener finds it on the roster, pulls it, and
+  decodes it back. It passed against the live deploy on the first run, and the
+  `[WIN]` tag it used to carry was wrong: nothing on this path is
+  Windows-specific. See DR-7.
 - [ ] **2.4 Wire join flow end-to-end** — `rtc/session.rs`, `audio/`, minimal UI
   (`client/ui`): room code input → join → publish mic → subscribe/playback peers.
   DoD: two Windows machines (or machine+VM) hold a conversation.
@@ -126,8 +130,12 @@ Goal: two clients talking through the SFU. Riskiest phase — spikes first.
   **Signalling half done:** peers can now find each other's media. The roster
   carries `sessionId` and `tracks` per participant, and the room learns what is
   published by reading the SFU proxy rather than trusting an announcement — see
-  DR-6. The Rust client that publishes `mic` and pulls its roommates' is what
-  remains, and it needs 2.3's spike first.
+  DR-6. **Transport half done** by 2.3's spike, which already publishes and
+  pulls `mic` end to end (DR-7); lifting that out of `bin/rtc-spike.rs` into
+  `rtc/session.rs` is mechanical. What is left is the two ends the spike faked:
+  real capture in place of the synthesised tone (task 2.1) and real playback in
+  place of the Goertzel check, plus the UI. Move off `write_sample` while doing
+  it — DR-7 records why.
 - [ ] **2.5 [WIN] Latency measurement harness** — `client/src-tauri/src/bin/latency.rs`
   or in-app debug overlay. Measure mouth-to-ear latency (loopback tone timestamp
   method) across the real SFU path.
@@ -362,6 +370,14 @@ Widening it is one line here plus a client that names the track.
   crossed this path yet. Task 2.3's spike is the first run that will confirm it;
   an unrecognised answer shape falls back to trusting the HTTP status.
 
+**Update (2026-08-20).** Real SDP has now crossed it (DR-7). The read-side of
+this design works live: the listener's join answer carried the speaker's
+`sessionId` and `mic`/`audio` track without any client announcing anything. The
+*success* shape is confirmed — `tracks: [{ mid, trackName }]`, no error field,
+which is exactly what `#rejectedTracks` treats as accepted. The **rejection**
+shape is still unobserved, because nothing was rejected; that half of the
+inference stands until a publish actually fails.
+
 ### DR-5: an in-memory roster does not survive a redeploy (2026-08-20)
 
 **Context.** The first `smoke.sh` run against the live Worker failed at the last
@@ -383,6 +399,75 @@ uploads, and expect a live call to drop on redeploy.
 users: a client whose room evaporated mid-call must rejoin the same code rather
 than surface an error. docs/self-hosting.md (task 6.1) should say plainly that
 pushing a new Worker version ends every call in progress.
+
+### DR-7: webrtc-rs clears the Realtime SFU, and does it off Windows (2026-08-20)
+
+**Context.** prd.md §10 open question 2 — can `webrtc-rs` complete ICE/DTLS with
+Cloudflare Realtime and carry an Opus track? Task 2.3 called this the project's
+biggest unknown and gated the whole voice path on it.
+
+**What was run.** `client/src-tauri/src/bin/rtc-spike.rs`, against the live
+deploy from task 1.5. One process, two participants in one room: a speaker
+publishes a 440 Hz tone as `mic`, a listener reads the roster to find it, pulls
+it through the Worker proxy, and runs a Goertzel bin over the decoded PCM. That
+covers signalling, the proxy (DR-2), ICE, DTLS, SRTP, Opus and the roster's
+track bookkeeping (DR-6) in one pass, without a second machine or a throwaway
+web page.
+
+**Decision.** `webrtc` 0.20.3 — a thin async layer over the Sans-I/O `rtc` core,
+both pinned together. It connected on the first attempt; no libwebrtc FFI
+evaluation is needed and prd.md §7's stack row stands.
+
+**Findings.**
+
+- **Cloudflare is `ice-lite`.** It answers one host candidate
+  (`141.101.90.0:1473`) followed by `a=end-of-candidates`, so there is no
+  trickle to implement and no TURN on the happy path — the client must simply
+  send a fully-gathered offer. DTLS roles: `a=setup:passive` on the publish
+  answer (our side is the DTLS client), `a=setup:actpass` on the pull offer.
+- **Opus is payload type 111 both directions**, `a=rtpmap:111 opus/48000/2` with
+  `minptime=10;useinbandfec=1`. Offering 111 rather than letting the media
+  engine pick keeps the two sides from renumbering. RFC 7587 fixes that `/2`
+  even for a mono stream: our 20 ms mono frames decoded intact through it, so
+  the SDP channel count and the payload channel count are allowed to disagree.
+- **Publish and pull are different flows.** `tracks/new` with a local track
+  takes our offer and answers `requiresImmediateRenegotiation: false` plus an
+  answer. `tracks/new` with a remote track takes *no* SDP and answers
+  `requiresImmediateRenegotiation: true` plus an **offer**, which the client
+  answers via `PUT renegotiate`. The proxy's method allowlist already matches.
+- **The `[WIN]` tag on this task was wrong.** `webrtc-rs` is pure Rust and the
+  SFU handshake is identical on every host; only capture (2.1) and the hardware
+  APIs behind it are Windows-bound. Tagging a task `[WIN]` because it lives in
+  the Windows client, rather than because it needs Windows, cost this project
+  its critical path. Tasks 2.5, 4.3–4.5, 5.1–5.2 and 5.5 keep the tag on merit —
+  they measure or drive real hardware.
+
+**Measurements (macOS arm64, debug build, live deploy).** Two runs: 100 of 100
+RTP packets decoded as Opus in both. 440 Hz bin energy `1.53e13` / `1.43e13`
+against `2.62e9` / `2.59e8` at 1500 Hz — three to four orders of magnitude of
+separation, i.e. what arrived is the tone that was sent, not noise that happened
+to be loud. Decoded RMS 5723 / 5622 against a source amplitude of 8000.
+No latency number here: that is task 2.5's job and it needs real devices.
+
+**Consequences.**
+
+- Task 2.4 loses its transport risk. What remains is real capture in place of
+  the synthesised tone, real playback in place of the Goertzel check, and the
+  UI.
+- `TrackLocalStaticSample::write_sample` takes a `Bytes`, so the spike allocates
+  once per 20 ms frame — banned on the real voice path by styleguide.md. Task
+  2.4 must either pool those buffers or drop to `TrackLocalStaticRTP` and
+  packetise itself. Noted here because the spike reads like a template and this
+  is the one line that must not be copied.
+- New client dependencies: `webrtc`, `rtc`, `tokio`, `reqwest` (rustls only — a
+  desktop client should not depend on the host's OpenSSL), `anyhow`,
+  `serde_json`, `async-trait`, `bytes`. They are `[dependencies]` rather than
+  dev-only because 2.4 needs all of them in the shipped client.
+- The spike leaves its two participants in the room until the heartbeat sweep
+  evicts them (~30 s), because there is no HTTP leave route. It therefore
+  defaults to a fresh random room code per run; `--room` overrides it, and
+  re-running the same code inside the sweep window walks toward the 8-person
+  cap.
 
 ### DR-2: the client cannot talk to the SFU directly (2026-08-20)
 
