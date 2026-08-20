@@ -16,7 +16,18 @@ import { createSfuSession } from "./sfu";
 /** A participant plus the bits that never leave the server. */
 interface Member extends Participant {
   socket: WebSocket | null;
+  /** Last time we heard anything at all from them. */
+  lastSeen: number;
 }
+
+/**
+ * How long a participant may stay silent before the room drops them. A client
+ * that is alive but idle still sends a heartbeat well inside this window.
+ */
+export const HEARTBEAT_TIMEOUT_MS = 30_000;
+
+/** How often the alarm re-checks. Fires only while the room has members. */
+const SWEEP_INTERVAL_MS = 10_000;
 
 /** What `POST /rooms/:code/join` answers with. */
 export interface JoinResult {
@@ -32,6 +43,14 @@ export interface JoinResult {
  */
 export class Room extends DurableObject<Env> {
   #members = new Map<string, Member>();
+
+  /**
+   * Alarm bookkeeping runs off the request path, so it has to be serialised:
+   * otherwise a `setAlarm` started by a join can land *after* the
+   * `deleteAlarm` of the room emptying, resurrecting a timer for a room that
+   * no longer exists.
+   */
+  #alarmWork: Promise<unknown> = Promise.resolve();
 
   /**
    * The Worker forwards `/rooms/:code/{join,ws}` here as `/join` and `/ws`.
@@ -107,16 +126,21 @@ export class Room extends DurableObject<Env> {
     }
 
     const id = crypto.randomUUID();
+    const now = Date.now();
     this.#members.set(id, {
       id,
       name: parsed.data,
-      joinedAt: Date.now(),
+      joinedAt: now,
       muted: false,
       deafened: false,
       sharing: false,
       socket: null,
+      lastSeen: now,
     });
 
+    // The clock starts here, not at the WebSocket: a client that joins and
+    // never connects is swept out like any other silent participant.
+    this.#queueAlarmWork(() => this.#scheduleSweep());
     this.#broadcastRoster();
     return { self: id, participants: this.roster() };
   }
@@ -140,6 +164,7 @@ export class Room extends DurableObject<Env> {
     // duplicating the participant.
     member.socket?.close(1000, "replaced by a newer connection");
     member.socket = server;
+    member.lastSeen = Date.now();
 
     server.addEventListener("message", (event) => {
       this.#onMessage(participantId, event.data);
@@ -181,16 +206,86 @@ export class Room extends DurableObject<Env> {
   roster(): Participant[] {
     return [...this.#members.values()]
       .sort((a, b) => a.joinedAt - b.joinedAt)
-      .map(({ socket: _socket, ...participant }) => participant);
+      .map(
+        ({ socket: _socket, lastSeen: _lastSeen, ...participant }) =>
+          participant,
+      );
+  }
+
+  /** Records that we just heard from a participant. Unknown ids are ignored. */
+  touch(participantId: string, now: number = Date.now()): void {
+    const member = this.#members.get(participantId);
+    if (member) {
+      member.lastSeen = now;
+    }
+  }
+
+  /**
+   * Evicts everyone who has gone quiet for longer than
+   * {@link HEARTBEAT_TIMEOUT_MS}. `now` is a parameter so tests can look into
+   * the future without waiting for it.
+   *
+   * @returns how many participants were evicted.
+   */
+  sweep(now: number = Date.now()): number {
+    const stale = [...this.#members.values()].filter(
+      (member) => now - member.lastSeen > HEARTBEAT_TIMEOUT_MS,
+    );
+
+    for (const member of stale) {
+      member.socket?.close(1001, "heartbeat timeout");
+      this.#members.delete(member.id);
+    }
+
+    if (stale.length === 0) {
+      return 0;
+    }
+
+    if (this.#members.size === 0) {
+      this.#reset();
+    } else {
+      this.#broadcastRoster();
+    }
+    return stale.length;
+  }
+
+  /**
+   * Backstop for the case where every socket dies without firing a close
+   * event — the room would otherwise sit there holding a phantom roster.
+   */
+  override async alarm(): Promise<void> {
+    this.sweep();
+    this.#queueAlarmWork(() => this.#scheduleSweep());
+    await this.#alarmWork;
   }
 
   // --- internals ----------------------------------------------------------
+
+  #queueAlarmWork(task: () => Promise<unknown>): void {
+    this.#alarmWork = this.#alarmWork.then(task, task);
+  }
+
+  /**
+   * Room state stays in memory; the alarm is the one piece of storage the room
+   * uses, and it holds no room data — only the fact that a sweep is due.
+   */
+  async #scheduleSweep(): Promise<void> {
+    if (this.#members.size === 0) {
+      return;
+    }
+    if ((await this.ctx.storage.getAlarm()) === null) {
+      await this.ctx.storage.setAlarm(Date.now() + SWEEP_INTERVAL_MS);
+    }
+  }
 
   #onMessage(participantId: string, raw: unknown): void {
     const member = this.#members.get(participantId);
     if (!member) {
       return;
     }
+
+    // Any traffic at all proves the participant is alive, valid or not.
+    this.touch(participantId);
 
     let message: ClientMessage;
     try {
@@ -210,6 +305,7 @@ export class Room extends DurableObject<Env> {
 
     switch (message.type) {
       case "heartbeat":
+        // `lastSeen` above was the whole point; the roster is unchanged.
         return;
       case "mute":
         member.muted = message.muted;
@@ -275,8 +371,9 @@ export class Room extends DurableObject<Env> {
     }
   }
 
-  /** Last one out turns off the lights. */
+  /** Last one out turns off the lights: no roster, no pending alarm. */
   #reset(): void {
     this.#members.clear();
+    this.#queueAlarmWork(() => this.ctx.storage.deleteAlarm());
   }
 }

@@ -81,7 +81,7 @@ No Rust in this phase — Worker + DO only, integration-tested with vitest.
   **Half done:** code and mocked tests are in (36 tests green, see DR-1/DR-2).
   The live `--remote` check is blocked on the Cloudflare account switch and a
   Realtime app existing. Check the box after that run.
-- [ ] **1.4 Timeout cleanup + room death** — `server/src/room.ts`. Heartbeat over
+- [x] **1.4 Timeout cleanup + room death** — `server/src/room.ts`. Heartbeat over
   WS; missed heartbeats (e.g. 30 s) evict the participant; DO alarm as backstop;
   empty room leaves zero state behind.
   DoD: tests simulate silent disconnect → eviction → empty-room reset.
