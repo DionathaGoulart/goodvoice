@@ -4,23 +4,28 @@ import type { Env } from "./env";
 import {
   clientMessageSchema,
   displayNameSchema,
+  isTrackName,
   joinRequestSchema,
   MAX_PARTICIPANTS,
   RoomError,
   sfuProxyBodySchema,
+  sfuProxyResultSchema,
+  TRACK_KINDS,
   type ClientMessage,
   type Participant,
   type ServerMessage,
+  type TrackName,
 } from "./protocol";
 import {
   createSfuSession,
   isSfuOperation,
   proxySfuRequest,
   sfuOperationMethod,
+  type SfuOperation,
 } from "./sfu";
 
 /** A participant plus the bits that never leave the server. */
-interface Member extends Participant {
+interface Member extends Omit<Participant, "tracks"> {
   socket: WebSocket | null;
   /** Last time we heard anything at all from them. */
   lastSeen: number;
@@ -30,6 +35,20 @@ interface Member extends Participant {
    * created straight through {@link Room.join} in tests.
    */
   sessionId: string | null;
+  /**
+   * Live tracks keyed by the transceiver mid they were published on. Peers
+   * pull by name, but only the mid comes back on `tracks/close`, so the
+   * mapping has to be kept.
+   */
+  tracks: Map<string, TrackName>;
+}
+
+/** What the room learned from one proxied request, before the SFU answers. */
+interface TrackIntent {
+  /** Tracks the caller is publishing, by mid. */
+  publishing: Map<string, TrackName>;
+  /** Mids the caller is closing. */
+  closing: string[];
 }
 
 /**
@@ -91,7 +110,14 @@ export class Room extends DurableObject<Env> {
         try {
           const sfu = await createSfuSession(this.env);
           this.attachSession(joined.self, sfu.sessionId);
-          return Response.json({ ...joined, sfu });
+          // The roster is read again rather than reused: it now carries this
+          // participant's own session id, and anyone who joined during the
+          // exchange above.
+          return Response.json({
+            self: joined.self,
+            participants: this.roster(),
+            sfu,
+          });
         } catch (error) {
           this.leave(joined.self);
           throw error;
@@ -154,6 +180,7 @@ export class Room extends DurableObject<Env> {
       socket: null,
       lastSeen: now,
       sessionId: null,
+      tracks: new Map(),
     });
 
     // The clock starts here, not at the WebSocket: a client that joins and
@@ -170,9 +197,16 @@ export class Room extends DurableObject<Env> {
    */
   attachSession(participantId: string, sessionId: string): void {
     const member = this.#members.get(participantId);
-    if (member) {
-      member.sessionId = sessionId;
+    if (!member) {
+      return;
     }
+
+    member.sessionId = sessionId;
+    // `join()` already announced this participant, but with no address to pull
+    // from yet. Every roster the room hands out has to be complete, so the
+    // session id gets its own push rather than waiting for the next thing that
+    // happens to broadcast.
+    this.#broadcastRoster();
   }
 
   /**
@@ -237,12 +271,13 @@ export class Room extends DurableObject<Env> {
     return [...this.#members.values()]
       .sort((a, b) => a.joinedAt - b.joinedAt)
       .map(
-        ({
-          socket: _socket,
-          lastSeen: _lastSeen,
-          sessionId: _sessionId,
-          ...participant
-        }) => participant,
+        ({ socket: _socket, lastSeen: _lastSeen, tracks, ...participant }) => ({
+          ...participant,
+          tracks: [...tracks.values()].map((name) => ({
+            name,
+            kind: TRACK_KINDS[name],
+          })),
+        }),
       );
   }
 
@@ -333,22 +368,55 @@ export class Room extends DurableObject<Env> {
     }
 
     const body = await request.text();
-    this.#assertTracksStayInTheRoom(body);
+    const intent = this.#readTrackIntent(member, operation, body);
 
     // Negotiating a track proves the client is alive just as well as a
     // heartbeat does, and a long negotiation must not age them out.
     this.touch(participantId);
 
-    return proxySfuRequest(this.env, member.sessionId, operation, body);
+    const response = await proxySfuRequest(
+      this.env,
+      member.sessionId,
+      operation,
+      body,
+    );
+
+    // The roster follows what the SFU actually accepted, never what the client
+    // asked for: announcing a track that failed to publish would have every
+    // peer subscribe to silence. Buffering the answer is what makes that
+    // readable, and these bodies are one SDP at most.
+    const answer = await response.text();
+    if (response.ok) {
+      this.#recordTracks(member, operation, intent, answer);
+    }
+
+    return new Response(answer, {
+      status: response.status,
+      headers: {
+        "content-type":
+          response.headers.get("content-type") ?? "application/json",
+      },
+    });
   }
 
   /**
-   * Rejects a body that pulls from a session belonging to no one here. The
-   * session id of a stranger is not secret enough to be a capability — without
-   * this check, learning one would be enough to subscribe to their audio from
+   * Reads a proxied body for the two things the room cares about: that no track
+   * pulls from a session outside this room, and which tracks the caller is
+   * about to publish or close.
+   *
+   * A stranger's session id is not secret enough to be a capability — without
+   * that check, learning one would be enough to subscribe to their audio from
    * outside their room.
+   *
+   * @throws {RoomError} `bad_request` on an unparseable body, an unknown track
+   * name, or a pull from outside the room; `already_sharing` on a second
+   * screen.
    */
-  #assertTracksStayInTheRoom(body: string): void {
+  #readTrackIntent(
+    member: Member,
+    operation: SfuOperation,
+    body: string,
+  ): TrackIntent {
     const parsed = sfuProxyBodySchema.safeParse(
       ((): unknown => {
         try {
@@ -364,18 +432,153 @@ export class Room extends DurableObject<Env> {
 
     const inRoom = new Set(
       [...this.#members.values()]
-        .map((member) => member.sessionId)
+        .map((other) => other.sessionId)
         .filter((sessionId): sessionId is string => sessionId !== null),
     );
 
+    const intent: TrackIntent = { publishing: new Map(), closing: [] };
+
     for (const track of parsed.data.tracks ?? []) {
-      if (track.sessionId !== undefined && !inRoom.has(track.sessionId)) {
+      // `tracks/close` names the caller's own transceivers and nothing else,
+      // so every entry is a close whatever else it carries.
+      if (operation === "tracks/close") {
+        if (track.mid !== undefined) {
+          intent.closing.push(track.mid);
+        }
+        continue;
+      }
+
+      // Cloudflare defaults an unlabelled track to the caller's own media.
+      if ((track.location ?? "local") === "remote") {
+        if (track.sessionId === undefined || !inRoom.has(track.sessionId)) {
+          throw new RoomError(
+            "bad_request",
+            "track refers to a session outside this room",
+          );
+        }
+        continue;
+      }
+
+      if (track.trackName === undefined || track.mid === undefined) {
         throw new RoomError(
           "bad_request",
-          "track refers to a session outside this room",
+          "a published track needs a trackName and a mid",
         );
       }
+      if (!isTrackName(track.trackName)) {
+        throw new RoomError(
+          "bad_request",
+          `unknown track name: ${track.trackName}`,
+        );
+      }
+      if (track.trackName === "screen") {
+        this.#assertNobodyElseIsSharing(member);
+      }
+
+      intent.publishing.set(track.mid, track.trackName);
     }
+
+    return intent;
+  }
+
+  /** One screen at a time in a room (prd.md §8). */
+  #assertNobodyElseIsSharing(member: Member): void {
+    const other = [...this.#members.values()].find(
+      (candidate) =>
+        candidate.id !== member.id &&
+        [...candidate.tracks.values()].includes("screen"),
+    );
+    if (other) {
+      throw new RoomError(
+        "already_sharing",
+        `${other.name} is already sharing`,
+      );
+    }
+  }
+
+  /**
+   * Folds the SFU's answer into the roster and tells the room about it.
+   *
+   * `tracks/new` can come back 200 with individual tracks rejected, so a track
+   * counts as live only if the answer does not carry an error for it. An answer
+   * that does not mention tracks at all is taken at its status: Cloudflare is
+   * free to trim their response, and a request they accepted published
+   * something.
+   */
+  #recordTracks(
+    member: Member,
+    operation: SfuOperation,
+    intent: TrackIntent,
+    answer: string,
+  ): void {
+    if (operation === "renegotiate") {
+      return;
+    }
+
+    const before = [...member.tracks.values()];
+
+    if (operation === "tracks/close") {
+      for (const mid of intent.closing) {
+        member.tracks.delete(mid);
+      }
+    } else {
+      const rejected = this.#rejectedTracks(answer);
+      for (const [mid, name] of intent.publishing) {
+        if (rejected.has(name)) {
+          continue;
+        }
+        // A name is a participant's whole media slot: republishing their mic
+        // on a new transceiver replaces the old entry rather than doubling it.
+        for (const [existing, existingName] of member.tracks) {
+          if (existingName === name && existing !== mid) {
+            member.tracks.delete(existing);
+          }
+        }
+        member.tracks.set(mid, name);
+      }
+    }
+
+    const after = [...member.tracks.values()];
+
+    // `sharing` and a live screen track are two views of one fact, so a screen
+    // starting or stopping moves the flag. Only a change moves it: the `share`
+    // message stays the UI's way to say it ahead of the publish, and an
+    // unrelated negotiation must not wipe that. Task 5.3 collapses the two
+    // once the client actually has a screen to send.
+    const wasSharing = before.includes("screen");
+    const isSharing = after.includes("screen");
+    if (wasSharing !== isSharing) {
+      member.sharing = isSharing;
+    }
+
+    if (after.join(",") !== before.join(",")) {
+      this.#broadcastRoster();
+    }
+  }
+
+  /** Track names the SFU answered with an error of their own. */
+  #rejectedTracks(answer: string): Set<string> {
+    const parsed = sfuProxyResultSchema.safeParse(
+      ((): unknown => {
+        try {
+          return JSON.parse(answer);
+        } catch {
+          return null;
+        }
+      })(),
+    );
+    if (!parsed.success) {
+      return new Set();
+    }
+
+    const rejected = new Set<string>();
+    for (const track of parsed.data.tracks ?? []) {
+      const failed = track.error !== undefined || track.errorCode !== undefined;
+      if (failed && track.trackName !== undefined) {
+        rejected.add(track.trackName);
+      }
+    }
+    return rejected;
   }
 
   #queueAlarmWork(task: () => Promise<unknown>): void {

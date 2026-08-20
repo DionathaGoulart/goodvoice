@@ -24,9 +24,39 @@ export const joinRequestSchema = z.object({
 export type JoinRequest = z.infer<typeof joinRequestSchema>;
 
 /**
- * Body of a proxied `/rooms/:code/sfu/*` call — but only the part the room has
- * to police. A track that names a `sessionId` is pulling someone else's media,
- * and the room checks that someone is in it.
+ * What a participant may publish. A goodvoice client has exactly two things to
+ * send — their microphone, and at most one screen (prd.md §3) — so the track
+ * name is a closed vocabulary rather than free text.
+ *
+ * Pinning it buys the room the track's media kind without parsing SDP, and
+ * lets the server reject a publish it has no model for instead of relaying a
+ * track no peer knows how to interpret. Widening this (a second monitor, a
+ * camera) is a one-line change here plus a client that names the track.
+ */
+export const TRACK_KINDS = {
+  mic: "audio",
+  screen: "video",
+} as const;
+
+export type TrackName = keyof typeof TRACK_KINDS;
+export type TrackKind = (typeof TRACK_KINDS)[TrackName];
+
+export function isTrackName(value: string): value is TrackName {
+  return Object.hasOwn(TRACK_KINDS, value);
+}
+
+/** One live track, as every other participant sees it. */
+export interface PublishedTrack {
+  name: TrackName;
+  kind: TrackKind;
+}
+
+/**
+ * Body of a proxied `/rooms/:code/sfu/*` call — but only the parts the room
+ * has to police or learn from. A track that names a `sessionId` is pulling
+ * someone else's media, and the room checks that someone is in it; a track
+ * without one is the caller publishing, and the room records it so the rest of
+ * the room can pull it.
  *
  * Everything else is deliberately loose and forwarded untouched: the SDP and
  * the track flags are between the client and the SFU, and mirroring
@@ -35,13 +65,46 @@ export type JoinRequest = z.infer<typeof joinRequestSchema>;
  */
 export const sfuProxyBodySchema = z.looseObject({
   tracks: z
-    .array(z.looseObject({ sessionId: z.string().optional() }))
+    .array(
+      z.looseObject({
+        location: z.enum(["local", "remote"]).optional(),
+        mid: z.string().optional(),
+        trackName: z.string().optional(),
+        sessionId: z.string().optional(),
+      }),
+    )
     .optional(),
 });
 
 export type SfuProxyBody = z.infer<typeof sfuProxyBodySchema>;
 
-/** A participant as broadcast to everyone in the room. */
+/**
+ * The parts of Realtime's answer the room reads back. A `tracks/new` can come
+ * back 200 with individual tracks rejected, so success is per track, not per
+ * request.
+ */
+export const sfuProxyResultSchema = z.looseObject({
+  tracks: z
+    .array(
+      z.looseObject({
+        trackName: z.string().optional(),
+        mid: z.string().optional(),
+        error: z.unknown().optional(),
+        errorCode: z.unknown().optional(),
+      }),
+    )
+    .optional(),
+});
+
+/**
+ * A participant as broadcast to everyone in the room.
+ *
+ * `sessionId` and `tracks` are the pull address for their media: a peer
+ * subscribes with `{ location: "remote", sessionId, trackName }` through the
+ * SFU proxy. Both are deliberately visible to the room — the proxy already
+ * refuses to pull from a session that is not in it, so a roommate's session id
+ * grants nothing beyond the media they joined to hear.
+ */
 export interface Participant {
   id: string;
   name: string;
@@ -49,6 +112,10 @@ export interface Participant {
   muted: boolean;
   deafened: boolean;
   sharing: boolean;
+  /** Their Realtime session; null until the credential exchange lands. */
+  sessionId: string | null;
+  /** What they are publishing right now. Empty until they offer a track. */
+  tracks: PublishedTrack[];
 }
 
 /** Messages the client may send over the room WebSocket. */

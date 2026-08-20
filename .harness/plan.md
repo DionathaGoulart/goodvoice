@@ -123,6 +123,11 @@ Goal: two clients talking through the SFU. Riskiest phase — spikes first.
   (`client/ui`): room code input → join → publish mic → subscribe/playback peers.
   DoD: two Windows machines (or machine+VM) hold a conversation.
   Verify: manual two-client call + `cargo test` green.
+  **Signalling half done:** peers can now find each other's media. The roster
+  carries `sessionId` and `tracks` per participant, and the room learns what is
+  published by reading the SFU proxy rather than trusting an announcement — see
+  DR-6. The Rust client that publishes `mic` and pulls its roommates' is what
+  remains, and it needs 2.3's spike first.
 - [ ] **2.5 [WIN] Latency measurement harness** — `client/src-tauri/src/bin/latency.rs`
   or in-app debug overlay. Measure mouth-to-ear latency (loopback tone timestamp
   method) across the real SFU path.
@@ -310,6 +315,52 @@ export. Remove it when `audiopus_sys` ships a libopus with a modern
 **Consequences.** Building the client needs `cmake` on PATH — add it to
 docs/self-hosting.md's contributor section (task 6.1). GitHub's runners already
 have it.
+
+### DR-6: track signalling is read, not announced (2026-08-20)
+
+**Context.** DR-2 left task 2.4 with a hole: to pull a roommate's audio a client
+needs `{ location: "remote", sessionId, trackName }`, and nothing told it either
+value. The obvious fix is a `publish` message on the room WebSocket.
+
+**Options considered.**
+
+| | client announces (`{type:"publish"}`) | room reads the proxy |
+|---|---|---|
+| Can announce a track it never published | yes (harmless — only hurts itself) | no |
+| Can publish and forget to announce | yes, and the peer hears silence | no |
+| Knows the media kind | client says so | derived from the track name |
+| New message types | 2 (`publish`, `unpublish`) | 0 |
+
+**Decision.** The room reads publishes out of the SFU proxy it already signs.
+`tracks/new` names the tracks going up and `tracks/close` names the mids coming
+down, so the room does not need to be told twice, and the two states cannot
+drift. The roster grew two fields — `sessionId` and `tracks` — and stays the
+single message peers listen to; `welcome` carries them too, so a late joiner
+subscribes from its first frame.
+
+The roster follows what the SFU *accepted*, not what was asked: a `tracks/new`
+can come back 200 with individual tracks rejected, so the answer is buffered and
+per-track errors are skipped. Announcing a track that failed to publish would
+have every peer subscribe to silence.
+
+Track names are a closed vocabulary, `mic → audio` and `screen → video`. That is
+what buys the media kind without parsing SDP, and it lets the room reject a
+publish it has no model for instead of relaying a track no peer can interpret.
+Widening it is one line here plus a client that names the track.
+
+**Consequences.**
+
+- A participant's `sessionId` is visible to their room. It grants nothing: the
+  proxy refuses to pull from a session that is not in the room, so the only
+  thing a roommate can do with it is subscribe to media they joined to hear.
+- `attachSession` broadcasts. `join()` announces a participant before their
+  session exists, and a roster without the address is not usable.
+- One screen per room is now enforced on the track, which is where it belongs.
+  The `share` message from task 1.1 still exists as the UI's intent signal and a
+  screen track moves its flag; **task 5.3 should collapse the two.**
+- Cloudflare's per-track error shape is inferred, not observed — no real SDP has
+  crossed this path yet. Task 2.3's spike is the first run that will confirm it;
+  an unrecognised answer shape falls back to trusting the HTTP status.
 
 ### DR-5: an in-memory roster does not survive a redeploy (2026-08-20)
 
