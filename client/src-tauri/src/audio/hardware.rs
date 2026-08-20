@@ -33,6 +33,7 @@ use tokio::sync::Notify;
 
 use super::{
     device::{AudioSink, AudioSource, MAX_REMOTE_SLOTS},
+    mixer::{self, Mixer, Playback, MAX_BLOCK},
     opus::{silent_frame, Frame, FRAME_SAMPLES, SAMPLE_RATE_HZ},
     AudioError,
 };
@@ -43,16 +44,17 @@ use super::{
 const RING_MS: usize = 200;
 const RING_SAMPLES: usize = (SAMPLE_RATE_HZ as usize * RING_MS) / 1000;
 
-/// The largest device callback the render path handles in one pass. Bigger
-/// buffers are processed in several, so the scratch arrays stay on the stack.
+/// The largest device callback the capture path handles in one pass. Bigger
+/// buffers are processed in several, so the scratch array stays on the stack.
 const SCRATCH_FRAMES: usize = 1024;
 
-// Both rings and both scratch buffers have to outlast one codec frame, or the
+// The rings and both scratch buffers have to outlast one codec frame, or the
 // voice path underruns on every schedule hiccup. Checked at compile time
 // because every value involved is a constant.
 const _: () = {
     assert!(RING_SAMPLES > FRAME_SAMPLES * 2);
     assert!(SCRATCH_FRAMES * 2 >= FRAME_SAMPLES);
+    assert!(MAX_BLOCK * 2 >= FRAME_SAMPLES);
 };
 
 // --- opening ---------------------------------------------------------------
@@ -71,20 +73,7 @@ const _: () = {
 pub fn open() -> Result<(Microphone, Speakers), AudioError> {
     let capture = HeapRb::<i16>::new(RING_SAMPLES);
     let (capture_tx, capture_rx) = capture.split();
-
-    let mut playback_tx = Vec::with_capacity(MAX_REMOTE_SLOTS);
-    let mut playback_rx = Vec::with_capacity(MAX_REMOTE_SLOTS);
-    for _ in 0..MAX_REMOTE_SLOTS {
-        let (producer, consumer) = HeapRb::<i16>::new(RING_SAMPLES).split();
-        playback_tx.push(Mutex::new(producer));
-        playback_rx.push(consumer);
-    }
-
-    let drain = Arc::new(
-        std::iter::repeat_with(|| AtomicBool::new(false))
-            .take(MAX_REMOTE_SLOTS)
-            .collect::<Vec<_>>(),
-    );
+    let (mixer, playback) = mixer::open(MAX_REMOTE_SLOTS, RING_SAMPLES);
 
     let captured = Arc::new(Notify::new());
     let running = Arc::new(AtomicBool::new(true));
@@ -94,18 +83,10 @@ pub fn open() -> Result<(Microphone, Speakers), AudioError> {
         let captured = Arc::clone(&captured);
         let running = Arc::clone(&running);
         let started = Arc::clone(&started);
-        let drain = Arc::clone(&drain);
         thread::Builder::new()
             .name("goodvoice-audio".to_owned())
             .spawn(move || {
-                run_devices(
-                    capture_tx,
-                    playback_rx,
-                    drain,
-                    &captured,
-                    &running,
-                    &started,
-                );
+                run_devices(capture_tx, mixer, &captured, &running, &started);
             })
             .map_err(|_| AudioError::NoDevice)?
     };
@@ -127,8 +108,7 @@ pub fn open() -> Result<(Microphone, Speakers), AudioError> {
             _guard: Arc::clone(&guard),
         },
         Speakers {
-            slots: playback_tx,
-            drain,
+            playback,
             _guard: guard,
         },
     ))
@@ -173,13 +153,12 @@ impl Drop for DeviceGuard {
 
 fn run_devices(
     capture_tx: HeapProd<i16>,
-    playback_rx: Vec<HeapCons<i16>>,
-    drain: Arc<Vec<AtomicBool>>,
+    mixer: Mixer,
     captured: &Arc<Notify>,
     running: &Arc<AtomicBool>,
     started: &StartSignal,
 ) {
-    let outcome = build_and_play(capture_tx, playback_rx, drain, captured);
+    let outcome = build_and_play(capture_tx, mixer, captured);
 
     let streams = match outcome {
         Ok(streams) => {
@@ -217,8 +196,7 @@ struct Streams {
 
 fn build_and_play(
     capture_tx: HeapProd<i16>,
-    playback_rx: Vec<HeapCons<i16>>,
-    drain: Arc<Vec<AtomicBool>>,
+    mixer: Mixer,
     captured: &Arc<Notify>,
 ) -> Result<Streams, AudioError> {
     let host = cpal::default_host();
@@ -243,13 +221,7 @@ fn build_and_play(
         capture_tx,
         Arc::clone(captured),
     )?;
-    let output = build_output(
-        &output_device,
-        &output_config,
-        output_format,
-        playback_rx,
-        drain,
-    )?;
+    let output = build_output(&output_device, &output_config, output_format, mixer)?;
 
     input.play().map_err(|_| AudioError::NoDevice)?;
     output.play().map_err(|_| AudioError::NoDevice)?;
@@ -401,64 +373,42 @@ fn build_output(
     device: &Device,
     config: &StreamConfig,
     format: SampleFormat,
-    slots: Vec<HeapCons<i16>>,
-    drain: Arc<Vec<AtomicBool>>,
+    mixer: Mixer,
 ) -> Result<cpal::Stream, AudioError> {
     let channels = config.channels as usize;
     match format {
         SampleFormat::I16 => {
-            device.build_output_stream(*config, mixer::<i16>(slots, channels, drain), report, None)
+            device.build_output_stream(*config, render::<i16>(mixer, channels), report, None)
         }
-        _ => {
-            device.build_output_stream(*config, mixer::<f32>(slots, channels, drain), report, None)
-        }
+        _ => device.build_output_stream(*config, render::<f32>(mixer, channels), report, None),
     }
     .map_err(|_| AudioError::NoDevice)
 }
 
-/// The render callback: sums every slot into one mono signal and fans it out
+/// The render callback: asks the mixer for one mono block and fans it out
 /// across the device's channels.
 ///
-/// A saturating sum, nothing more. Task 3.1 replaces this with a real mixer —
-/// per-speaker gain, and the level metering the roster needs to show who is
-/// talking. What is here is enough for everyone in the room to be audible.
-fn mixer<T>(
-    mut slots: Vec<HeapCons<i16>>,
+/// The mixing itself lives in [`super::mixer`], which is where the rules that
+/// are worth testing are. What is left here is the part that only a real device
+/// can exercise: chunking the buffer the host handed us, and converting the
+/// sample type it asked for.
+fn render<T>(
+    mut mixer: Mixer,
     channels: usize,
-    drain: Arc<Vec<AtomicBool>>,
 ) -> impl FnMut(&mut [T], &cpal::OutputCallbackInfo) + Send + 'static
 where
     T: cpal::SizedSample + FromSample<i16>,
 {
-    let mut taken = [0_i16; SCRATCH_FRAMES];
-    let mut mixed = [0_i16; SCRATCH_FRAMES];
+    let mut block_out = [0_i16; MAX_BLOCK];
     let channels = channels.max(1);
 
     move |data: &mut [T], _: &cpal::OutputCallbackInfo| {
-        // Only the consumer end can throw queued audio away, and the consumer
-        // end lives here. A flag rather than a lock, because this is a device
-        // callback (styleguide.md).
-        for (slot, flag) in slots.iter_mut().zip(drain.iter()) {
-            if flag.swap(false, Ordering::AcqRel) {
-                slot.clear();
-            }
-        }
-
-        for block in data.chunks_mut(SCRATCH_FRAMES * channels) {
+        for block in data.chunks_mut(MAX_BLOCK * channels) {
             let frames = block.len() / channels;
-            mixed[..frames].fill(0);
+            mixer.render(&mut block_out[..frames]);
 
-            for slot in &mut slots {
-                let read = slot.pop_slice(&mut taken[..frames]);
-                for (out, &sample) in mixed[..read].iter_mut().zip(taken[..read].iter()) {
-                    *out = out.saturating_add(sample);
-                }
-            }
-
-            // Underrun writes silence rather than the previous buffer: a
-            // repeated frame is a far more audible artefact than a gap.
             for (index, out) in block.chunks_mut(channels).enumerate() {
-                let sample = T::from_sample_(mixed[index]);
+                let sample = T::from_sample_(block_out[index]);
                 out.fill(sample);
             }
         }
@@ -467,32 +417,25 @@ where
 
 /// The speakers, as the decode tasks see them.
 pub struct Speakers {
-    slots: Vec<Mutex<HeapProd<i16>>>,
-    /// Set by [`AudioSink::clear`], acted on by the render callback.
-    drain: Arc<Vec<AtomicBool>>,
+    playback: Playback,
     _guard: Arc<DeviceGuard>,
 }
 
 impl AudioSink for Speakers {
     fn play(&self, slot: usize, frame: &Frame) {
-        let Some(producer) = self.slots.get(slot) else {
-            return;
-        };
-        let Ok(mut producer) = producer.lock() else {
-            return;
-        };
-        // A slot that has fallen this far behind is not going to catch up by
-        // being given more; dropping the frame keeps the delay bounded.
-        producer.push_slice(frame);
+        self.playback.play(slot, frame);
     }
 
     fn clear(&self, slot: usize) {
-        // Asking the callback to drain rather than draining here: the ring's
-        // read side belongs to the device thread, and a peer who left should
-        // stop mid-word rather than finish out the buffer.
-        if let Some(flag) = self.drain.get(slot) {
-            flag.store(true, Ordering::Release);
-        }
+        self.playback.clear(slot);
+    }
+
+    fn level(&self, slot: usize) -> f32 {
+        self.playback.level(slot)
+    }
+
+    fn set_gain(&self, slot: usize, gain: f32) {
+        self.playback.set_gain(slot, gain);
     }
 }
 

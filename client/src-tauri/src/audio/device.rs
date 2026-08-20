@@ -46,6 +46,19 @@ pub trait AudioSink: Send + Sync {
     /// Drops whatever is still queued for `slot`, so a peer that leaves does
     /// not keep talking for the length of the buffer.
     fn clear(&self, slot: usize);
+
+    /// How loud `slot` has been playing lately, `0.0`–`1.0`.
+    ///
+    /// This is what the roster's speaking indicator is built on. A sink that
+    /// does not play anything has nothing to meter, so the default is silence
+    /// rather than something for every test double to implement.
+    fn level(&self, _slot: usize) -> f32 {
+        0.0
+    }
+
+    /// Turns one speaker up or down. Defaults to doing nothing, so a sink with
+    /// no mixer behind it stays as simple as it looks.
+    fn set_gain(&self, _slot: usize, _gain: f32) {}
 }
 
 // --- synthetic ends --------------------------------------------------------
@@ -138,6 +151,33 @@ impl RecordingSink {
     pub fn slot(&self, slot: usize) -> SlotRecord {
         self.slots.lock().expect("recording sink poisoned")[slot]
     }
+
+    /// The busiest slot, and what it heard.
+    ///
+    /// Which slot a given speaker lands in is an implementation detail of the
+    /// session, and it changes across a reconnect — so a caller that only wants
+    /// to know "is audio arriving" asks this rather than guessing an index.
+    #[must_use]
+    pub fn loudest(&self) -> SlotRecord {
+        let Ok(slots) = self.slots.lock() else {
+            return SlotRecord::default();
+        };
+        slots
+            .iter()
+            .max_by_key(|record| record.frames)
+            .copied()
+            .unwrap_or_default()
+    }
+
+    /// Forgets every slot, so a caller can measure a second stretch of a call
+    /// without the first one counting towards it.
+    pub fn reset(&self) {
+        if let Ok(mut slots) = self.slots.lock() {
+            for record in slots.iter_mut() {
+                *record = SlotRecord::default();
+            }
+        }
+    }
 }
 
 impl AudioSink for RecordingSink {
@@ -223,6 +263,32 @@ mod tests {
 
         assert_eq!(sink.slot(0).frames, 0);
         assert_eq!(sink.slot(1).frames, 1);
+    }
+
+    #[test]
+    fn the_loudest_slot_is_found_without_being_named() {
+        let sink = RecordingSink::new();
+        let mut loud = silent_frame();
+        loud[0] = 4_242;
+
+        sink.play(3, &silent_frame());
+        sink.play(5, &loud);
+        sink.play(5, &loud);
+
+        let busiest = sink.loudest();
+        assert_eq!(busiest.frames, 2);
+        assert_eq!(busiest.last[0], 4_242);
+    }
+
+    #[test]
+    fn resetting_forgets_every_slot_at_once() {
+        let sink = RecordingSink::new();
+        sink.play(0, &silent_frame());
+        sink.play(4, &silent_frame());
+
+        sink.reset();
+
+        assert_eq!(sink.loudest().frames, 0);
     }
 
     #[test]
