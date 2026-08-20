@@ -1,6 +1,8 @@
+import type { Room } from "./room";
+
 /** Bindings declared in `wrangler.toml`, plus the two self-host secrets. */
 export interface Env {
-  ROOM: DurableObjectNamespace;
+  ROOM: DurableObjectNamespace<Room>;
   /** Cloudflare Realtime (Calls) app id. Secret. */
   CALLS_APP_ID?: string;
   /** Cloudflare Realtime (Calls) app secret. Secret. */

@@ -61,7 +61,7 @@ Goal: repo builds, CI green, hello-world client and worker exist and deploy.
 Goal: rooms exist server-side; a mock client can join/leave and get SFU credentials.
 No Rust in this phase — Worker + DO only, integration-tested with vitest.
 
-- [ ] **1.1 Room Durable Object: roster + cap** — `server/src/room.ts`. In-memory
+- [x] **1.1 Room Durable Object: roster + cap** — `server/src/room.ts`. In-memory
   only (no storage API): participants map (id → {name, joinedAt}), join rejects at
   8 with a typed error, leave removes, last-leave resets state. WebSocket per
   participant for roster pushes. Zod-validate every inbound message.
