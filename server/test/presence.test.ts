@@ -91,9 +91,9 @@ describe("mute", () => {
     ana.socket.send(JSON.stringify({ type: "mute", muted: true }));
 
     const roster = await pushed;
-    expect(roster.ana.muted).toBe(true);
+    expect(roster.ana?.muted).toBe(true);
     // One participant's mute is not the room's: nobody else moved.
-    expect(roster.bruno.muted).toBe(false);
+    expect(roster.bruno?.muted).toBe(false);
 
     ana.socket.close();
     bruno.socket.close();
@@ -104,11 +104,11 @@ describe("mute", () => {
 
     const muted = nextRoster(bruno.socket);
     ana.socket.send(JSON.stringify({ type: "mute", muted: true }));
-    expect((await muted).ana.muted).toBe(true);
+    expect((await muted).ana?.muted).toBe(true);
 
     const unmuted = nextRoster(bruno.socket);
     ana.socket.send(JSON.stringify({ type: "mute", muted: false }));
-    expect((await unmuted).ana.muted).toBe(false);
+    expect((await unmuted).ana?.muted).toBe(false);
 
     ana.socket.close();
     bruno.socket.close();
@@ -123,9 +123,9 @@ describe("deafen", () => {
     ana.socket.send(JSON.stringify({ type: "deafen", deafened: true }));
 
     const roster = await pushed;
-    expect(roster.ana.deafened).toBe(true);
+    expect(roster.ana?.deafened).toBe(true);
     // Deafen is not mute: someone who cannot hear you can still talk.
-    expect(roster.ana.muted).toBe(false);
+    expect(roster.ana?.muted).toBe(false);
 
     ana.socket.close();
     bruno.socket.close();
@@ -165,8 +165,8 @@ describe("the flags a client sets", () => {
       carla.participants.map((p) => [p.name, p]),
     ) as Record<string, Participant>;
 
-    expect(seen.ana.muted).toBe(true);
-    expect(seen.bruno.muted).toBe(false);
+    expect(seen.ana?.muted).toBe(true);
+    expect(seen.bruno?.muted).toBe(false);
 
     ana.socket.close();
     bruno.socket.close();
@@ -189,7 +189,7 @@ describe("the flags a client sets", () => {
 
     const carla = nextRoster(bruno.socket);
     await join("presence-garbage", "carla");
-    expect((await carla).ana.muted).toBe(true);
+    expect((await carla).ana?.muted).toBe(true);
 
     ana.socket.close();
     bruno.socket.close();
