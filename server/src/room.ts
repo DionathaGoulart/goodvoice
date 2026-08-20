@@ -11,6 +11,7 @@ import {
   type Participant,
   type ServerMessage,
 } from "./protocol";
+import { createSfuSession } from "./sfu";
 
 /** A participant plus the bits that never leave the server. */
 interface Member extends Participant {
@@ -51,7 +52,18 @@ export class Room extends DurableObject<Env> {
             "expected a JSON body with a name",
           );
         }
-        return Response.json(this.join(body.data.name));
+
+        // Take the slot first so a full room never burns an SFU session, and
+        // give it back if the SFU turns us down — a participant with no
+        // session can neither speak nor be heard.
+        const joined = this.join(body.data.name);
+        try {
+          const sfu = await createSfuSession(this.env);
+          return Response.json({ ...joined, sfu });
+        } catch (error) {
+          this.leave(joined.self);
+          throw error;
+        }
       }
 
       if (url.pathname === "/ws") {

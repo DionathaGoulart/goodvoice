@@ -78,6 +78,9 @@ No Rust in this phase — Worker + DO only, integration-tested with vitest.
   `MAX_VIDEO_BITRATE`/`MAX_AUDIO_BITRATE` env vars (cloudflare/meet pattern).
   DoD: mocked-API tests pass; a real `wrangler dev --remote` join returns live
   credentials. Verify: `npx vitest run` + manual curl against dev deploy.
+  **Half done:** code and mocked tests are in (36 tests green, see DR-1/DR-2).
+  The live `--remote` check is blocked on the Cloudflare account switch and a
+  Realtime app existing. Check the box after that run.
 - [ ] **1.4 Timeout cleanup + room death** — `server/src/room.ts`. Heartbeat over
   WS; missed heartbeats (e.g. 30 s) evict the participant; DO alarm as backstop;
   empty room leaves zero state behind.
@@ -223,4 +226,46 @@ Append-only log. Format:
 Context / Options considered / Decision / Consequences / Measurements (if any)
 ```
 
-(none yet)
+### DR-1: TURN needs its own credential pair (2026-08-20)
+
+**Context.** prd.md §7 says NAT traversal is "covered by same account/
+credentials" as the Realtime SFU app. Task 1.3 needed the exact API to call.
+
+**Findings.** Cloudflare exposes two unrelated credential pairs:
+
+- SFU: `POST https://rtc.live.cloudflare.com/v1/apps/{APP_ID}/sessions/new`,
+  `Authorization: Bearer {APP_SECRET}` → `{ sessionId }`.
+- TURN: `POST https://rtc.live.cloudflare.com/v1/turn/keys/{TURN_KEY_ID}/credentials/generate-ice-servers`,
+  `Authorization: Bearer {TURN_KEY_API_TOKEN}`, body `{ "ttl": 86400 }` →
+  `{ iceServers }`.
+
+The TURN key is created separately in the dashboard and is *not* derivable from
+the Calls app id/secret. Confirmed against Cloudflare's docs and against
+`cloudflare/meet` (`app/utils/getIceServers.server.ts`, which reads
+`TURN_SERVICE_ID`/`TURN_SERVICE_TOKEN`) plus `partytracks/server`.
+
+**Decision.** Four secrets, not two. `TURN_KEY_ID` and `TURN_KEY_API_TOKEN` are
+**optional**: with them absent the Worker answers Cloudflare's public STUN
+servers, so a self-hoster can get a call up with two secrets and add TURN when
+a squadmate turns out to be behind a symmetric NAT. A TURN request that fails
+at runtime also degrades to STUN rather than failing the join — losing relay
+candidates must not drop a call that STUN alone would have connected.
+
+**Consequences.** prd.md §7 and §9 overstate the simplicity ("two secrets");
+docs/self-hosting.md (task 6.1) must document all four and say which are
+optional. A session that the SFU refuses *does* fail the join (502
+`sfu_unavailable`) and the reserved roster slot is rolled back.
+
+### DR-2: the client cannot talk to the SFU directly (2026-08-20)
+
+**Context.** Publishing and pulling tracks means calling
+`/apps/{APP_ID}/sessions/{id}/tracks/new`, which needs the app secret.
+
+**Decision.** The secret stays in the Worker. Task 1.3 ships session creation
+only; track negotiation (task 2.3/2.4) must go through a Worker proxy route
+under `/rooms/:code/sfu/*` that injects the `Authorization` header, the same
+shape `partytracks/server` uses. Shipping the secret to a desktop client would
+hand every user the keys to the whole Realtime app.
+
+**Consequences.** Task 2.3's spike must budget for that proxy route; it is not
+yet written.

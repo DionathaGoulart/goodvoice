@@ -2,12 +2,15 @@ import { SELF } from "cloudflare:test";
 import { describe, expect, it } from "vitest";
 
 import { MAX_PARTICIPANTS, type Participant } from "../src/protocol";
+import type { SfuCredentials } from "../src/sfu";
+import { TEST_SFU } from "./fake-realtime";
 
 const BASE = "https://goodvoice.test";
 
 interface JoinResponse {
   self: string;
   participants: Participant[];
+  sfu: SfuCredentials;
 }
 
 async function join(code: string, name: string): Promise<Response> {
@@ -108,6 +111,28 @@ describe("POST /rooms/:code/join", () => {
 
     expect(response.status).toBe(400);
     expect(await response.json()).toMatchObject({ error: "bad_request" });
+  });
+
+  it("hands back SFU session and ICE credentials", async () => {
+    const body = await joinOk("join-sfu", "ana");
+
+    expect(body.sfu.sessionId).toBe(TEST_SFU.sessionId);
+    expect(body.sfu.iceServers).toEqual([
+      {
+        urls: [TEST_SFU.turnUrl],
+        username: "test-user",
+        credential: "test-credential",
+      },
+    ]);
+    expect(body.sfu.maxAudioBitrate).toBe(32_000);
+    expect(body.sfu.maxVideoBitrate).toBe(2_500_000);
+  });
+
+  it("never leaks the app secret to the client", async () => {
+    const raw = await (await join("join-secret", "ana")).text();
+
+    expect(raw).not.toContain(TEST_SFU.appSecret);
+    expect(raw).not.toContain(TEST_SFU.turnKeyToken);
   });
 
   it("rejects the ninth participant with 409 room_full", async () => {

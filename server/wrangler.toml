@@ -4,9 +4,12 @@ compatibility_date = "2026-08-20"
 compatibility_flags = ["nodejs_compat"]
 
 # Secrets (never committed — set with `npx wrangler secret put <NAME>`):
-#   CALLS_APP_ID      — Cloudflare Realtime (Calls) app id
-#   CALLS_APP_SECRET  — Cloudflare Realtime (Calls) app secret
-# See docs/self-hosting.md.
+#   CALLS_APP_ID         — Cloudflare Realtime (Calls) app id
+#   CALLS_APP_SECRET     — Cloudflare Realtime (Calls) app secret
+#   TURN_KEY_ID          — TURN key id (optional; STUN-only without it)
+#   TURN_KEY_API_TOKEN   — TURN key API token (optional, pairs with the above)
+# TURN uses its own credential pair, not the Calls app's — see DR-1 in
+# .harness/plan.md. Full walkthrough in docs/self-hosting.md.
 
 [vars]
 # Quality caps, tunable per self-host. Bits per second.
