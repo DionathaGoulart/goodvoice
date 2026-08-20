@@ -1,20 +1,45 @@
 //! goodvoice client core.
 //!
 //! The Tauri shell is a thin host: every concern lives in its own module and
-//! talks to the others only through the public API declared here.
+//! talks to the others only through the public API declared here. The commands
+//! below are the whole surface the UI sees — join, leave, mute, deafen — and
+//! each is a one-line forward into [`rtc::session`].
 
 pub mod audio;
 pub mod capture;
 pub mod rtc;
 pub mod tray;
 
+use std::sync::Arc;
+
 use serde::Serialize;
+use tauri::{AppHandle, Emitter as _, Manager as _, State};
+use tokio::sync::Mutex;
+
+use audio::{device::AudioSink, hardware};
+use rtc::{
+    session::{Call, CallOptions},
+    signaling::Participant,
+};
+
+/// The deploy a fresh install talks to. Overridable at build time so a
+/// self-hoster can ship a client pointed at their own Worker without touching
+/// the source (docs/self-hosting.md, task 6.1).
+pub const DEFAULT_SERVER: &str = match option_env!("GOODVOICE_SERVER") {
+    Some(url) => url,
+    None => "https://goodvoice.goodvoice-server.workers.dev",
+};
+
+/// The event the UI listens on for room changes.
+const ROSTER_EVENT: &str = "goodvoice://roster";
 
 /// Identity of the running client, surfaced to the UI on boot.
 #[derive(Debug, Clone, Serialize)]
 pub struct ClientInfo {
     pub name: String,
     pub version: String,
+    /// Where this build joins rooms by default.
+    pub server: String,
 }
 
 impl ClientInfo {
@@ -23,13 +48,135 @@ impl ClientInfo {
         Self {
             name: env!("CARGO_PKG_NAME").to_owned(),
             version: env!("CARGO_PKG_VERSION").to_owned(),
+            server: DEFAULT_SERVER.to_owned(),
         }
     }
+}
+
+/// What the UI is told after a successful join.
+#[derive(Debug, Clone, Serialize)]
+pub struct CallStatus {
+    /// This client's participant id, so the UI can pick itself out of the
+    /// roster.
+    pub self_id: String,
+    pub room: String,
+    pub participants: Vec<Participant>,
+}
+
+/// The one call this process can be in.
+///
+/// A `Mutex` rather than a lock-free cell because join and leave must not
+/// interleave: two joins racing would leave an orphaned `Call` publishing a
+/// microphone nobody can mute.
+#[derive(Default)]
+struct CallState {
+    call: Mutex<Option<Arc<Call>>>,
+}
+
+/// Joins a room, opening the microphone and speakers on the way.
+///
+/// # Errors
+///
+/// Returns the reason as a string for the UI to show: no audio device, the
+/// room refusing the join, or the transport failing to connect.
+#[tauri::command]
+async fn join_room(
+    app: AppHandle,
+    state: State<'_, CallState>,
+    server: String,
+    room: String,
+    name: String,
+) -> Result<CallStatus, String> {
+    let mut current = state.call.lock().await;
+    if current.is_some() {
+        return Err("already in a call".to_owned());
+    }
+
+    let (microphone, speakers) = hardware::open().map_err(|error| error.to_string())?;
+
+    let call = Call::join(
+        CallOptions {
+            base: server,
+            room: room.clone(),
+            name,
+        },
+        Box::new(microphone),
+        Arc::new(speakers) as Arc<dyn AudioSink>,
+    )
+    .await
+    .map_err(|error| error.to_string())?;
+
+    let status = CallStatus {
+        self_id: call.self_id().to_owned(),
+        room,
+        participants: call.roster().borrow().clone(),
+    };
+
+    let call = Arc::new(call);
+    tauri::async_runtime::spawn(push_roster(app, Arc::clone(&call)));
+    *current = Some(call);
+
+    Ok(status)
+}
+
+/// Leaves the room and closes the devices.
+///
+/// # Errors
+///
+/// Never fails in practice; the `Result` exists so the UI can await it the
+/// same way it awaits the others.
+#[tauri::command]
+async fn leave_room(state: State<'_, CallState>) -> Result<(), String> {
+    let taken = state.call.lock().await.take();
+    if let Some(call) = taken {
+        // Only the roster pusher holds the other handle, and it stops as soon
+        // as the watch closes; if it has not yet, dropping ours is enough.
+        match Arc::try_unwrap(call) {
+            Ok(call) => call.leave().await,
+            Err(shared) => shared.set_muted(true).await,
+        }
+    }
+    Ok(())
+}
+
+/// # Errors
+///
+/// Returns an error when there is no call to mute.
+#[tauri::command]
+async fn set_muted(state: State<'_, CallState>, muted: bool) -> Result<(), String> {
+    let call = state.call.lock().await.clone();
+    let call = call.ok_or_else(|| "not in a call".to_owned())?;
+    call.set_muted(muted).await;
+    Ok(())
+}
+
+/// # Errors
+///
+/// Returns an error when there is no call to deafen.
+#[tauri::command]
+async fn set_deafened(state: State<'_, CallState>, deafened: bool) -> Result<(), String> {
+    let call = state.call.lock().await.clone();
+    let call = call.ok_or_else(|| "not in a call".to_owned())?;
+    call.set_deafened(deafened).await;
+    Ok(())
 }
 
 #[tauri::command]
 fn client_info() -> ClientInfo {
     ClientInfo::current()
+}
+
+/// Forwards every roster change to the webview until the call ends.
+async fn push_roster(app: AppHandle, call: Arc<Call>) {
+    let mut roster = call.roster();
+    loop {
+        let participants = roster.borrow_and_update().clone();
+        let _ = app.emit(ROSTER_EVENT, participants);
+
+        if roster.changed().await.is_err() {
+            return;
+        }
+    }
 }
 
 /// Builds and runs the Tauri application.
@@ -40,19 +187,43 @@ fn client_info() -> ClientInfo {
 /// mode for a windowless GUI client.
 pub fn run() {
     tauri::Builder::default()
-        .invoke_handler(tauri::generate_handler![client_info])
+        .setup(|app| {
+            app.manage(CallState::default());
+            Ok(())
+        })
+        .invoke_handler(tauri::generate_handler![
+            client_info,
+            join_room,
+            leave_room,
+            set_muted,
+            set_deafened
+        ])
         .run(tauri::generate_context!())
         .expect("error while running goodvoice");
 }
 
 #[cfg(test)]
 mod tests {
-    use super::ClientInfo;
+    use super::{ClientInfo, DEFAULT_SERVER};
 
     #[test]
     fn client_info_reports_crate_metadata() {
         let info = ClientInfo::current();
         assert_eq!(info.name, "goodvoice-client");
         assert!(!info.version.is_empty());
+    }
+
+    #[test]
+    fn the_default_server_is_an_absolute_origin() {
+        // A relative or empty value would fail at join time with a confusing
+        // signalling error rather than here.
+        assert!(
+            DEFAULT_SERVER.starts_with("http://") || DEFAULT_SERVER.starts_with("https://"),
+            "GOODVOICE_SERVER must be an absolute origin, got {DEFAULT_SERVER}"
+        );
+        assert!(
+            !DEFAULT_SERVER.ends_with('/'),
+            "trailing slash breaks paths"
+        );
     }
 }

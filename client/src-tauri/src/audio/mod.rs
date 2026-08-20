@@ -3,8 +3,12 @@
 //! Real-time discipline applies to everything under this module: no allocation,
 //! locking or logging on the callback path (styleguide.md, Rust conventions).
 //!
-//! Capture and playback are filled in by plan.md tasks 2.1 and 3.1–3.4.
+//! [`device`] is the seam the rest of the client codes against; [`hardware`] is
+//! the `cpal` implementation behind it. Processing — AEC, noise suppression,
+//! VAD — is filled in by plan.md tasks 3.3–3.4.
 
+pub mod device;
+pub mod hardware;
 pub mod opus;
 
 use thiserror::Error;
@@ -29,4 +33,8 @@ pub enum AudioError {
     /// A zero-length packet reached the decoder; loss is concealed, not decoded.
     #[error("cannot decode an empty packet")]
     EmptyPacket,
+    /// No endpoint the host offers can run at 48 kHz in a format we read.
+    /// goodvoice does not resample — see [`opus::SAMPLE_RATE_HZ`].
+    #[error("no audio device supports 48 kHz in a usable sample format")]
+    UnsupportedFormat,
 }

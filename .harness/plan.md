@@ -101,6 +101,12 @@ Goal: two clients talking through the SFU. Riskiest phase — spikes first.
   DoD: mic loopback audible; round-trip device latency measured and recorded in DR.
   Verify: `cargo test -p goodvoice-client audio` + manual loopback run
   (`cargo run --bin audio-spike`).
+  **Narrowed by 2.4.** The seam is in (`audio/device.rs`) with a working cpal
+  backend behind it (`audio/hardware.rs`), so this task is no longer "build the
+  audio layer" — it is the measurement it was always about: does cpal's WASAPI
+  backend hit the 80 ms budget, or does the `wasapi` crate's control over
+  shared-mode buffer sizes buy enough to justify a second backend? Whatever wins
+  lands beside `hardware.rs` and nothing above the seam moves. See DR-8.
 - [x] **2.2 Opus encode/decode pipeline** — `client/src-tauri/src/audio/opus.rs`.
   20 ms frames, 48 kHz, 32 kbps start; encode→decode round-trip preserves audio.
   DoD: unit tests with synthetic tones; no allocation on the frame path (assert
@@ -123,19 +129,19 @@ Goal: two clients talking through the SFU. Riskiest phase — spikes first.
   decodes it back. It passed against the live deploy on the first run, and the
   `[WIN]` tag it used to carry was wrong: nothing on this path is
   Windows-specific. See DR-7.
-- [ ] **2.4 Wire join flow end-to-end** — `rtc/session.rs`, `audio/`, minimal UI
+- [x] **2.4 Wire join flow end-to-end** — `rtc/session.rs`, `audio/`, minimal UI
   (`client/ui`): room code input → join → publish mic → subscribe/playback peers.
   DoD: two Windows machines (or machine+VM) hold a conversation.
   Verify: manual two-client call + `cargo test` green.
-  **Signalling half done:** peers can now find each other's media. The roster
-  carries `sessionId` and `tracks` per participant, and the room learns what is
-  published by reading the SFU proxy rather than trusting an announcement — see
-  DR-6. **Transport half done** by 2.3's spike, which already publishes and
-  pulls `mic` end to end (DR-7); lifting that out of `bin/rtc-spike.rs` into
-  `rtc/session.rs` is mechanical. What is left is the two ends the spike faked:
-  real capture in place of the synthesised tone (task 2.1) and real playback in
-  place of the Goertzel check, plus the UI. Move off `write_sample` while doing
-  it — DR-7 records why.
+  Built: `rtc/signaling.rs` (HTTP join + roster WebSocket + heartbeat),
+  `rtc/session.rs` (`Call`: join, publish, subscribe as the roster changes,
+  mute, deafen, leave), `audio/device.rs` (the `AudioSource`/`AudioSink` seam),
+  `audio/hardware.rs` (cpal behind it), Tauri commands, and the SolidJS UI.
+  `bin/call.rs` is a windowless client for two-machine testing; `bin/rtc-spike.rs`
+  now drives the real `Call` and checks a **two-way** conversation with crossed
+  tones. See DR-8 for what the live runs turned up.
+  **Not verified:** the DoD's two Windows machines. Everything here is hardware
+  agnostic and was exercised on macOS; the Windows leg needs a Windows host.
 - [ ] **2.5 [WIN] Latency measurement harness** — `client/src-tauri/src/bin/latency.rs`
   or in-app debug overlay. Measure mouth-to-ear latency (loopback tone timestamp
   method) across the real SFU path.
@@ -149,6 +155,11 @@ Goal: two clients talking through the SFU. Riskiest phase — spikes first.
   tracks, mix for playback; roster UI shows who's in the room and who's speaking.
   DoD: 4+ clients (mix of machines/VMs) converse; CPU stays in budget.
   Verify: manual multi-client session + `cargo test`.
+  Task 2.4 already subscribes to all seven and sums them, one ring per slot, in
+  the render callback — so nobody is inaudible today. What this task adds is the
+  real mixer: per-speaker gain, and the level metering the roster needs to show
+  who is talking. It also owns the CPU budget at four-plus clients, which has
+  never been measured.
 - [ ] **3.2 Mute / deafen** — `audio/`, `ui`. Mute halts encoding+sending (packets
   stop, not zeroed — assert in test via packet counter); deafen halts playback;
   state visible in roster for everyone (signaling message).
@@ -166,6 +177,11 @@ Goal: two clients talking through the SFU. Riskiest phase — spikes first.
   room, resubscribe all tracks; UI shows reconnecting state.
   DoD: kill network 10 s mid-call → call resumes without restart.
   Verify: scripted netdown test documented + manual run.
+  Task 2.4 covers reconnecting *into* a call — the join retries up to three
+  times, handing its seat back between attempts. What this task owns is a call
+  that drops after it started, which today just ends. Two known cases from DR-8
+  to cover: the ~1-in-6 handshake that still fails after three tries, and the
+  roommate holding a session id that a peer's own retry has already replaced.
 
 ## Phase 4 — Tray & polish
 
@@ -378,6 +394,9 @@ which is exactly what `#rejectedTracks` treats as accepted. The **rejection**
 shape is still unobserved, because nothing was rejected; that half of the
 inference stands until a publish actually fails.
 
+**Update (2026-08-20, task 2.4).** Now observed too, and the inference held:
+`errorCode` plus `errorDescription`, never `error`. DR-8 has the payload.
+
 ### DR-5: an in-memory roster does not survive a redeploy (2026-08-20)
 
 **Context.** The first `smoke.sh` run against the live Worker failed at the last
@@ -468,6 +487,111 @@ No latency number here: that is task 2.5's job and it needs real devices.
   defaults to a fresh random room code per run; `--room` overrides it, and
   re-running the same code inside the sweep window walks toward the 8-person
   cap.
+
+### DR-8: what a real call needed that the spike did not (2026-08-20)
+
+**Context.** Task 2.4 turned DR-7's one-way spike into a client that publishes
+and subscribes at once. That is a different problem: the same peer connection
+now has to keep sending while it renegotiates to receive. Four things broke, and
+none of them were visible in a spike that only did one direction.
+
+**1. The DTLS role reverses on renegotiation.** Our first offer is answered by
+Cloudflare with `a=setup:passive` — they are the DTLS server, we are the client.
+Every pull after that is *their* offer with `a=setup:actpass`, and `webrtc-rs`
+answers `passive` by default, claiming the server role for ourselves. The
+handshake restarts and the sender carrying the microphone dies with it. Fixed
+with `SettingEngine::set_answering_dtls_role(RTCDtlsRole::Client)`, so the
+answer says `active` and the role established at publish time survives.
+
+**2. A renegotiation rebuilds the sender.** Even with the role held, the SSRC
+and payload type captured at publish time can stop routing:
+`write_sample` starts returning `SendError(SenderRtp(…))` and the client goes
+silent while still believing it is talking. `Published` now holds both in
+atomics and re-reads them from the peer connection after every renegotiation.
+This was the single biggest win — 8/10 runs to 11/12.
+
+**3. The roster announces a track before it carries packets.** The room records
+a publish when Cloudflare accepts the publisher's `tracks/new`, which is before
+their DTLS finishes and well before their first RTP packet. A peer that
+subscribes on that announcement gets a per-track failure. Three codes mean "not
+yet" — `not_found_track_error`, `empty_track_error`,
+`transport_unavailable_error` — and are retried with backoff. Anything else is
+reported.
+
+**4. A failed subscription was permanent.** The roster is pushed only when it
+changes, so a peer whose pull failed stayed silent for the rest of the call. The
+subscribe loop now re-reconciles against the roster it already has every two
+seconds; it is a no-op when everyone is subscribed.
+
+**DR-6's open question, answered.** The per-track rejection shape is
+`errorCode` + `errorDescription`, never `error`:
+
+```json
+{"requiresImmediateRenegotiation":false,
+ "tracks":[{"errorCode":"not_found_track_error",
+            "errorDescription":"Track not found on remote peer. Make sure the
+              publisher peer is connected and sending packets for this track",
+            "mid":"","sessionId":"…","trackName":"mic"}]}
+```
+
+The Worker's `#rejectedTracks` already keys off `errorCode`, so it was right.
+Also newly observed: `requiresImmediateRenegotiation` is **not** always true on
+a pull — Cloudflare only offers when it needs a new m-section, and answering an
+answer that has no SDP in it was a real bug in the first draft.
+
+**The transport is not reliable on the first try, and never was.** Roughly one
+attempt in six fails to reach `Connected`. This is **not** new: the task 2.3
+spike, run unmodified from its own commit, fails the same way (1 in 6 over six
+runs). Two fixes and one deferral:
+
+- ICE now gathers from the routable local address rather than `0.0.0.0`.
+  Binding the wildcard offers a candidate per interface, and a machine with a
+  VPN or a container bridge has several that cannot reach Cloudflare. Since the
+  SFU is ice-lite — one remote candidate, no checks of its own (DR-7) — a bad
+  local pick has nothing to fall back to.
+- `Call::join` retries the whole exchange up to three times. The room WebSocket
+  is opened *before* the peer connection so a failed attempt can hand its seat
+  back with a `leave`; otherwise every retry would strand a participant in one
+  of the room's eight slots until the sweep (DR-5).
+- What is left belongs to **task 3.5**: a call that drops mid-conversation still
+  ends the call. 3.5 should also cover the narrow case seen here — a peer that
+  retried its join has a new session id, and a roommate holding the old roster
+  is refused by the proxy until the next push.
+
+**Measurements (macOS arm64, release, live deploy, two clients per run).**
+15 consecutive spike runs: **13 pass, 2 fail** — one join that exhausted its
+three attempts, one publisher that never started sending. The same measurement
+before this work was 6 of 10. Two real-device clients on one machine joined,
+published, saw each other's tracks appear on the roster, and left cleanly.
+No latency number: that is task 2.5 and it needs 2.1's devices.
+
+**Audio backend.** `cpal` sits behind `audio::device`'s seam as the backend,
+**not** as task 2.1's answer. It is cross-platform, so the voice path can be
+exercised off Windows, and it was: devices open at 48 kHz and frames flow. 2.1
+still owns the measurement and may add a `wasapi` backend beside it — the seam
+is what makes that a one-file change. goodvoice does not resample, so a device
+that cannot do 48 kHz is refused rather than silently degraded.
+
+**Consequences.**
+
+- DR-7 asked task 2.4 to move off `write_sample` because it allocates per
+  frame. It has not, and should not: the allocation is in a task on the far side
+  of the capture ring buffer, never inside a device callback, which is where
+  styleguide.md's rule applies. The callbacks themselves take no lock and make
+  no allocation.
+- Playback mixes up to seven remote speakers by saturating sum, one ring per
+  slot, summed in the render callback. Task 3.1 replaces that with a real mixer
+  — per-speaker gain and the level metering the roster needs to show who is
+  talking — but every peer is audible now rather than only the first.
+- `AudioSink::clear` asks the render callback to drain via an atomic flag
+  rather than draining from the producer side: only the consumer end can throw
+  queued audio away, and a peer who left should stop mid-word.
+- New client dependencies: `cpal`, `ringbuf`, `tokio-tungstenite` (rustls only),
+  `futures-util`.
+- `GOODVOICE_TRACE_SDP=1` dumps every negotiated SDP. Every hard problem on this
+  path so far has been visible there and nowhere else.
+- `GOODVOICE_SERVER` at build time points a client at a different Worker, which
+  docs/self-hosting.md (task 6.1) needs.
 
 ### DR-2: the client cannot talk to the SFU directly (2026-08-20)
 

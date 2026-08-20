@@ -48,6 +48,21 @@ reqwest = { version = "0.12", default-features = false, features = [
   "json",
   "rustls-tls",
 ] }
+# The roster arrives over a WebSocket, so the client needs a client-side one.
+# Same rustls-only reasoning as reqwest.
+tokio-tungstenite = { version = "0.30", default-features = false, features = [
+  "connect",
+  "rustls-tls-webpki-roots",
+] }
+futures-util = { version = "0.3", default-features = false, features = ["sink"] }
+# Lock-free SPSC between the device callbacks and the codec tasks. Hand-rolling
+# this is where real-time audio bugs come from (styleguide.md, Rust
+# conventions).
+ringbuf = "0.5"
+# The audio device backend behind `audio::device`'s seam. Cross-platform, so
+# the voice path can be exercised off Windows; whether it is also the Windows
+# backend is task 2.1's measurement to make — see DR-8.
+cpal = "0.18"
 anyhow = "1"
 
 [profile.release]
