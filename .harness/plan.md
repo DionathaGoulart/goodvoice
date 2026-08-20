@@ -37,14 +37,11 @@ Goal: repo builds, CI green, hello-world client and worker exist and deploy.
   DoD: all four commands pass clean:
   `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings`,
   `npx prettier --check .` (server and ui), `npx tsc --noEmit` (server and ui).
-- [ ] **0.4 CI** — `.github/workflows/ci.yml`. On push/PR: rust fmt+clippy+test
+- [x] **0.4 CI** — `.github/workflows/ci.yml`. On push/PR: rust fmt+clippy+test
   (windows-latest runner), server/ui prettier+tsc, `wrangler deploy --dry-run`.
   DoD: workflow file is valid and passes on push.
   Verify: `gh run watch` on the push, or `act` locally if available.
-  **Blocked on:** no git remote yet, and neither `act` nor `actionlint` is
-  installed. The file parses and every step's command was run by hand and
-  passes (rust gates on macOS, not the windows-latest runner). Check the box
-  only after a real run is green.
+  Green on run 32386485723 — all four jobs, including rust on windows-latest.
 - [ ] **0.5 [WIN] Hardware risk probe (spike)** — `client/src-tauri/src/bin/probe.rs`.
   Tiny binary that (a) enumerates WASAPI render/capture devices + their shared-mode
   min buffer sizes, (b) enumerates Media Foundation H.264 encoders and flags which
@@ -105,11 +102,13 @@ Goal: two clients talking through the SFU. Riskiest phase — spikes first.
   DoD: mic loopback audible; round-trip device latency measured and recorded in DR.
   Verify: `cargo test -p goodvoice-client audio` + manual loopback run
   (`cargo run --bin audio-spike`).
-- [ ] **2.2 Opus encode/decode pipeline** — `client/src-tauri/src/audio/opus.rs`.
+- [x] **2.2 Opus encode/decode pipeline** — `client/src-tauri/src/audio/opus.rs`.
   20 ms frames, 48 kHz, 32 kbps start; encode→decode round-trip preserves audio.
   DoD: unit tests with synthetic tones; no allocation on the frame path (assert
   with a counting allocator in test builds).
   Verify: `cargo test -p goodvoice-client opus`.
+  Done out of order — it is not [WIN] and does not depend on 2.1's outcome.
+  See DR-3 (crate choice) and DR-4 (CMake pin).
 - [ ] **2.3 [WIN] webrtc-rs ↔ Cloudflare SFU spike** — `client/src-tauri/src/rtc/`.
   Prove webrtc-rs can complete ICE/DTLS with Realtime SFU and push an Opus track
   (PRD open question 2). This is the project's biggest unknown — if blocked,
@@ -259,6 +258,54 @@ candidates must not drop a call that STUN alone would have connected.
 docs/self-hosting.md (task 6.1) must document all four and say which are
 optional. A session that the SFU refuses *does* fail the join (502
 `sfu_unavailable`) and the reserved roster slot is rolled back.
+
+### DR-3: `opus` crate instead of `audiopus` (2026-08-20)
+
+**Context.** prd.md §7 names `audiopus` for the Opus binding. Task 2.2 needed it
+to build on macOS (dev) and windows-latest (CI).
+
+**Options considered.**
+
+| | `audiopus` 0.2.0 | `opus` 0.3.1 |
+|---|---|---|
+| Last release | Apr 2021 | Jan 2026 |
+| `-sys` crate | `audiopus_sys` 0.1.8 | `audiopus_sys` 0.2.2 |
+| libopus source | **not vendored** — needs a system libopus found via `pkg-config` | vendored, built with CMake |
+| Extra build tooling | `pkg-config` **and** `bindgen` (so libclang) on every host | CMake only |
+| Default features | broken: the feature is named `default_features`, not `default`, so `coder` is off unless named explicitly | none needed |
+
+**Decision.** Use `opus` 0.3.1. It is the same libopus behind an equally thin
+safe wrapper — `encode(&[i16], &mut [u8]) -> usize`, no hidden allocation — so
+the runtime cost is identical and the PRD's performance tiebreaker does not
+separate them. What separates them is that `audiopus` would put libclang and a
+system libopus on the critical path of every dev machine and CI runner.
+
+**Consequences.** prd.md §7's "Opus via `audiopus`" row is now wrong; the
+wrapper is confined to `audio/opus.rs`, so swapping back is a one-file change if
+`audiopus` is ever revived. Packet loss is spelled `decode(&[], …)` in this
+binding, wrapped as `VoiceDecoder::conceal`.
+
+**Measurements (macOS arm64, debug).** 20 ms mono frames, 48 kHz: 100
+encode+decode round trips allocate **zero** times (counting global allocator in
+the test build). Steady-state packet at 32 kbps ≈ 115 bytes for a 440 Hz tone,
+≈ 61 bytes for silence.
+
+### DR-4: CMake policy pin for the vendored libopus (2026-08-20)
+
+**Context.** `audiopus_sys` 0.2.2 vendors a libopus whose `CMakeLists.txt`
+declares `cmake_minimum_required(VERSION 3.1)`. CMake 4 removed compatibility
+with anything below 3.5 and fails the configure step outright:
+`Compatibility with CMake < 3.5 has been removed from CMake.`
+
+**Decision.** `client/src-tauri/.cargo/config.toml` sets
+`CMAKE_POLICY_VERSION_MINIMUM = "3.5"` for every cargo invocation. Committed, so
+a fresh clone and CI build identically instead of each machine needing the
+export. Remove it when `audiopus_sys` ships a libopus with a modern
+`CMakeLists.txt`.
+
+**Consequences.** Building the client needs `cmake` on PATH — add it to
+docs/self-hosting.md's contributor section (task 6.1). GitHub's runners already
+have it.
 
 ### DR-2: the client cannot talk to the SFU directly (2026-08-20)
 

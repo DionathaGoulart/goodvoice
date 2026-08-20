@@ -1,0 +1,7 @@
+[env]
+# audiopus_sys vendors a libopus whose CMakeLists still declares
+# `cmake_minimum_required(VERSION 3.1)`, which CMake 4 refuses outright. This
+# tells CMake to apply 3.5-era policies instead of failing. Committed rather
+# than left to each machine so a fresh clone and CI build identically.
+# Drop it when audiopus_sys ships a libopus with a modern CMakeLists.
+CMAKE_POLICY_VERSION_MINIMUM = "3.5"

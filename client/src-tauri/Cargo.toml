@@ -28,6 +28,10 @@ tauri-build = { version = "2.6", features = [] }
 tauri = { version = "2.11", features = [] }
 serde = { version = "1", features = ["derive"] }
 thiserror = "2"
+# `opus` over `audiopus` — see DR-3 in .harness/plan.md. It pulls
+# audiopus_sys 0.2, which vendors libopus and builds it with CMake, so no host
+# needs a system libopus or libclang.
+opus = "0.3"
 
 [profile.release]
 codegen-units = 1
