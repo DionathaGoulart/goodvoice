@@ -68,29 +68,28 @@ No Rust in this phase — Worker + DO only, integration-tested with vitest.
   routes to DO by room code (idFromName), `GET /rooms/:code/ws` → WebSocket upgrade
   proxied to DO, `GET /health`. No other routes. CORS: `origin: *`.
   DoD: route tests pass. Verify: `npx vitest run`.
-- [ ] **1.3 Realtime SFU credential exchange** — `server/src/room.ts` + new
+- [x] **1.3 Realtime SFU credential exchange** — `server/src/room.ts` + new
   `server/src/sfu.ts`. On join, DO calls Cloudflare Realtime API
   (`CALLS_APP_ID`/`CALLS_APP_SECRET` secrets) to create a session; returns session
   credentials + TURN credentials to the client. Bitrate caps read from
   `MAX_VIDEO_BITRATE`/`MAX_AUDIO_BITRATE` env vars (cloudflare/meet pattern).
   DoD: mocked-API tests pass; a real `wrangler dev --remote` join returns live
   credentials. Verify: `npx vitest run` + manual curl against dev deploy.
-  **Half done:** code and mocked tests are in (36 tests green, see DR-1/DR-2).
-  The live `--remote` check is blocked on the Cloudflare account switch and a
-  Realtime app existing. Check the box after that run.
+  Verified live against the deploy from task 1.5: a join answers a real
+  `sessionId` plus Cloudflare TURN `iceServers` with username/credential (all
+  four secrets set, see DR-1). Mocked tests still cover the failure paths.
 - [x] **1.4 Timeout cleanup + room death** — `server/src/room.ts`. Heartbeat over
   WS; missed heartbeats (e.g. 30 s) evict the participant; DO alarm as backstop;
   empty room leaves zero state behind.
   DoD: tests simulate silent disconnect → eviction → empty-room reset.
   Verify: `npx vitest run`.
-- [ ] **1.5 Deploy to real Cloudflare** — `server/`. `wrangler deploy` to a test
+- [x] **1.5 Deploy to real Cloudflare** — `server/`. `wrangler deploy` to a test
   account; document required secrets in `wrangler.toml` comments.
   DoD: deployed URL passes health + join flow with curl/websocat script committed
   as `server/scripts/smoke.sh`. Verify: `bash server/scripts/smoke.sh <url>`.
-  **Blocked on:** the Cloudflare account switch (a project-scoped API token in
-  `server/.env`, see `.env.example`) plus a Realtime app for the two `CALLS_*`
-  secrets. `smoke.sh` is written and passes against `wrangler dev` with a local
-  stand-in for the Realtime API; only the real deploy is missing.
+  Live at **https://goodvoice.goodvoice-server.workers.dev** (account
+  `de05ba5339883a30422ae126363028fc`), all four smoke checks green. See DR-5 for
+  why the run right after a `wrangler secret put` is expected to flake.
 
 ## Phase 2 — Voice MVP (2 people)
 
@@ -306,6 +305,28 @@ export. Remove it when `audiopus_sys` ships a libopus with a modern
 **Consequences.** Building the client needs `cmake` on PATH — add it to
 docs/self-hosting.md's contributor section (task 6.1). GitHub's runners already
 have it.
+
+### DR-5: an in-memory roster does not survive a redeploy (2026-08-20)
+
+**Context.** The first `smoke.sh` run against the live Worker failed at the last
+check with `the room never filled up` — twelve joins in a row, never a 409. The
+same loop against a fresh room a minute later filled at exactly eight. The run
+had followed four back-to-back `wrangler secret put` calls.
+
+**Cause.** Every `secret put` publishes a new Worker version, which restarts the
+Durable Object. Room state is in memory only (prd.md §7), so each restart drops
+the roster back to zero and the cap can never be reached while versions keep
+rolling. Ordinary DO eviction after an idle period does the same thing.
+
+**Decision.** Keep the in-memory design — this is the documented trade for rooms
+that leave nothing behind. Treat it as an operational fact instead: run
+`smoke.sh` *after* the deploy has settled, never interleaved with secret
+uploads, and expect a live call to drop on redeploy.
+
+**Consequences.** Task 3.5 (auto-reconnect) is what makes this survivable for
+users: a client whose room evaporated mid-call must rejoin the same code rather
+than surface an error. docs/self-hosting.md (task 6.1) should say plainly that
+pushing a new Worker version ends every call in progress.
 
 ### DR-2: the client cannot talk to the SFU directly (2026-08-20)
 
