@@ -272,6 +272,11 @@ body {
   color: var(--palette-error);
 }
 
+/* A call that dropped is trying, not dead — the colour says "wait", not "gone". */
+.notice-warn {
+  color: var(--palette-warn);
+}
+
 /* Entrance: fade + short slide, ease-out, zero overshoot (styleguide.md §2.4). */
 .animate-enter {
   animation: enter 200ms cubic-bezier(0.22, 1, 0.36, 1) both;

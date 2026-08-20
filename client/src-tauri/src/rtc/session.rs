@@ -1,8 +1,11 @@
 //! One call: join a room, publish the microphone, play everyone else.
 //!
-//! The session owns a single peer connection to the Realtime SFU. The
-//! microphone goes up once at join; every remote `mic` track is pulled as the
-//! roster reveals it, and each gets a playback slot for the length of its stay.
+//! A call outlives the connection it runs on. [`Call`] is a supervisor: it owns
+//! the microphone and the room's state for as long as the user is in the room,
+//! and underneath it sessions come and go. A session is one seat in the room —
+//! one participant id, one Realtime session, one peer connection — and when it
+//! dies the supervisor takes another one and republishes onto it (task 3.5,
+//! [`super::reconnect`]).
 //!
 //! Audio reaches this module only through [`crate::audio::device`], so the same
 //! code drives real hardware, a synthetic tone, or nothing at all.
@@ -30,7 +33,7 @@ use rtc::{
 };
 use serde_json::{json, Value};
 use tokio::{
-    sync::{mpsc, watch},
+    sync::{mpsc, watch, Notify},
     task::JoinHandle,
 };
 use webrtc::{
@@ -49,12 +52,18 @@ use webrtc::{
 };
 
 use super::{
-    signaling::{ClientMessage, IceServer, Participant, ServerMessage, SfuOperation, Signaling},
+    reconnect::{Backoff, CallState, EndReason},
+    signaling::{
+        ClientMessage, IceServer, JoinResponse, Participant, ServerMessage, SfuOperation, Signaling,
+    },
     RtcError,
 };
 use crate::audio::{
     device::{AudioSink, AudioSource, MAX_REMOTE_SLOTS},
-    opus::{silent_frame, VoiceDecoder, VoiceEncoder, FRAME_MS, MAX_PACKET_BYTES, SAMPLE_RATE_HZ},
+    mixer::{peak, Meter, MAX_GAIN, SPEAKING_LEVEL},
+    opus::{
+        silent_frame, Frame, VoiceDecoder, VoiceEncoder, FRAME_MS, MAX_PACKET_BYTES, SAMPLE_RATE_HZ,
+    },
 };
 
 /// The track name a goodvoice client publishes its microphone under. A closed
@@ -82,14 +91,29 @@ const SUBSCRIBE_BACKOFF: Duration = Duration::from_millis(500);
 /// silent until the roster happens to change again.
 const RESUBSCRIBE_INTERVAL: Duration = Duration::from_secs(2);
 
+/// How often the speaking indicator is recomputed. Fast enough that the roster
+/// lights up with the first syllable rather than after it, slow enough that a
+/// room full of listeners is doing nothing ten times a second.
+const METER_INTERVAL: Duration = Duration::from_millis(100);
+
 /// How many times to build a peer connection before giving up on the room, and
 /// the unit of backoff between tries (multiplied by the attempt number).
 const JOIN_ATTEMPTS: u32 = 3;
 const JOIN_BACKOFF: Duration = Duration::from_millis(600);
 
-/// Consecutive failed microphone frames before the publish loop stops trying.
+/// How long ICE may sit in `Disconnected` before the session is written off.
+///
+/// `Disconnected` is recoverable in principle — but not against an ice-lite SFU
+/// that offers one candidate and runs no checks of its own (DR-7), where there
+/// is nothing left to re-pair with. Three seconds is long enough that a blip
+/// does not cost a rejoin and short enough that the user is not talking to
+/// nobody for the ~30 s webrtc-rs takes to declare `Failed`.
+const DISCONNECT_GRACE: Duration = Duration::from_secs(3);
+
+/// Consecutive failed microphone frames before the session is declared lost.
 /// 50 frames is one second — long enough to ride out a renegotiation, short
-/// enough that a client which has genuinely lost its sender says so.
+/// enough that a client which has genuinely lost its sender reconnects rather
+/// than talking into a closed socket.
 const PUBLISH_FAILURE_LIMIT: usize = 50;
 
 /// Where to call, and as whom.
@@ -147,7 +171,7 @@ async fn connect_once(
 /// Builds the transport and gets the microphone onto it.
 async fn establish(
     signaling: &Signaling,
-    joined: &crate::rtc::signaling::JoinResponse,
+    joined: &JoinResponse,
 ) -> Result<(Arc<dyn PeerConnection>, Signals, Published), RtcError> {
     let (events, signals) = Events::new();
     let peer: Arc<dyn PeerConnection> = Arc::new(open_peer(&joined.sfu.ice_servers, events).await?);
@@ -158,15 +182,180 @@ async fn establish(
     Ok((peer, signals, published))
 }
 
+// --- what survives a reconnect ---------------------------------------------
+
+/// Everything a call keeps across the sessions it runs on.
+///
+/// A session is disposable — new participant id, new Realtime session, new peer
+/// connection. What the user thinks of as "the call" is this: the room they are
+/// in, whether they are muted, and what the UI is being told. Held in one place
+/// so a rejoin can restore it rather than reset it.
+struct Shared {
+    muted: AtomicBool,
+    deafened: AtomicBool,
+    /// Set by [`Call::leave`]. Every loop checks it before treating a closed
+    /// socket as a failure — a call the user ended is not a call that dropped.
+    leaving: AtomicBool,
+    /// The room's command channel for whichever session is current. Replaced on
+    /// every rejoin; `None` while there is no session to talk to.
+    commands: Mutex<Option<mpsc::Sender<ClientMessage>>>,
+    state: watch::Sender<CallState>,
+    self_id: watch::Sender<String>,
+    roster: watch::Sender<Vec<Participant>>,
+    /// Who is talking right now, this client included. Pushed only when the set
+    /// changes, so a quiet room costs the UI nothing.
+    speaking: watch::Sender<Vec<String>>,
+    /// Where remote audio goes, and where its levels come from.
+    sink: Arc<dyn AudioSink>,
+    /// Which playback slot each participant is being played in. Written by
+    /// `reconcile`, read by anything that wants to meter or re-mix one peer by
+    /// name rather than by slot.
+    slots: Mutex<HashMap<String, usize>>,
+    /// How loud this client's own microphone has been. Fed by the encode loop,
+    /// which is the only place the outgoing signal exists.
+    microphone: Meter,
+    /// Rung when the microphone's sender stops working. `notify_one` rather
+    /// than `notify_waiters` so a report that lands between two polls of the
+    /// session loop is kept rather than dropped.
+    lost: Notify,
+}
+
+impl Shared {
+    fn new(self_id: String, participants: Vec<Participant>, sink: Arc<dyn AudioSink>) -> Arc<Self> {
+        Arc::new(Self {
+            muted: AtomicBool::new(false),
+            deafened: AtomicBool::new(false),
+            leaving: AtomicBool::new(false),
+            commands: Mutex::new(None),
+            state: watch::Sender::new(CallState::Live),
+            self_id: watch::Sender::new(self_id),
+            roster: watch::Sender::new(participants),
+            speaking: watch::Sender::new(Vec::new()),
+            sink,
+            slots: Mutex::new(HashMap::new()),
+            microphone: Meter::new(),
+            lost: Notify::new(),
+        })
+    }
+
+    fn is_leaving(&self) -> bool {
+        self.leaving.load(Ordering::Relaxed)
+    }
+
+    /// Whether the encode loop should be putting packets on the wire.
+    fn is_transmitting(&self) -> bool {
+        !self.muted.load(Ordering::Relaxed)
+    }
+
+    /// The playback slot a participant is being played in, if any.
+    fn slot_of(&self, participant: &str) -> Option<usize> {
+        self.slots.lock().ok()?.get(participant).copied()
+    }
+
+    /// Rebuilds the set of people who are talking, and pushes it only if it
+    /// moved.
+    ///
+    /// Sorted so two identical sets compare equal: the point of the comparison
+    /// is to leave a quiet room pushing nothing at all.
+    fn refresh_speaking(&self) {
+        let mut talking: Vec<String> = self
+            .slots
+            .lock()
+            .map(|slots| {
+                slots
+                    .iter()
+                    .filter(|(_, &slot)| self.sink.level(slot) >= SPEAKING_LEVEL)
+                    .map(|(id, _)| id.clone())
+                    .collect()
+            })
+            .unwrap_or_default();
+
+        // Muted is not talking, whatever the microphone says.
+        if self.microphone.is_speaking() && self.is_transmitting() {
+            talking.push(self.self_id.borrow().clone());
+        }
+        talking.sort_unstable();
+
+        if *self.speaking.borrow() != talking {
+            self.speaking.send_replace(talking);
+        }
+    }
+
+    /// Hands a message to whichever session is current. Silently dropped when
+    /// there is none: a mute pressed while reconnecting is replayed by
+    /// [`Self::adopt`] when the new seat comes up.
+    async fn tell_room(&self, message: ClientMessage) {
+        let sender = self
+            .commands
+            .lock()
+            .ok()
+            .and_then(|commands| commands.clone());
+        if let Some(sender) = sender {
+            let _ = sender.send(message).await;
+        }
+    }
+
+    /// Points the call at a freshly connected session.
+    async fn adopt(
+        &self,
+        session: &Session,
+        published: &watch::Sender<Option<Arc<dyn PacketSink>>>,
+    ) {
+        if let Ok(mut commands) = self.commands.lock() {
+            *commands = Some(session.commands.clone());
+        }
+        self.self_id.send_replace(session.self_id.clone());
+        self.roster.send_replace(session.participants.clone());
+        published.send_replace(Some(
+            Arc::new(session.published.clone()) as Arc<dyn PacketSink>
+        ));
+        self.state.send_replace(CallState::Live);
+
+        // The room has no memory of this client, so anything the user set
+        // before the drop has to be said again. Local state is the truth here;
+        // the roster everyone else sees is the copy.
+        if self.muted.load(Ordering::Relaxed) {
+            self.tell_room(ClientMessage::Mute { muted: true }).await;
+        }
+        if self.deafened.load(Ordering::Relaxed) {
+            self.tell_room(ClientMessage::Deafen { deafened: true })
+                .await;
+        }
+    }
+
+    /// Marks the call over and stops talking to a room that is no longer there.
+    fn finish(&self, reason: EndReason) {
+        if let Ok(mut commands) = self.commands.lock() {
+            *commands = None;
+        }
+        self.state.send_replace(CallState::Ended(reason));
+    }
+
+    /// Throws away a failure report left over from the session that just
+    /// ended, so it cannot end the next one before it starts.
+    ///
+    /// `notified()` resolves immediately when a permit is waiting and never
+    /// otherwise; racing it against a future that is already ready is what
+    /// turns "take the permit if there is one" into a single poll.
+    async fn drain_lost(&self) {
+        tokio::select! {
+            biased;
+            () = self.lost.notified() => {}
+            () = std::future::ready(()) => {}
+        }
+    }
+}
+
 /// A live call. Dropping it leaves the room.
 pub struct Call {
-    self_id: String,
-    commands: mpsc::Sender<ClientMessage>,
+    shared: Arc<Shared>,
     roster: watch::Receiver<Vec<Participant>>,
-    muted: Arc<AtomicBool>,
-    deafened: Arc<AtomicBool>,
-    /// Kept alive for the length of the call; closing it tears down ICE.
-    peer: Arc<dyn PeerConnection>,
+    state: watch::Receiver<CallState>,
+    self_id: watch::Receiver<String>,
+    speaking: watch::Receiver<Vec<String>>,
+    /// The supervisor, kept apart from the rest so [`Self::leave`] can wait for
+    /// it to close the transport before the process moves on.
+    supervisor: Option<JoinHandle<()>>,
     tasks: Vec<JoinHandle<()>>,
 }
 
@@ -174,7 +363,9 @@ impl Call {
     /// Joins `options.room` and starts sending and receiving audio.
     ///
     /// Returns once the microphone is published and the transport has
-    /// connected — a `Call` that exists is a call you are audible on.
+    /// connected — a `Call` that exists is a call you are audible on. After
+    /// that the call keeps itself alive: a session that drops is rebuilt in the
+    /// background and [`Self::state`] reports what is happening.
     ///
     /// # Errors
     ///
@@ -196,7 +387,7 @@ impl Call {
         let mut last = RtcError::NotConnected;
         for attempt in 1..=JOIN_ATTEMPTS {
             match connect_once(&signaling, &options).await {
-                Ok(session) => return Ok(Self::start(signaling, session, source, sink)),
+                Ok(session) => return Ok(Self::start(signaling, options, session, source, sink)),
                 Err(error) if attempt < JOIN_ATTEMPTS && error.is_worth_retrying() => {
                     eprintln!("join attempt {attempt} failed ({error}); retrying");
                     last = error;
@@ -211,49 +402,64 @@ impl Call {
     /// Turns a connected session into a running call.
     fn start(
         signaling: Arc<Signaling>,
+        options: CallOptions,
         session: Session,
         source: Box<dyn AudioSource>,
         sink: Arc<dyn AudioSink>,
     ) -> Self {
-        let muted = Arc::new(AtomicBool::new(false));
-        let deafened = Arc::new(AtomicBool::new(false));
-        let (roster_tx, roster) = watch::channel(session.participants.clone());
+        let shared = Shared::new(session.self_id.clone(), session.participants.clone(), sink);
+        let (roster, state, self_id, speaking) = (
+            shared.roster.subscribe(),
+            shared.state.subscribe(),
+            shared.self_id.subscribe(),
+            shared.speaking.subscribe(),
+        );
 
-        let tasks = vec![
-            tokio::spawn(publish_loop(
-                source,
-                session.published.clone(),
-                Arc::clone(&muted),
-            )),
-            tokio::spawn(subscribe_loop(SubscribeLoop {
+        // The microphone is opened once and read for the life of the call. What
+        // changes underneath it is where the packets go: `None` while there is
+        // no session, which is exactly what a client should be putting on the
+        // wire while it has no seat in the room.
+        let (published, sinks) = watch::channel(None);
+
+        let tasks = vec![tokio::spawn(publish_loop(
+            source,
+            sinks,
+            Arc::clone(&shared),
+        ))];
+        let supervisor = tokio::spawn(supervise(
+            Supervisor {
                 signaling,
-                self_id: session.self_id.clone(),
-                peer: Arc::clone(&session.peer),
-                signals: session.signals,
-                published: session.published,
-                sink,
-                deafened: Arc::clone(&deafened),
-                inbound: session.inbound,
-                roster_tx,
-                initial: session.participants,
-            })),
-        ];
+                options,
+                shared: Arc::clone(&shared),
+                published,
+            },
+            session,
+        ));
 
         Self {
-            self_id: session.self_id,
-            commands: session.commands,
+            shared,
             roster,
-            muted,
-            deafened,
-            peer: session.peer,
+            state,
+            self_id,
+            speaking,
+            supervisor: Some(supervisor),
             tasks,
         }
     }
 
     /// This client's participant id, as everyone else sees it.
+    ///
+    /// It changes when a dropped call reconnects: the seat is new, and so is
+    /// the identity attached to it.
     #[must_use]
-    pub fn self_id(&self) -> &str {
-        &self.self_id
+    pub fn self_id(&self) -> String {
+        self.self_id.borrow().clone()
+    }
+
+    /// This client's participant id, updated on every rejoin.
+    #[must_use]
+    pub fn self_id_watch(&self) -> watch::Receiver<String> {
+        self.self_id.clone()
     }
 
     /// The room, updated as people come and go.
@@ -262,28 +468,82 @@ impl Call {
         self.roster.clone()
     }
 
+    /// Live, reconnecting, or over — see [`CallState`].
+    #[must_use]
+    pub fn state(&self) -> watch::Receiver<CallState> {
+        self.state.clone()
+    }
+
+    /// Who is talking, this client included.
+    ///
+    /// Pushed only when the set changes, so a room full of people listening
+    /// costs nothing at all — which is the point, given the client has to idle
+    /// under 2% CPU (prd.md §4).
+    #[must_use]
+    pub fn speaking(&self) -> watch::Receiver<Vec<String>> {
+        self.speaking.clone()
+    }
+
+    /// How loud one participant is right now, `0.0`–`1.0`. Unknown ids and
+    /// participants with no audio yet read as silence.
+    #[must_use]
+    pub fn level_of(&self, participant: &str) -> f32 {
+        if *self.self_id.borrow() == participant {
+            return self.shared.microphone.level();
+        }
+        self.shared
+            .slot_of(participant)
+            .map_or(0.0, |slot| self.shared.sink.level(slot))
+    }
+
+    /// Turns one participant up or down for this listener only, `0.0`–4.0.
+    ///
+    /// Per-listener because that is the only kind that needs nobody's
+    /// agreement: a speaker who is too quiet for you may be fine for everyone
+    /// else, and asking them to change is a conversation, not a feature.
+    pub fn set_gain_of(&self, participant: &str, gain: f32) {
+        if let Some(slot) = self.shared.slot_of(participant) {
+            self.shared.sink.set_gain(slot, gain.clamp(0.0, MAX_GAIN));
+        }
+    }
+
     /// Stops sending audio. Packets stop entirely rather than carrying
     /// silence, so a muted client costs the room nothing (prd.md §3 F1).
     pub async fn set_muted(&self, muted: bool) {
-        self.muted.store(muted, Ordering::Relaxed);
-        let _ = self.commands.send(ClientMessage::Mute { muted }).await;
+        self.shared.muted.store(muted, Ordering::Relaxed);
+        self.shared.tell_room(ClientMessage::Mute { muted }).await;
     }
 
     #[must_use]
     pub fn is_muted(&self) -> bool {
-        self.muted.load(Ordering::Relaxed)
+        self.shared.muted.load(Ordering::Relaxed)
     }
 
     /// Stops playing audio. The tracks stay subscribed: re-deafening should be
     /// instant, and a renegotiation round trip would not be.
     pub async fn set_deafened(&self, deafened: bool) {
-        self.deafened.store(deafened, Ordering::Relaxed);
-        let _ = self.commands.send(ClientMessage::Deafen { deafened }).await;
+        self.shared.deafened.store(deafened, Ordering::Relaxed);
+        self.shared
+            .tell_room(ClientMessage::Deafen { deafened })
+            .await;
     }
 
     #[must_use]
     pub fn is_deafened(&self) -> bool {
-        self.deafened.load(Ordering::Relaxed)
+        self.shared.deafened.load(Ordering::Relaxed)
+    }
+
+    /// Throws the current seat away and takes another one, as if the transport
+    /// had died underneath it.
+    ///
+    /// This is the drill in `bin/reconnect-drill.rs`: killing a real network
+    /// needs a privileged tool and a second machine, and neither is available
+    /// to a test that has to run anywhere. What it exercises is the same code
+    /// a real drop runs — rejoin, republish, resubscribe — from the point the
+    /// session is declared lost. See docs/testing/reconnect.md for the run that
+    /// takes the network away for real.
+    pub fn drop_session(&self) {
+        self.shared.lost.notify_one();
     }
 
     /// Leaves the room and closes the transport.
@@ -292,8 +552,17 @@ impl Call {
     /// else; dropping the `Call` without this works too, but the roster only
     /// catches up on the next heartbeat sweep.
     pub async fn leave(mut self) {
-        let _ = self.commands.send(ClientMessage::Leave).await;
-        let _ = self.peer.close().await;
+        // Before the message, not after: a socket closing on the way out must
+        // read as an ending rather than as the drop that starts a reconnect.
+        self.shared.leaving.store(true, Ordering::Relaxed);
+        self.shared.tell_room(ClientMessage::Leave).await;
+        self.shared.lost.notify_one();
+
+        if let Some(supervisor) = self.supervisor.take() {
+            // Bounded: the supervisor closes the peer connection on its way
+            // out, which is worth waiting for, but not worth hanging on.
+            let _ = tokio::time::timeout(Duration::from_secs(2), supervisor).await;
+        }
         for task in self.tasks.drain(..) {
             task.abort();
         }
@@ -302,10 +571,219 @@ impl Call {
 
 impl Drop for Call {
     fn drop(&mut self) {
-        for task in &self.tasks {
+        self.shared.leaving.store(true, Ordering::Relaxed);
+        for task in self.tasks.iter().chain(self.supervisor.iter()) {
             task.abort();
         }
     }
+}
+
+// --- the supervisor --------------------------------------------------------
+
+/// Everything the supervisor needs for the life of the call.
+struct Supervisor {
+    signaling: Arc<Signaling>,
+    options: CallOptions,
+    shared: Arc<Shared>,
+    published: watch::Sender<Option<Arc<dyn PacketSink>>>,
+}
+
+/// Why a session stopped.
+enum SessionEnd {
+    /// The user left, or the call is being torn down.
+    Left,
+    /// The seat is gone. The reason is for the log, not for a decision.
+    Dropped(String),
+}
+
+/// Runs sessions back to back for as long as the user stays in the room.
+///
+/// The room keeps nothing (DR-5), so there is nothing to resume: every
+/// reconnect is a fresh join that republishes the microphone and pulls every
+/// roommate again. What the user typed — the room code — is the only thing
+/// carried across.
+async fn supervise(supervisor: Supervisor, first: Session) {
+    let mut session = first;
+    let mut backoff = Backoff::new();
+
+    loop {
+        supervisor
+            .shared
+            .adopt(&session, &supervisor.published)
+            .await;
+        supervisor.shared.drain_lost().await;
+
+        let end = run_session(&supervisor, session).await;
+        // Nowhere to send audio until there is a new seat. The encode loop
+        // keeps draining the microphone so the capture ring cannot overflow.
+        supervisor.published.send_replace(None);
+
+        if supervisor.shared.is_leaving() || matches!(end, SessionEnd::Left) {
+            supervisor.shared.finish(EndReason::Left);
+            return;
+        }
+
+        if let SessionEnd::Dropped(detail) = end {
+            eprintln!("call dropped ({detail}); reconnecting");
+        }
+
+        match reconnect(&supervisor, &mut backoff).await {
+            Ok(next) => {
+                session = next;
+                backoff.reset();
+            }
+            Err(reason) => {
+                supervisor.shared.finish(reason);
+                return;
+            }
+        }
+    }
+}
+
+/// Takes a new seat in the same room, on the schedule in [`super::reconnect`].
+async fn reconnect(supervisor: &Supervisor, backoff: &mut Backoff) -> Result<Session, EndReason> {
+    let mut detail = "the room stopped answering".to_owned();
+
+    loop {
+        let Some(delay) = backoff.next_delay() else {
+            return Err(EndReason::Unreachable { detail });
+        };
+        supervisor
+            .shared
+            .state
+            .send_replace(CallState::Reconnecting {
+                attempt: backoff.attempt(),
+            });
+
+        tokio::time::sleep(delay).await;
+        if supervisor.shared.is_leaving() {
+            return Err(EndReason::Left);
+        }
+
+        match connect_once(&supervisor.signaling, &supervisor.options).await {
+            Ok(session) => return Ok(session),
+            // A full room is worth waiting out here and not on a first join:
+            // the seat that filled it may be this client's own, held by the
+            // room until the heartbeat sweep clears it (DR-5).
+            Err(error) if error.is_worth_retrying() || error.is_room_full() => {
+                detail = error.to_string();
+            }
+            Err(error) => {
+                return Err(EndReason::Refused {
+                    detail: error.to_string(),
+                })
+            }
+        }
+    }
+}
+
+/// Follows one seat until it stops working.
+///
+/// Pulls every `mic` the roster reveals, drops every one that goes away,
+/// republishes the roster for the UI, and watches the four ways a session can
+/// end: the transport failing, the room hanging up, the microphone's sender
+/// dying, or the user leaving.
+async fn run_session(supervisor: &Supervisor, session: Session) -> SessionEnd {
+    let mut inbound = session.inbound;
+    let subscriber = Subscriber {
+        signaling: Arc::clone(&supervisor.signaling),
+        shared: Arc::clone(&supervisor.shared),
+        self_id: session.self_id,
+        peer: session.peer,
+        signals: session.signals,
+        published: session.published,
+    };
+
+    let mut playing: HashMap<String, Subscription> = HashMap::new();
+    let mut latest = session.participants;
+    reconcile(&subscriber, &mut playing, &latest).await;
+
+    let mut retry = tokio::time::interval(RESUBSCRIBE_INTERVAL);
+    retry.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    let mut meter = tokio::time::interval(METER_INTERVAL);
+    meter.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    let mut connection = subscriber.signals.connection.clone();
+
+    // Armed when ICE first reports `Disconnected` and disarmed if it comes
+    // back; firing is what turns a stall into a reconnect.
+    let grace = tokio::time::sleep(Duration::from_secs(0));
+    tokio::pin!(grace);
+    let mut stalled = false;
+
+    let end = loop {
+        tokio::select! {
+            message = inbound.recv() => {
+                let Some(message) = message else {
+                    break SessionEnd::Dropped("the room closed the connection".to_owned());
+                };
+                match message {
+                    ServerMessage::Welcome { participants, .. }
+                    | ServerMessage::Roster { participants } => {
+                        latest = participants;
+                        subscriber.shared.roster.send_replace(latest.clone());
+                        reconcile(&subscriber, &mut playing, &latest).await;
+                    }
+                    ServerMessage::Error { code, message } => {
+                        eprintln!("room error: {message} ({code})");
+                    }
+                }
+            }
+            _ = retry.tick() => {
+                // The roster is pushed only when it changes, so a subscription
+                // that failed would otherwise leave that speaker silent for the
+                // rest of the call. A no-op when everyone is already subscribed.
+                reconcile(&subscriber, &mut playing, &latest).await;
+            }
+            _ = meter.tick() => {
+                // Reading eight atomics; the push after it happens only when
+                // somebody started or stopped talking.
+                subscriber.shared.refresh_speaking();
+            }
+            changed = connection.changed() => {
+                if changed.is_err() {
+                    break SessionEnd::Dropped("the peer connection went away".to_owned());
+                }
+                let state = *connection.borrow_and_update();
+                match state {
+                    RTCPeerConnectionState::Connected => stalled = false,
+                    RTCPeerConnectionState::Disconnected if !stalled => {
+                        stalled = true;
+                        grace.as_mut().reset(tokio::time::Instant::now() + DISCONNECT_GRACE);
+                    }
+                    RTCPeerConnectionState::Failed | RTCPeerConnectionState::Closed => {
+                        break SessionEnd::Dropped(format!("the transport went {state}"));
+                    }
+                    _ => {}
+                }
+            }
+            () = &mut grace, if stalled => {
+                break SessionEnd::Dropped("the transport stalled".to_owned());
+            }
+            () = subscriber.shared.lost.notified() => {
+                if subscriber.shared.is_leaving() {
+                    break SessionEnd::Left;
+                }
+                break SessionEnd::Dropped("the microphone stopped reaching the SFU".to_owned());
+            }
+        }
+    };
+
+    // Whatever went wrong, this seat is finished with: stop the playback tasks
+    // before they write into slots the next session is about to hand out, and
+    // close the transport rather than leaving ICE running on a dead session.
+    for (_, subscription) in playing.drain() {
+        subscription.playback.abort();
+        subscriber.shared.sink.clear(subscription.slot);
+    }
+
+    // Hand the seat back on the way out. A drop does not always mean the room
+    // is unreachable — a dead sender or a stalled ICE leaves the WebSocket
+    // working — and a seat nobody gave back is what makes the *next* join get
+    // refused by a room that is full of this client's own ghosts (DR-5).
+    let _ = session.commands.send(ClientMessage::Leave).await;
+    let _ = subscriber.peer.close().await;
+
+    end
 }
 
 // --- peer connection -------------------------------------------------------
@@ -326,7 +804,7 @@ struct Signals {
 #[derive(Default)]
 struct TrackInbox {
     waiting: Mutex<Vec<Arc<dyn TrackRemote>>>,
-    arrived: tokio::sync::Notify,
+    arrived: Notify,
 }
 
 struct Events {
@@ -528,6 +1006,17 @@ async fn wait_for_connection(signals: &Signals) -> Result<(), RtcError> {
 
 // --- publishing ------------------------------------------------------------
 
+/// Where an encoded frame goes.
+///
+/// The encode loop outlives any one session, so it writes through this rather
+/// than at a track it captured at join time: reconnecting swaps the
+/// implementation underneath it, and the microphone never stops being read.
+#[async_trait::async_trait]
+trait PacketSink: Send + Sync {
+    /// Puts one Opus packet on the wire.
+    async fn send(&self, packet: &[u8]) -> Result<(), String>;
+}
+
 /// A published track, plus what the encode loop needs to keep writing to it.
 ///
 /// The SSRC and payload type are shared and re-read every frame rather than
@@ -538,6 +1027,28 @@ struct Published {
     track: Arc<TrackLocalStaticSample>,
     ssrc: Arc<AtomicU32>,
     payload_type: Arc<AtomicU8>,
+}
+
+#[async_trait::async_trait]
+impl PacketSink for Published {
+    /// The allocation per frame (`Bytes::copy_from_slice`) is deliberate and
+    /// safe: this runs on the far side of the capture ring buffer, never inside
+    /// a device callback, which is where styleguide.md's no-allocation rule
+    /// applies.
+    async fn send(&self, packet: &[u8]) -> Result<(), String> {
+        self.track
+            .sample_writer(
+                self.ssrc.load(Ordering::Relaxed),
+                self.payload_type.load(Ordering::Relaxed),
+            )
+            .write_sample(&Sample {
+                data: Bytes::copy_from_slice(packet),
+                duration: Duration::from_millis(u64::from(FRAME_MS)),
+                ..Default::default()
+            })
+            .await
+            .map_err(|error| error.to_string())
+    }
 }
 
 impl Published {
@@ -662,13 +1173,13 @@ fn fresh_ssrc() -> u32 {
 
 /// Streams encoded microphone audio for as long as the source produces it.
 ///
-/// The allocation per frame (`Bytes::copy_from_slice`) is deliberate and safe:
-/// this task is on the far side of the capture ring buffer, never inside a
-/// device callback, which is where styleguide.md's no-allocation rule applies.
+/// Runs for the whole call, not for one session. Between sessions there is
+/// nowhere to send: the frames are still read — a microphone nobody drains
+/// overruns its ring — encoded, and dropped.
 async fn publish_loop(
     mut source: Box<dyn AudioSource>,
-    published: Published,
-    muted: Arc<AtomicBool>,
+    sinks: watch::Receiver<Option<Arc<dyn PacketSink>>>,
+    shared: Arc<Shared>,
 ) {
     let Ok(mut encoder) = VoiceEncoder::new() else {
         return;
@@ -678,39 +1189,41 @@ async fn publish_loop(
 
     while let Some(frame) = source.next_frame().await {
         // Mute stops packets rather than sending silence: the room should cost
-        // nothing while nobody is talking (prd.md §3 F1).
-        if muted.load(Ordering::Relaxed) {
+        // nothing while nobody is talking (prd.md §3 F1). Nothing is encoded
+        // either — a frame nobody will send is work nobody asked for.
+        if !shared.is_transmitting() {
+            // The meter follows what the room hears, so a muted client reads
+            // as silent however loudly they are talking.
+            shared.microphone.observe(0);
             continue;
         }
+        // This is the only place the outgoing signal exists as samples, so it
+        // is the only place the "you are talking" indicator can come from.
+        shared.microphone.observe(peak(&frame));
+        // Cloned out of the watch immediately: the borrow it hands back is not
+        // `Send` and this is about to await.
+        let sink = sinks.borrow().clone();
+        let Some(sink) = sink else {
+            continue;
+        };
+
         let Ok(written) = encoder.encode(&frame, &mut packet) else {
             continue;
         };
-        let sent = published
-            .track
-            .sample_writer(
-                published.ssrc.load(Ordering::Relaxed),
-                published.payload_type.load(Ordering::Relaxed),
-            )
-            .write_sample(&Sample {
-                data: Bytes::copy_from_slice(&packet[..written]),
-                duration: Duration::from_millis(u64::from(FRAME_MS)),
-                ..Default::default()
-            })
-            .await;
 
         // A failed write is not fatal on its own — the transport can be
         // between states — but a run of them means nobody can hear this
-        // client, which is worth saying out loud rather than going quiet.
-        match sent {
+        // client, which is a dropped session rather than something to sit in.
+        match sink.send(&packet[..written]).await {
             Ok(()) => failures = 0,
             Err(error) => {
                 failures += 1;
-                if failures == 1 || failures == PUBLISH_FAILURE_LIMIT {
+                if failures == 1 {
                     eprintln!("microphone frame not sent: {error}");
                 }
                 if failures >= PUBLISH_FAILURE_LIMIT {
-                    eprintln!("giving up on publishing after {failures} failed frames");
-                    return;
+                    failures = 0;
+                    shared.lost.notify_one();
                 }
             }
         }
@@ -719,91 +1232,50 @@ async fn publish_loop(
 
 // --- subscribing -----------------------------------------------------------
 
-struct SubscribeLoop {
+/// One session's view of the room, and what it takes to pull from it.
+struct Subscriber {
     signaling: Arc<Signaling>,
+    shared: Arc<Shared>,
     self_id: String,
     peer: Arc<dyn PeerConnection>,
     signals: Signals,
-    /// Shared with the publish loop so a renegotiation can hand it the
-    /// sender's new identity.
+    /// Shared with the encode loop so a renegotiation can hand it the sender's
+    /// new identity.
     published: Published,
-    sink: Arc<dyn AudioSink>,
-    deafened: Arc<AtomicBool>,
-    inbound: mpsc::Receiver<ServerMessage>,
-    roster_tx: watch::Sender<Vec<Participant>>,
-    initial: Vec<Participant>,
 }
 
 /// One remote speaker, for as long as they are in the room.
 struct Subscription {
     slot: usize,
+    /// The Realtime session this pull was addressed to. A peer who rejoined has
+    /// a new one, and the old address is refused by the proxy (DR-8).
+    session_id: String,
     playback: JoinHandle<()>,
 }
 
-/// Follows the roster: pulls every `mic` that appears, drops every one that
-/// goes away, and republishes the roster for the UI.
-///
-/// The roster is pushed only when it changes, so a subscription that fails
-/// would otherwise leave that speaker silent for the rest of the call. The
-/// ticker is what makes a failure temporary: reconciling against the roster we
-/// already have costs nothing when everyone is already subscribed.
-async fn subscribe_loop(mut loop_state: SubscribeLoop) {
-    let mut subscribed: HashMap<String, Subscription> = HashMap::new();
-    let mut latest = std::mem::take(&mut loop_state.initial);
-
-    reconcile(&loop_state, &mut subscribed, &latest).await;
-
-    let mut retry = tokio::time::interval(RESUBSCRIBE_INTERVAL);
-    retry.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-
-    loop {
-        let pushed = tokio::select! {
-            message = loop_state.inbound.recv() => message,
-            _ = retry.tick() => {
-                reconcile(&loop_state, &mut subscribed, &latest).await;
-                continue;
-            }
-        };
-
-        let Some(message) = pushed else {
-            return;
-        };
-
-        let participants = match message {
-            ServerMessage::Welcome { participants, .. }
-            | ServerMessage::Roster { participants } => participants,
-            ServerMessage::Error { code, message } => {
-                eprintln!("room error: {message} ({code})");
-                continue;
-            }
-        };
-
-        latest = participants;
-        let _ = loop_state.roster_tx.send(latest.clone());
-        reconcile(&loop_state, &mut subscribed, &latest).await;
-    }
-}
-
 async fn reconcile(
-    loop_state: &SubscribeLoop,
-    subscribed: &mut HashMap<String, Subscription>,
+    subscriber: &Subscriber,
+    playing: &mut HashMap<String, Subscription>,
     participants: &[Participant],
 ) {
-    // Gone, or stopped publishing: free the slot so the next arrival can have
-    // it, and stop the audio immediately rather than draining the ring.
-    subscribed.retain(|id, subscription| {
-        let still_here = participants
-            .iter()
-            .any(|peer| &peer.id == id && peer.publishes(MIC_TRACK));
+    // Gone, stopped publishing, or back under a new session: free the slot so
+    // the next arrival can have it, and stop the audio immediately rather than
+    // draining the ring.
+    playing.retain(|id, subscription| {
+        let still_here = participants.iter().any(|peer| {
+            &peer.id == id
+                && peer.publishes(MIC_TRACK)
+                && peer.session_id.as_deref() == Some(subscription.session_id.as_str())
+        });
         if !still_here {
             subscription.playback.abort();
-            loop_state.sink.clear(subscription.slot);
+            subscriber.shared.sink.clear(subscription.slot);
         }
         still_here
     });
 
     for peer in participants {
-        if peer.id == loop_state.self_id || subscribed.contains_key(&peer.id) {
+        if peer.id == subscriber.self_id || playing.contains_key(&peer.id) {
             continue;
         }
         if !peer.publishes(MIC_TRACK) {
@@ -813,25 +1285,35 @@ async fn reconcile(
             continue;
         };
 
-        let Some(slot) = free_slot(subscribed) else {
+        let Some(slot) = free_slot(playing) else {
             // Only reachable if the server's cap and this client's slot count
             // ever disagree; being silent about one speaker beats crashing.
             eprintln!("no playback slot left for {}", peer.name);
             continue;
         };
 
-        match subscribe_to(loop_state, session_id, slot).await {
+        match subscribe_to(subscriber, session_id, slot).await {
             Ok(subscription) => {
-                subscribed.insert(peer.id.clone(), subscription);
+                playing.insert(peer.id.clone(), subscription);
             }
             Err(error) => eprintln!("could not subscribe to {}: {error}", peer.name),
         }
     }
+
+    // The slot a participant is played in is what turns a level into a name.
+    // Rebuilt rather than patched: `playing` is the only truth, and the map is
+    // at most eight entries.
+    if let Ok(mut slots) = subscriber.shared.slots.lock() {
+        slots.clear();
+        for (id, subscription) in playing.iter() {
+            slots.insert(id.clone(), subscription.slot);
+        }
+    }
 }
 
-fn free_slot(subscribed: &HashMap<String, Subscription>) -> Option<usize> {
+fn free_slot(playing: &HashMap<String, Subscription>) -> Option<usize> {
     (0..MAX_REMOTE_SLOTS).find(|slot| {
-        !subscribed
+        !playing
             .values()
             .any(|subscription| subscription.slot == *slot)
     })
@@ -843,11 +1325,11 @@ fn free_slot(subscribed: &HashMap<String, Subscription>) -> Option<usize> {
 /// answers with an **offer**, and this side answers it through `renegotiate`
 /// (DR-7).
 async fn subscribe_to(
-    loop_state: &SubscribeLoop,
+    subscriber: &Subscriber,
     session_id: &str,
     slot: usize,
 ) -> Result<Subscription, RtcError> {
-    let answer = pull_track(loop_state, session_id).await?;
+    let answer = pull_track(subscriber, session_id).await?;
 
     // Cloudflare only offers when it needs a new m-section. Reusing one that
     // is already there is a valid answer with no SDP in it, and forcing a
@@ -857,20 +1339,16 @@ async fn subscribe_to(
         .and_then(Value::as_bool)
         == Some(true)
     {
-        renegotiate(loop_state, &answer).await?;
+        renegotiate(subscriber, &answer).await?;
     }
 
     let ssrc = ssrc_of(&answer);
-    let track = claim_track(&loop_state.signals.tracks, ssrc).await?;
+    let track = claim_track(&subscriber.signals.tracks, ssrc).await?;
 
     Ok(Subscription {
         slot,
-        playback: tokio::spawn(playback_loop(
-            track,
-            slot,
-            Arc::clone(&loop_state.sink),
-            Arc::clone(&loop_state.deafened),
-        )),
+        session_id: session_id.to_owned(),
+        playback: tokio::spawn(playback_loop(track, slot, Arc::clone(&subscriber.shared))),
     })
 }
 
@@ -881,7 +1359,7 @@ async fn subscribe_to(
 /// accepted, which is before their ICE and DTLS finish — so a peer is
 /// advertised a beat before Cloudflare will serve them. Retrying is the whole
 /// fix; there is nothing wrong on either side (DR-8).
-async fn pull_track(loop_state: &SubscribeLoop, session_id: &str) -> Result<Value, RtcError> {
+async fn pull_track(subscriber: &Subscriber, session_id: &str) -> Result<Value, RtcError> {
     let body = json!({
         "tracks": [{
             "location": "remote",
@@ -894,9 +1372,9 @@ async fn pull_track(loop_state: &SubscribeLoop, session_id: &str) -> Result<Valu
     let mut last = String::new();
 
     for attempt in 0..SUBSCRIBE_ATTEMPTS {
-        let answer = loop_state
+        let answer = subscriber
             .signaling
-            .sfu(&loop_state.self_id, SfuOperation::TracksNew, &body)
+            .sfu(&subscriber.self_id, SfuOperation::TracksNew, &body)
             .await?;
 
         let Some((code, description)) = track_error(&answer) else {
@@ -919,23 +1397,23 @@ async fn pull_track(loop_state: &SubscribeLoop, session_id: &str) -> Result<Valu
 }
 
 /// Answers the offer Cloudflare sent with the pull.
-async fn renegotiate(loop_state: &SubscribeLoop, answer: &Value) -> Result<(), RtcError> {
+async fn renegotiate(subscriber: &Subscriber, answer: &Value) -> Result<(), RtcError> {
     let offer = sdp_of(answer)?;
     trace_sdp("pull offer", &offer);
 
-    loop_state
+    subscriber
         .peer
         .set_remote_description(RTCSessionDescription::offer(offer)?)
         .await?;
-    let local = loop_state.peer.create_answer(None).await?;
-    loop_state.peer.set_local_description(local).await?;
-    let sdp = local_sdp(loop_state.peer.as_ref(), &loop_state.signals).await?;
+    let local = subscriber.peer.create_answer(None).await?;
+    subscriber.peer.set_local_description(local).await?;
+    let sdp = local_sdp(subscriber.peer.as_ref(), &subscriber.signals).await?;
     trace_sdp("our answer", &sdp);
 
-    loop_state
+    subscriber
         .signaling
         .sfu(
-            &loop_state.self_id,
+            &subscriber.self_id,
             SfuOperation::Renegotiate,
             &json!({ "sessionDescription": { "type": "answer", "sdp": sdp } }),
         )
@@ -943,7 +1421,7 @@ async fn renegotiate(loop_state: &SubscribeLoop, answer: &Value) -> Result<(), R
 
     // The microphone's sender may have been rebuilt by the exchange above; the
     // publish loop has to be told before its next frame goes nowhere.
-    loop_state.published.refresh(loop_state.peer.as_ref()).await;
+    subscriber.published.refresh(subscriber.peer.as_ref()).await;
     Ok(())
 }
 
@@ -1062,12 +1540,7 @@ async fn take_matching(inbox: &Arc<TrackInbox>, ssrc: Option<u32>) -> Option<Arc
 ///
 /// The RTP payload of an Opus stream *is* the Opus packet — there is no
 /// aggregation header to strip — so depacketising and decoding are one step.
-async fn playback_loop(
-    track: Arc<dyn TrackRemote>,
-    slot: usize,
-    sink: Arc<dyn AudioSink>,
-    deafened: Arc<AtomicBool>,
-) {
+async fn playback_loop(track: Arc<dyn TrackRemote>, slot: usize, shared: Arc<Shared>) {
     let Ok(mut decoder) = VoiceDecoder::new() else {
         return;
     };
@@ -1076,22 +1549,39 @@ async fn playback_loop(
     while let Some(event) = track.poll().await {
         match event {
             TrackRemoteEvent::OnRtpPacket(packet) => {
-                if packet.payload.is_empty() {
-                    continue;
-                }
-                // Deafened still decodes: the codec keeps state across packets,
-                // and skipping them would leave it confused on un-deafen.
-                let usable = decoder.decode(&packet.payload, &mut frame).is_ok();
-                if usable && !deafened.load(Ordering::Relaxed) {
-                    sink.play(slot, &frame);
-                }
+                play_packet(&mut decoder, &packet.payload, &mut frame, slot, &shared);
             }
             TrackRemoteEvent::OnEnded => break,
             _ => {}
         }
     }
 
-    sink.clear(slot);
+    shared.sink.clear(slot);
+}
+
+/// Turns one RTP payload into 20 ms of playback, unless the user is deafened.
+///
+/// Deafened still decodes. Opus carries state across packets, so skipping them
+/// would leave the decoder mid-stream and the first seconds after un-deafening
+/// would be artefacts. What deafen stops is the last step — nothing reaches the
+/// speakers (prd.md §3 F1).
+fn play_packet(
+    decoder: &mut VoiceDecoder,
+    payload: &[u8],
+    frame: &mut Frame,
+    slot: usize,
+    shared: &Shared,
+) {
+    if payload.is_empty() {
+        return;
+    }
+    if decoder.decode(payload, frame).is_err() {
+        return;
+    }
+    if shared.deafened.load(Ordering::Relaxed) {
+        return;
+    }
+    shared.sink.play(slot, frame);
 }
 
 // --- SDP ------------------------------------------------------------------
@@ -1137,8 +1627,22 @@ fn ssrc_for_mid(sdp: &str, mid: &str) -> Option<u32> {
 
 #[cfg(test)]
 mod tests {
-    use super::{is_starting_up, ssrc_for_mid, ssrc_of, track_error};
+    use super::{
+        is_starting_up, play_packet, publish_loop, silent_frame, ssrc_for_mid, ssrc_of,
+        track_error, PacketSink, Shared,
+    };
+    use crate::audio::{
+        device::{AudioSink, AudioSource, NullSink, RecordingSink, ToneSource},
+        mixer::SPEAKING_LEVEL,
+        opus::{Frame, VoiceDecoder, VoiceEncoder, MAX_PACKET_BYTES},
+    };
     use serde_json::json;
+    use std::collections::HashMap;
+    use std::sync::{
+        atomic::{AtomicUsize, Ordering},
+        Arc, Mutex,
+    };
+    use tokio::sync::watch;
 
     /// Trimmed from a real Cloudflare pull offer (DR-7).
     const PULL_OFFER: &str = "v=0\r\n\
@@ -1240,5 +1744,335 @@ mod tests {
         let (code, description) = track_error(&answer).expect("a per-track error");
         assert_eq!(code, "mystery");
         assert!(!description.is_empty());
+    }
+
+    // --- the playback path, without a network ----------------------------
+
+    /// A call with nowhere to play: enough for anything that only cares about
+    /// the encode side.
+    fn test_shared() -> Arc<Shared> {
+        Shared::new("me".to_owned(), vec![], Arc::new(NullSink))
+    }
+
+    /// A call whose speakers can be inspected afterwards.
+    fn listening() -> (Arc<Shared>, Arc<RecordingSink>) {
+        let ears = RecordingSink::new();
+        let shared = Shared::new(
+            "me".to_owned(),
+            vec![],
+            Arc::clone(&ears) as Arc<dyn AudioSink>,
+        );
+        (shared, ears)
+    }
+
+    /// One real Opus packet, encoded the way a roommate would send it.
+    fn packet(into: &mut [u8; MAX_PACKET_BYTES]) -> usize {
+        let mut encoder = VoiceEncoder::new().expect("encoder");
+        let mut frame = silent_frame();
+        for (index, sample) in frame.iter_mut().enumerate() {
+            #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+            {
+                *sample = ((index as i32 % 120) * 60 - 3_600) as i16;
+            }
+        }
+        encoder.encode(&frame, into).expect("encoded")
+    }
+
+    /// prd.md §3 F1: "deafen stops playback". The tracks stay subscribed and
+    /// the packets keep arriving — what stops is the last step.
+    #[test]
+    fn deafening_stops_playback_without_stopping_the_decoder() {
+        let (shared, ears) = listening();
+        let mut decoder = VoiceDecoder::new().expect("decoder");
+        let mut frame = silent_frame();
+        let mut buffer = [0_u8; MAX_PACKET_BYTES];
+        let written = packet(&mut buffer);
+
+        play_packet(&mut decoder, &buffer[..written], &mut frame, 0, &shared);
+        assert_eq!(ears.slot(0).frames, 1, "audible before deafening");
+
+        shared.deafened.store(true, Ordering::Relaxed);
+        for _ in 0..5 {
+            play_packet(&mut decoder, &buffer[..written], &mut frame, 0, &shared);
+        }
+        assert_eq!(
+            ears.slot(0).frames,
+            1,
+            "deafened, so nothing new was played"
+        );
+        // Decoded anyway: the frame the decoder wrote is the audio that would
+        // have been played, not silence. Skipping the decode would leave the
+        // codec mid-stream and un-deafening would start with artefacts.
+        assert!(
+            frame.iter().any(|&sample| sample != 0),
+            "the packet was never decoded while deafened"
+        );
+
+        shared.deafened.store(false, Ordering::Relaxed);
+        play_packet(&mut decoder, &buffer[..written], &mut frame, 0, &shared);
+        assert_eq!(
+            ears.slot(0).frames,
+            2,
+            "un-deafening did not resume playback"
+        );
+    }
+
+    #[test]
+    fn an_empty_payload_is_not_played_as_a_frame() {
+        // Cloudflare sends padding-only packets; concealment is the decoder's
+        // job on loss, not something to invent from an empty payload.
+        let (shared, ears) = listening();
+        let mut decoder = VoiceDecoder::new().expect("decoder");
+        let mut frame = silent_frame();
+
+        play_packet(&mut decoder, &[], &mut frame, 0, &shared);
+
+        assert_eq!(ears.slot(0).frames, 0);
+    }
+
+    #[test]
+    fn a_packet_the_decoder_refuses_is_dropped_rather_than_played() {
+        let (shared, ears) = listening();
+        let mut decoder = VoiceDecoder::new().expect("decoder");
+        let mut frame = silent_frame();
+
+        play_packet(&mut decoder, &[0xff; 8], &mut frame, 0, &shared);
+
+        assert_eq!(ears.slot(0).frames, 0);
+    }
+
+    // --- who is talking ---------------------------------------------------
+
+    /// A sink whose levels a test sets directly, standing in for the mixer's.
+    #[derive(Default)]
+    struct FakeLevels {
+        levels: Mutex<HashMap<usize, f32>>,
+    }
+
+    impl FakeLevels {
+        fn set(&self, slot: usize, level: f32) {
+            if let Ok(mut levels) = self.levels.lock() {
+                levels.insert(slot, level);
+            }
+        }
+    }
+
+    impl AudioSink for FakeLevels {
+        fn play(&self, _slot: usize, _frame: &Frame) {}
+        fn clear(&self, _slot: usize) {}
+        fn level(&self, slot: usize) -> f32 {
+            self.levels
+                .lock()
+                .ok()
+                .and_then(|levels| levels.get(&slot).copied())
+                .unwrap_or(0.0)
+        }
+    }
+
+    /// A call with one roommate in slot 0.
+    fn metered() -> (Arc<Shared>, Arc<FakeLevels>) {
+        let levels = Arc::new(FakeLevels::default());
+        let shared = Shared::new(
+            "me".to_owned(),
+            vec![],
+            Arc::clone(&levels) as Arc<dyn AudioSink>,
+        );
+        shared
+            .slots
+            .lock()
+            .expect("slots")
+            .insert("them".to_owned(), 0);
+        (shared, levels)
+    }
+
+    #[test]
+    fn a_loud_slot_puts_its_participant_in_the_speaking_set() {
+        let (shared, levels) = metered();
+
+        levels.set(0, SPEAKING_LEVEL * 2.0);
+        shared.refresh_speaking();
+        assert_eq!(*shared.speaking.borrow(), vec!["them".to_owned()]);
+
+        levels.set(0, SPEAKING_LEVEL / 2.0);
+        shared.refresh_speaking();
+        assert!(shared.speaking.borrow().is_empty());
+    }
+
+    #[test]
+    fn a_quiet_room_pushes_nothing_at_all() {
+        // The speaking set feeds an event the UI listens to. A room full of
+        // people listening must cost nothing (prd.md §4: under 2% idle).
+        let (shared, _levels) = metered();
+        let watcher = shared.speaking.subscribe();
+
+        for _ in 0..50 {
+            shared.refresh_speaking();
+        }
+
+        assert!(!watcher.has_changed().unwrap_or(true));
+    }
+
+    #[test]
+    fn this_client_is_in_the_set_when_its_own_microphone_is_loud() {
+        let (shared, _levels) = metered();
+
+        shared.microphone.observe(20_000);
+        shared.refresh_speaking();
+        assert_eq!(*shared.speaking.borrow(), vec!["me".to_owned()]);
+    }
+
+    #[test]
+    fn a_muted_client_is_never_speaking_however_loud_they_are() {
+        let (shared, _levels) = metered();
+        shared.microphone.observe(30_000);
+        shared.muted.store(true, Ordering::Relaxed);
+
+        shared.refresh_speaking();
+
+        assert!(
+            shared.speaking.borrow().is_empty(),
+            "a muted client showed up as talking; nobody can hear them"
+        );
+    }
+
+    // --- the encode loop, without a network ------------------------------
+
+    /// A [`PacketSink`] that counts instead of transmitting.
+    #[derive(Default)]
+    struct CountingSender {
+        packets: AtomicUsize,
+        last: Mutex<Vec<u8>>,
+    }
+
+    #[async_trait::async_trait]
+    impl PacketSink for CountingSender {
+        async fn send(&self, packet: &[u8]) -> Result<(), String> {
+            self.packets.fetch_add(1, Ordering::Relaxed);
+            if let Ok(mut last) = self.last.lock() {
+                last.clear();
+                last.extend_from_slice(packet);
+            }
+            Ok(())
+        }
+    }
+
+    impl CountingSender {
+        fn count(&self) -> usize {
+            self.packets.load(Ordering::Relaxed)
+        }
+    }
+
+    /// A source that hands out a fixed number of loud frames as fast as it is
+    /// asked, then ends. No timer, so the test does not wait on one.
+    struct Burst {
+        left: usize,
+    }
+
+    #[async_trait::async_trait]
+    impl AudioSource for Burst {
+        async fn next_frame(&mut self) -> Option<Frame> {
+            self.left = self.left.checked_sub(1)?;
+            let mut frame = silent_frame();
+            for (index, sample) in frame.iter_mut().enumerate() {
+                #[allow(
+                    clippy::cast_possible_truncation,
+                    clippy::cast_possible_wrap,
+                    reason = "a deterministic loud-ish waveform, not a signal"
+                )]
+                {
+                    *sample = ((index as i32 % 200) * 40 - 4_000) as i16;
+                }
+            }
+            Some(frame)
+        }
+    }
+
+    /// Runs the encode loop to exhaustion against a counting sender.
+    async fn pump(frames: usize, muted: bool) -> Arc<CountingSender> {
+        let shared = test_shared();
+        shared.muted.store(muted, Ordering::Relaxed);
+
+        let sender = Arc::new(CountingSender::default());
+        let (published, sinks) = watch::channel(Some(Arc::clone(&sender) as Arc<dyn PacketSink>));
+
+        publish_loop(Box::new(Burst { left: frames }), sinks, shared).await;
+        drop(published);
+        sender
+    }
+
+    #[tokio::test]
+    async fn every_captured_frame_becomes_a_packet() {
+        let sender = pump(25, false).await;
+        assert_eq!(sender.count(), 25);
+        assert!(
+            !sender.last.lock().expect("packet").is_empty(),
+            "an empty packet is not a packet"
+        );
+    }
+
+    /// prd.md §3 F1: "Mute stops sending packets entirely (not zeroed
+    /// samples)". A muted client that still sent silence would cost the room
+    /// the same bandwidth as a talking one.
+    #[tokio::test]
+    async fn muting_stops_packets_rather_than_sending_silence() {
+        let sender = pump(25, true).await;
+        assert_eq!(
+            sender.count(),
+            0,
+            "a muted client put packets on the wire; mute must stop them, not zero them"
+        );
+    }
+
+    #[tokio::test]
+    async fn unmuting_starts_the_packets_again() {
+        let shared = test_shared();
+        let sender = Arc::new(CountingSender::default());
+        let (published, sinks) = watch::channel(Some(Arc::clone(&sender) as Arc<dyn PacketSink>));
+
+        shared.muted.store(true, Ordering::Relaxed);
+        let loop_shared = Arc::clone(&shared);
+        let pump = tokio::spawn(async move {
+            publish_loop(Box::new(ToneSource::new(440.0)), sinks, loop_shared).await;
+        });
+
+        // Long enough for several 20 ms frames to have been offered and
+        // refused.
+        tokio::time::sleep(std::time::Duration::from_millis(120)).await;
+        assert_eq!(sender.count(), 0, "muted, so nothing should have gone out");
+
+        shared.muted.store(false, Ordering::Relaxed);
+        tokio::time::sleep(std::time::Duration::from_millis(120)).await;
+        assert!(sender.count() > 0, "unmuting did not resume transmission");
+
+        pump.abort();
+        drop(published);
+    }
+
+    /// Between sessions there is nowhere to send. The microphone still has to
+    /// be read — a source nobody drains overruns its ring — but nothing may go
+    /// out, and the loop must survive to use the next session's sender.
+    #[tokio::test]
+    async fn a_call_with_no_session_drains_the_microphone_and_sends_nothing() {
+        let shared = test_shared();
+        let sender = Arc::new(CountingSender::default());
+        let (published, sinks) = watch::channel(None);
+
+        let loop_shared = Arc::clone(&shared);
+        let pump = tokio::spawn(async move {
+            publish_loop(Box::new(ToneSource::new(440.0)), sinks, loop_shared).await;
+        });
+
+        tokio::time::sleep(std::time::Duration::from_millis(120)).await;
+        assert_eq!(sender.count(), 0, "there was no session to send on");
+
+        // The reconnect lands: the same loop must pick the new sender up.
+        published.send_replace(Some(Arc::clone(&sender) as Arc<dyn PacketSink>));
+        tokio::time::sleep(std::time::Duration::from_millis(120)).await;
+        assert!(
+            sender.count() > 0,
+            "the encode loop did not resume after reconnecting"
+        );
+
+        pump.abort();
     }
 }

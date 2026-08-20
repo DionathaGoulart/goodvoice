@@ -35,8 +35,21 @@ interface CallStatus {
   participants: Participant[];
 }
 
+/** Mirrors `CallState` in `src-tauri/src/rtc/reconnect.rs`. */
+type CallState =
+  | { state: "live" }
+  | { state: "reconnecting"; attempt: number }
+  | { state: "ended"; reason: "left" }
+  | { state: "ended"; reason: "refused" | "unreachable"; detail: string };
+
+/** Mirrors `CallHealth` in `src-tauri/src/lib.rs`. */
+type CallHealth = CallState & { self_id: string };
+
 /** The event `push_roster` emits. Kept in step with `ROSTER_EVENT`. */
 const ROSTER_EVENT = "goodvoice://roster";
+
+/** The event `push_state` emits. Kept in step with `STATE_EVENT`. */
+const STATE_EVENT = "goodvoice://state";
 
 /**
  * The room code the server will accept: `roomCodeSchema` in
@@ -57,15 +70,43 @@ const App: Component = () => {
   const [roster, setRoster] = createSignal<Participant[]>([]);
   const [muted, setMuted] = createSignal(false);
   const [deafened, setDeafened] = createSignal(false);
+  const [health, setHealth] = createSignal<CallState>({ state: "live" });
 
   // Subscribed once for the life of the window: the room the events belong to
   // is whichever call is open, and there is only ever one.
-  const unlisten = listen<Participant[]>(ROSTER_EVENT, (event) =>
-    setRoster(event.payload),
-  );
-  onCleanup(() => void unlisten.then((stop) => stop()));
+  const stopping = [
+    listen<Participant[]>(ROSTER_EVENT, (event) => setRoster(event.payload)),
+    listen<CallHealth>(STATE_EVENT, (event) => {
+      const { self_id, ...state } = event.payload;
+      setHealth(state);
+      // A reconnect takes a new seat, so the id the roster marks as "you"
+      // changes mid-call.
+      setCall((current) => (current ? { ...current, self_id } : current));
+      if (state.state === "ended") {
+        setCall(null);
+        setRoster([]);
+        if (state.reason !== "left") {
+          setError(state.detail);
+        }
+      }
+    }),
+  ];
+  onCleanup(() => {
+    for (const pending of stopping) {
+      void pending.then((stop) => stop());
+    }
+  });
 
   const canJoin = () => ROOM_CODE.test(room().trim()) && !joining();
+
+  /**
+   * The attempt number while the client is taking a new seat, or undefined.
+   * A dropped call is never silent: it says what it is doing (prd.md §5 flow E).
+   */
+  const reconnecting = () => {
+    const current = health();
+    return current.state === "reconnecting" ? current.attempt : undefined;
+  };
 
   const join = async (event: Event) => {
     event.preventDefault();
@@ -85,6 +126,7 @@ const App: Component = () => {
       setRoster(status.participants);
       setMuted(false);
       setDeafened(false);
+      setHealth({ state: "live" });
     } catch (reason) {
       setError(String(reason));
     } finally {
@@ -177,6 +219,14 @@ const App: Component = () => {
           <section class="panel animate-enter">
             <p class="tagline">{joined().room}</p>
 
+            <Show when={reconnecting()}>
+              {(attempt) => (
+                <p class="notice notice-warn" role="status">
+                  reconnecting… (attempt {attempt()})
+                </p>
+              )}
+            </Show>
+
             <ul class="roster">
               <For
                 each={roster()}
@@ -195,6 +245,12 @@ const App: Component = () => {
                     </Show>
                     <Show when={peer.muted}>
                       <span class="roster-tag">muted</span>
+                    </Show>
+                    {/* Two different facts: muted is "cannot be heard",
+                        deafened is "cannot hear you". Someone deafened is
+                        still able to talk, so the roster says both. */}
+                    <Show when={peer.deafened}>
+                      <span class="roster-tag">deafened</span>
                     </Show>
                   </li>
                 )}

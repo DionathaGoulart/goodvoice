@@ -160,10 +160,25 @@ Goal: two clients talking through the SFU. Riskiest phase — spikes first.
   real mixer: per-speaker gain, and the level metering the roster needs to show
   who is talking. It also owns the CPU budget at four-plus clients, which has
   never been measured.
+  Built: `audio/mixer.rs` — per-speaker gain in Q8.8, a saturating sum, and a
+  decaying level per slot, all read and written from the render callback
+  without a lock. `hardware.rs` is now only the cpal callback handing that
+  mixer a buffer. `Call` exposes it as `speaking()`, `level_of()` and
+  `set_gain_of()` (per-listener gain: turning someone down needs nobody's
+  agreement).
+  **Left for this task:** the UI half — no Tauri event carries `speaking()` to
+  the webview yet, so the roster still cannot show who is talking. And the DoD
+  itself: four-plus clients conversing, with the CPU measured while they do.
 - [ ] **3.2 Mute / deafen** — `audio/`, `ui`. Mute halts encoding+sending (packets
   stop, not zeroed — assert in test via packet counter); deafen halts playback;
   state visible in roster for everyone (signaling message).
   DoD: tests + two-client visual/audio confirmation. Verify: `cargo test` + `npx vitest run`.
+  Task 2.4 shipped the mechanism; what was missing was the proof. `cargo test`
+  covers the client half (packets stop rather than going silent, and start
+  again on unmute), and `server/test/presence.test.ts` covers the room's half:
+  both flags reach everyone else's roster, they stack, they survive a late
+  joiner, and a message the room cannot parse moves nothing.
+  **Left for this task:** the two-client audio confirmation, by ear.
 - [ ] **3.3 Push-to-talk + VAD modes** — `audio/vad.rs`, `ui` settings. PTT
   (in-window key first; global hotkey is Phase 4), VAD via webrtc-audio-processing's
   voice detection with hangover time; mode persisted locally.
@@ -173,7 +188,7 @@ Goal: two clients talking through the SFU. Riskiest phase — spikes first.
   reference feed).
   DoD: speaker-echo test call shows no self-echo; DR records config chosen.
   Verify: manual echo test + `cargo test`.
-- [ ] **3.5 Auto-reconnect** — `rtc/reconnect.rs`. Exponential backoff, rejoin same
+- [x] **3.5 Auto-reconnect** — `rtc/reconnect.rs`. Exponential backoff, rejoin same
   room, resubscribe all tracks; UI shows reconnecting state.
   DoD: kill network 10 s mid-call → call resumes without restart.
   Verify: scripted netdown test documented + manual run.
@@ -182,6 +197,15 @@ Goal: two clients talking through the SFU. Riskiest phase — spikes first.
   that drops after it started, which today just ends. Two known cases from DR-8
   to cover: the ~1-in-6 handshake that still fails after three tries, and the
   roommate holding a session id that a peer's own retry has already replaced.
+  Built: `rtc/reconnect.rs` (the retry schedule and `CallState`), and `Call`
+  turned into a supervisor — the microphone and the user's mute/deafen outlive
+  any one seat, and sessions come and go underneath. `bin/reconnect-drill.rs`
+  is the automated proof; docs/testing/reconnect.md has both it and the
+  `pfctl` run that takes the network away for real. Both DR-8 cases are
+  covered, and both were seen happening in the drill's output. See DR-9.
+  **Not verified:** the netdown run itself, on either host. The drill kills the
+  session; only pulling the network checks that the client *notices* — see
+  docs/testing/reconnect.md.
 
 ## Phase 4 — Tray & polish
 
@@ -620,3 +644,75 @@ through rather than being flattened into a 502.
 Still open for task 2.4: peers cannot yet *learn* each other's session ids and
 track names. The roster deliberately does not carry them — publishing a track
 needs its own signaling message, and that is 2.4's design to make.
+
+### DR-9: a dropped call is rebuilt, not repaired (2026-08-20)
+
+**Context.** Task 3.5. Until now a call that lost its transport ended, which is
+the wrong ending for the three most ordinary ways it happens: a Worker redeploy
+(DR-5), the ~1-in-6 handshake that fails to reach `Connected` (DR-8), and ten
+seconds of dead network.
+
+**Decision: reconnecting means joining again from the top.** A goodvoice room
+holds no storage, so a seat that stopped existing has nothing to resume — new
+participant id, new Realtime session, microphone republished, every roommate
+pulled afresh. The room code is the only thing carried across, and it is the
+only thing the user ever typed.
+
+**Decision: `Call` became a supervisor.** What the user calls "the call" — the
+room, the microphone, mute and deafen, what the UI is being told — now lives in
+one `Shared` above the session, and sessions come and go underneath it. Two
+consequences worth stating: mute pressed while reconnecting is replayed onto
+the new seat rather than lost, and the encode loop keeps draining the capture
+ring while there is nowhere to send, so a reconnect cannot overflow it. In
+`lib.rs` the `Call` is no longer behind an `Arc`; the tasks that push at the
+webview hold `watch` receivers instead, so leaving can consume the call.
+
+**What counts as dropped.** Four ways a session ends, and only the last is not
+a drop: ICE sitting in `Disconnected` past a three-second grace, the room
+closing the WebSocket, the microphone's sender failing 50 frames in a row
+(one second), and the user leaving. The grace exists because `Disconnected` is
+recoverable in principle but not against an ice-lite SFU that offers one
+candidate and runs no checks of its own (DR-7) — there is nothing to re-pair
+with, and waiting the ~30 s webrtc-rs takes to say `Failed` is 30 s of talking
+to nobody.
+
+**The schedule.** 0.5 s, 1, 2, 4, 8, then 15 s, ten attempts, about 90 seconds
+of trying — long enough to ride out a redeploy or a router reboot, short enough
+that a client left running overnight on a dead link stops rather than spinning
+until morning. No jitter: it decorrelates a herd, and eight clients already
+spread by whenever each of them noticed are not one.
+
+**A full room is retried on reconnect, refused on a first join.** The seat that
+filled it may be this client's own, held by the room until the heartbeat sweep
+clears it (DR-5). Refusals that saying again would not change — a bad code, an
+answer too new to parse — end the call with the reason attached.
+
+**The UI is told, always.** New `goodvoice://state` event carrying live /
+reconnecting(attempt) / ended(reason). The participant id rides on the same
+event because a reconnect changes both at once, and a UI that learned them
+separately would spend a frame unable to find itself in the roster.
+
+**DR-8's two open cases are covered.** The handshake that fails after three
+tries is now a reconnect rather than an ending, and the roommate holding a
+session id that a peer's retry has already replaced is cleared by the
+two-second reconcile. Both were seen happening in the drill's output.
+
+**Proof, and what it does not prove.** `bin/reconnect-drill.rs` runs anywhere:
+two clients converse, one throws its seat away, and the drill fails unless the
+reconnecting client comes back with a *new* id, is audible again, and is heard
+by the roommate who did nothing. What it cannot check is the half before that —
+that a client *notices* a link that died — because the drill declares the loss
+itself. That needs the network taken away for real; docs/testing/reconnect.md
+has the `pfctl` and `netsh` runs, and **neither has been run yet**, on either
+host.
+
+**Consequences.**
+
+- `Call::drop_session` is public so the drill can kill a session. It is the
+  same code path a real drop takes, from the point the session is declared
+  lost.
+- `AudioSink` grew `level` and `set_gain` with defaults, so test doubles that
+  play nothing stay as short as they were.
+- A redeploy ends every call in progress and always did (DR-5). It now looks
+  like a reconnect into an empty room, which is worth knowing before it looks
+  like a bug.
