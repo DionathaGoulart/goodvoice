@@ -14,10 +14,11 @@ use std::sync::Arc;
 
 use serde::Serialize;
 use tauri::{AppHandle, Emitter as _, Manager as _, State};
-use tokio::sync::Mutex;
+use tokio::sync::{watch, Mutex};
 
 use audio::{device::AudioSink, hardware};
 use rtc::{
+    reconnect::CallState,
     session::{Call, CallOptions},
     signaling::Participant,
 };
@@ -32,6 +33,10 @@ pub const DEFAULT_SERVER: &str = match option_env!("GOODVOICE_SERVER") {
 
 /// The event the UI listens on for room changes.
 const ROSTER_EVENT: &str = "goodvoice://roster";
+
+/// The event the UI listens on for the call's own health: live, reconnecting,
+/// or over. A dropped call must never look like a quiet one (prd.md §5 flow E).
+const STATE_EVENT: &str = "goodvoice://state";
 
 /// Identity of the running client, surfaced to the UI on boot.
 #[derive(Debug, Clone, Serialize)]
@@ -63,14 +68,27 @@ pub struct CallStatus {
     pub participants: Vec<Participant>,
 }
 
+/// What the UI is told when the call's health changes.
+///
+/// The participant id rides along because a reconnect takes a new seat in the
+/// room, and the UI needs the new one to keep picking itself out of the roster.
+#[derive(Debug, Clone, Serialize)]
+pub struct CallHealth {
+    #[serde(flatten)]
+    pub state: CallState,
+    pub self_id: String,
+}
+
 /// The one call this process can be in.
 ///
 /// A `Mutex` rather than a lock-free cell because join and leave must not
 /// interleave: two joins racing would leave an orphaned `Call` publishing a
-/// microphone nobody can mute.
+/// microphone nobody can mute. The `Call` is held directly rather than behind
+/// an `Arc` so leaving can consume it — the tasks that push at the webview get
+/// watch receivers, never a handle on the call itself.
 #[derive(Default)]
-struct CallState {
-    call: Mutex<Option<Arc<Call>>>,
+struct CurrentCall {
+    call: Mutex<Option<Call>>,
 }
 
 /// Joins a room, opening the microphone and speakers on the way.
@@ -82,7 +100,7 @@ struct CallState {
 #[tauri::command]
 async fn join_room(
     app: AppHandle,
-    state: State<'_, CallState>,
+    state: State<'_, CurrentCall>,
     server: String,
     room: String,
     name: String,
@@ -107,13 +125,15 @@ async fn join_room(
     .map_err(|error| error.to_string())?;
 
     let status = CallStatus {
-        self_id: call.self_id().to_owned(),
+        self_id: call.self_id(),
         room,
         participants: call.roster().borrow().clone(),
     };
 
-    let call = Arc::new(call);
-    tauri::async_runtime::spawn(push_roster(app, Arc::clone(&call)));
+    // Watch receivers, not the call: these outlive `leave_room` taking the
+    // call apart, and they end on their own when its state is dropped.
+    tauri::async_runtime::spawn(push_roster(app.clone(), call.roster()));
+    tauri::async_runtime::spawn(push_state(app, call.state(), call.self_id_watch()));
     *current = Some(call);
 
     Ok(status)
@@ -126,15 +146,10 @@ async fn join_room(
 /// Never fails in practice; the `Result` exists so the UI can await it the
 /// same way it awaits the others.
 #[tauri::command]
-async fn leave_room(state: State<'_, CallState>) -> Result<(), String> {
+async fn leave_room(state: State<'_, CurrentCall>) -> Result<(), String> {
     let taken = state.call.lock().await.take();
     if let Some(call) = taken {
-        // Only the roster pusher holds the other handle, and it stops as soon
-        // as the watch closes; if it has not yet, dropping ours is enough.
-        match Arc::try_unwrap(call) {
-            Ok(call) => call.leave().await,
-            Err(shared) => shared.set_muted(true).await,
-        }
+        call.leave().await;
     }
     Ok(())
 }
@@ -143,9 +158,9 @@ async fn leave_room(state: State<'_, CallState>) -> Result<(), String> {
 ///
 /// Returns an error when there is no call to mute.
 #[tauri::command]
-async fn set_muted(state: State<'_, CallState>, muted: bool) -> Result<(), String> {
-    let call = state.call.lock().await.clone();
-    let call = call.ok_or_else(|| "not in a call".to_owned())?;
+async fn set_muted(state: State<'_, CurrentCall>, muted: bool) -> Result<(), String> {
+    let call = state.call.lock().await;
+    let call = call.as_ref().ok_or_else(|| "not in a call".to_owned())?;
     call.set_muted(muted).await;
     Ok(())
 }
@@ -154,9 +169,9 @@ async fn set_muted(state: State<'_, CallState>, muted: bool) -> Result<(), Strin
 ///
 /// Returns an error when there is no call to deafen.
 #[tauri::command]
-async fn set_deafened(state: State<'_, CallState>, deafened: bool) -> Result<(), String> {
-    let call = state.call.lock().await.clone();
-    let call = call.ok_or_else(|| "not in a call".to_owned())?;
+async fn set_deafened(state: State<'_, CurrentCall>, deafened: bool) -> Result<(), String> {
+    let call = state.call.lock().await;
+    let call = call.as_ref().ok_or_else(|| "not in a call".to_owned())?;
     call.set_deafened(deafened).await;
     Ok(())
 }
@@ -167,14 +182,41 @@ fn client_info() -> ClientInfo {
 }
 
 /// Forwards every roster change to the webview until the call ends.
-async fn push_roster(app: AppHandle, call: Arc<Call>) {
-    let mut roster = call.roster();
+async fn push_roster(app: AppHandle, mut roster: watch::Receiver<Vec<Participant>>) {
     loop {
         let participants = roster.borrow_and_update().clone();
         let _ = app.emit(ROSTER_EVENT, participants);
 
         if roster.changed().await.is_err() {
             return;
+        }
+    }
+}
+
+/// Forwards the call's health to the webview until it ends.
+///
+/// Both watches feed one event: a reconnect changes the state and the
+/// participant id together, and a UI that learned them separately would spend a
+/// frame unable to find itself in the roster.
+async fn push_state(
+    app: AppHandle,
+    mut state: watch::Receiver<CallState>,
+    mut self_id: watch::Receiver<String>,
+) {
+    loop {
+        let health = CallHealth {
+            state: state.borrow_and_update().clone(),
+            self_id: self_id.borrow_and_update().clone(),
+        };
+        let ended = health.state.is_ended();
+        let _ = app.emit(STATE_EVENT, health);
+        if ended {
+            return;
+        }
+
+        tokio::select! {
+            changed = state.changed() => if changed.is_err() { return },
+            changed = self_id.changed() => if changed.is_err() { return },
         }
     }
 }
@@ -188,7 +230,7 @@ async fn push_roster(app: AppHandle, call: Arc<Call>) {
 pub fn run() {
     tauri::Builder::default()
         .setup(|app| {
-            app.manage(CallState::default());
+            app.manage(CurrentCall::default());
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![

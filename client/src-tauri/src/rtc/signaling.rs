@@ -218,7 +218,11 @@ impl Signaling {
         let status = response.status();
         let body = response.text().await.unwrap_or_default();
         if !status.is_success() {
-            return Err(RtcError::JoinRejected(describe(status, &body)));
+            let refusal = refusal(status, &body);
+            return Err(RtcError::JoinRejected {
+                code: refusal.code,
+                detail: refusal.detail,
+            });
         }
         serde_json::from_str(&body).map_err(|error| RtcError::Protocol(error.to_string()))
     }
@@ -252,7 +256,7 @@ impl Signaling {
         let status = response.status();
         let text = response.text().await.unwrap_or_default();
         if !status.is_success() {
-            return Err(RtcError::Sfu(describe(status, &text)));
+            return Err(RtcError::Sfu(refusal(status, &text).detail));
         }
         serde_json::from_str(&text).map_err(|error| RtcError::Protocol(error.to_string()))
     }
@@ -343,9 +347,21 @@ fn websocket_origin(base: &str) -> String {
     }
 }
 
-/// Turns the server's typed error body back into one line. The room answers
+/// A refusal, split into the part a human reads and the part code branches on.
+pub struct Refusal {
+    /// The room's own error code, when the body carried one.
+    pub code: Option<String>,
+    /// One line, for a log or a UI.
+    pub detail: String,
+}
+
+/// Turns the server's typed error body into a [`Refusal`]. The room answers
 /// `{ error, message }`; anything else is quoted as-is rather than guessed at.
-fn describe(status: reqwest::StatusCode, body: &str) -> String {
+///
+/// The code is kept separate on purpose: `room_full` decides whether a
+/// reconnect waits or gives up, and deciding that by searching the prose for a
+/// phrase would break the first time the message is reworded.
+fn refusal(status: reqwest::StatusCode, body: &str) -> Refusal {
     #[derive(Deserialize)]
     struct RoomErrorBody {
         error: String,
@@ -353,16 +369,44 @@ fn describe(status: reqwest::StatusCode, body: &str) -> String {
     }
 
     serde_json::from_str::<RoomErrorBody>(body).map_or_else(
-        |_| format!("{status}: {body}"),
-        |parsed| format!("{} ({})", parsed.message, parsed.error),
+        |_| Refusal {
+            code: None,
+            detail: format!("{status}: {body}"),
+        },
+        |parsed| Refusal {
+            detail: format!("{} ({})", parsed.message, parsed.error),
+            code: Some(parsed.error),
+        },
     )
 }
 
 #[cfg(test)]
 mod tests {
     use super::{
-        websocket_origin, ClientMessage, Participant, PublishedTrack, ServerMessage, SfuOperation,
+        refusal, websocket_origin, ClientMessage, Participant, PublishedTrack, ServerMessage,
+        SfuOperation,
     };
+
+    #[test]
+    fn a_typed_refusal_keeps_its_code_apart_from_its_prose() {
+        let parsed = refusal(
+            reqwest::StatusCode::CONFLICT,
+            r#"{"error":"room_full","message":"room is full (8 participants)"}"#,
+        );
+
+        assert_eq!(parsed.code.as_deref(), Some("room_full"));
+        assert_eq!(parsed.detail, "room is full (8 participants) (room_full)");
+    }
+
+    #[test]
+    fn a_body_the_room_did_not_write_is_quoted_rather_than_guessed_at() {
+        // A proxy or a stray 502 in front of the Worker: there is no code to
+        // branch on, and inventing one would be worse than admitting it.
+        let parsed = refusal(reqwest::StatusCode::BAD_GATEWAY, "<html>nope</html>");
+
+        assert!(parsed.code.is_none());
+        assert!(parsed.detail.contains("nope"));
+    }
 
     #[test]
     fn websocket_origins_follow_the_http_scheme() {
