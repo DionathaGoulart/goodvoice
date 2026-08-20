@@ -21,6 +21,12 @@ export interface ProxyEcho {
   body: unknown;
 }
 
+/** A track the fake accepts the request for but refuses individually. */
+export const MID_REJECTED = "rejected";
+
+/** A track whose presence makes the fake refuse the whole request. */
+export const MID_REFUSED = "refused";
+
 const PROXIED_PATH = /^\/v1\/apps\/([^/]+)\/sessions\/([^/]+)\/(.+)$/;
 
 const PROXIED_OPERATIONS = new Set([
@@ -79,13 +85,38 @@ export async function fakeRealtimeApi(request: Request): Promise<Response> {
       return new Response("unknown operation", { status: 404 });
     }
 
+    const body = (await request.json().catch(() => null)) as {
+      tracks?: { mid?: string; trackName?: string }[];
+    } | null;
+
     const echo: ProxyEcho = {
       method: request.method,
       session,
       operation,
-      body: await request.json().catch(() => null),
+      body,
     };
-    return Response.json({ echo });
+
+    // Two mids stand in for the failure modes the room has to survive without
+    // a real SDP exchange: MID_REJECTED is a track the SFU turns down inside an
+    // otherwise successful answer, MID_REFUSED sinks the whole request.
+    const requested = body?.tracks ?? [];
+    if (requested.some((track) => track.mid === MID_REFUSED)) {
+      return Response.json(
+        { errorCode: "invalid_offer", errorDescription: "no" },
+        { status: 400 },
+      );
+    }
+
+    return Response.json({
+      echo,
+      tracks: requested.map((track) => ({
+        mid: track.mid,
+        trackName: track.trackName,
+        ...(track.mid === MID_REJECTED
+          ? { error: { errorCode: "track_rejected" } }
+          : {}),
+      })),
+    });
   }
 
   return new Response(`unexpected outbound request: ${request.url}`, {
