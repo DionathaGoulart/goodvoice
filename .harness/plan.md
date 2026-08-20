@@ -114,6 +114,11 @@ Goal: two clients talking through the SFU. Riskiest phase — spikes first.
   Decision Record + libwebrtc FFI evaluation, and STOP for user input.
   DoD: a published track from client A is pulled by a throwaway web page or second
   client. Verify: `cargo run --bin rtc-spike -- --room test` against Phase 1 deploy.
+  **Server half done:** the Worker proxy DR-2 called for is in —
+  `POST /rooms/:code/sfu/tracks/new`, `PUT …/renegotiate`, `PUT …/tracks/close`,
+  signed with the app secret, scoped to the caller's own session, and refusing
+  any track that pulls from a session outside the room (58 tests green). The
+  Rust spike itself still needs a Windows host.
 - [ ] **2.4 Wire join flow end-to-end** — `rtc/session.rs`, `audio/`, minimal UI
   (`client/ui`): room code input → join → publish mic → subscribe/playback peers.
   DoD: two Windows machines (or machine+VM) hold a conversation.
@@ -339,5 +344,19 @@ under `/rooms/:code/sfu/*` that injects the `Authorization` header, the same
 shape `partytracks/server` uses. Shipping the secret to a desktop client would
 hand every user the keys to the whole Realtime app.
 
-**Consequences.** Task 2.3's spike must budget for that proxy route; it is not
-yet written.
+**Consequences.** Task 2.3's spike must budget for that proxy route.
+
+**Update (2026-08-20).** The route is written and tested. Three operations are
+allowlisted — `POST /rooms/:code/sfu/tracks/new`, `PUT …/renegotiate`,
+`PUT …/tracks/close` — each pinned to one method, because a request the Worker
+signs is a request the account owner made. The path's session id is always the
+caller's own (looked up from `?p=<participant>`, never taken from the client),
+and a body that pulls from a `sessionId` belonging to nobody in the room is
+refused: a stranger's session id is not secret enough to be a capability.
+Everything else in the body is forwarded untouched, so Cloudflare can extend
+their request model without a Worker release. The SFU's own status codes pass
+through rather than being flattened into a 502.
+
+Still open for task 2.4: peers cannot yet *learn* each other's session ids and
+track names. The roster deliberately does not carry them — publishing a track
+needs its own signaling message, and that is 2.4's design to make.

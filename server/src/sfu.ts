@@ -2,10 +2,13 @@ import type { Env } from "./env";
 import { RoomError } from "./protocol";
 
 /**
- * Cloudflare Realtime (Calls) credential exchange.
+ * Cloudflare Realtime (Calls) credential exchange, and the narrow proxy the
+ * client negotiates tracks through.
  *
  * The app secret and the TURN key never leave the Worker: the client receives
- * a session id and short-lived ICE credentials, nothing else.
+ * a session id and short-lived ICE credentials, nothing else. Track
+ * negotiation needs that same secret, so it cannot happen client-side either —
+ * see DR-2 in .harness/plan.md.
  */
 
 const DEFAULT_API_BASE = "https://rtc.live.cloudflare.com/v1";
@@ -140,4 +143,83 @@ async function iceServers(
   return STUN_ONLY;
 }
 
-export { STUN_ONLY, TURN_TTL_SECONDS };
+/**
+ * The only Realtime endpoints reachable through the Worker, each pinned to the
+ * one method it accepts. An allowlist rather than a passthrough: the proxy
+ * signs every request with the app secret, so whatever it forwards is
+ * effectively performed by the account owner.
+ */
+const PROXIED_OPERATIONS = {
+  "tracks/new": "POST",
+  renegotiate: "PUT",
+  "tracks/close": "PUT",
+} as const;
+
+export type SfuOperation = keyof typeof PROXIED_OPERATIONS;
+
+export function isSfuOperation(value: string): value is SfuOperation {
+  return Object.hasOwn(PROXIED_OPERATIONS, value);
+}
+
+/** The HTTP method {@link proxySfuRequest} will use for an operation. */
+export function sfuOperationMethod(operation: SfuOperation): string {
+  return PROXIED_OPERATIONS[operation];
+}
+
+/**
+ * Forwards one track-negotiation call to the Realtime API with the app secret
+ * attached, and hands the answer back untouched.
+ *
+ * The caller is responsible for deciding that `sessionId` belongs to whoever
+ * is asking — this function authenticates to Cloudflare, it does not authorise
+ * the client.
+ *
+ * @throws {RoomError} `sfu_unavailable` when the app is unconfigured or the
+ * API cannot be reached at all.
+ */
+export async function proxySfuRequest(
+  env: Env,
+  sessionId: string,
+  operation: SfuOperation,
+  body: string,
+  fetchImpl: FetchLike = fetch,
+): Promise<Response> {
+  const appId = env.CALLS_APP_ID;
+  const appSecret = env.CALLS_APP_SECRET;
+  if (!appId || !appSecret) {
+    throw new RoomError(
+      "sfu_unavailable",
+      "CALLS_APP_ID and CALLS_APP_SECRET are not configured",
+    );
+  }
+
+  const base = env.CALLS_API_BASE ?? DEFAULT_API_BASE;
+  const response = await fetchImpl(
+    `${base}/apps/${appId}/sessions/${sessionId}/${operation}`,
+    {
+      method: PROXIED_OPERATIONS[operation],
+      headers: {
+        authorization: `Bearer ${appSecret}`,
+        "content-type": "application/json",
+      },
+      body,
+    },
+  ).catch(() => null);
+
+  if (!response) {
+    throw new RoomError("sfu_unavailable", "Realtime is unreachable");
+  }
+
+  // The SFU's verdict is passed through as-is: a 400 on a malformed SDP is the
+  // client's problem to fix, and repackaging it as a 502 would erase the
+  // reason. Only the headers are dropped, so nothing we sent comes back out.
+  return new Response(response.body, {
+    status: response.status,
+    headers: {
+      "content-type":
+        response.headers.get("content-type") ?? "application/json",
+    },
+  });
+}
+
+export { PROXIED_OPERATIONS, STUN_ONLY, TURN_TTL_SECONDS };

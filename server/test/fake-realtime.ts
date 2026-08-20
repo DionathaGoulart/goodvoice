@@ -1,7 +1,7 @@
 /**
  * A stand-in for the Cloudflare Realtime API, wired up as Miniflare's outbound
- * service in `vitest.config.ts`. It answers the two endpoints the Worker calls
- * and rejects everything else loudly, so an unmocked call cannot slip through.
+ * service in `vitest.config.ts`. It answers the endpoints the Worker calls and
+ * rejects everything else loudly, so an unmocked call cannot slip through.
  */
 
 export const TEST_SFU = {
@@ -13,7 +13,23 @@ export const TEST_SFU = {
   turnUrl: "turn:turn.cloudflare.test:3478",
 } as const;
 
-export function fakeRealtimeApi(request: Request): Response {
+/** What the proxied track endpoints echo back, so tests can inspect the hop. */
+export interface ProxyEcho {
+  method: string;
+  session: string;
+  operation: string;
+  body: unknown;
+}
+
+const PROXIED_PATH = /^\/v1\/apps\/([^/]+)\/sessions\/([^/]+)\/(.+)$/;
+
+const PROXIED_OPERATIONS = new Set([
+  "tracks/new",
+  "renegotiate",
+  "tracks/close",
+]);
+
+export async function fakeRealtimeApi(request: Request): Promise<Response> {
   const url = new URL(request.url);
   const auth = request.headers.get("authorization");
 
@@ -41,6 +57,35 @@ export function fakeRealtimeApi(request: Request): Response {
       },
       { status: 201 },
     );
+  }
+
+  // Track negotiation: echo the hop back so a test can assert what the Worker
+  // signed and forwarded, without the real API's SDP machinery.
+  const proxied = PROXIED_PATH.exec(url.pathname);
+  if (proxied) {
+    const [, appId, session, operation] = proxied as unknown as [
+      string,
+      string,
+      string,
+      string,
+    ];
+    if (appId !== TEST_SFU.appId) {
+      return new Response("unknown app", { status: 404 });
+    }
+    if (auth !== `Bearer ${TEST_SFU.appSecret}`) {
+      return new Response("unauthorized", { status: 401 });
+    }
+    if (!PROXIED_OPERATIONS.has(operation)) {
+      return new Response("unknown operation", { status: 404 });
+    }
+
+    const echo: ProxyEcho = {
+      method: request.method,
+      session,
+      operation,
+      body: await request.json().catch(() => null),
+    };
+    return Response.json({ echo });
   }
 
   return new Response(`unexpected outbound request: ${request.url}`, {
