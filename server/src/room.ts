@@ -4,6 +4,7 @@ import type { Env } from "./env";
 import {
   clientMessageSchema,
   displayNameSchema,
+  joinRequestSchema,
   MAX_PARTICIPANTS,
   RoomError,
   type ClientMessage,
@@ -31,7 +32,49 @@ export interface JoinResult {
 export class Room extends DurableObject<Env> {
   #members = new Map<string, Member>();
 
-  // --- internal API, reached from the Worker router -----------------------
+  /**
+   * The Worker forwards `/rooms/:code/{join,ws}` here as `/join` and `/ws`.
+   * Errors are answered rather than thrown: a `Response` crosses the Durable
+   * Object boundary intact, while a custom error class loses its fields.
+   */
+  override async fetch(request: Request): Promise<Response> {
+    const url = new URL(request.url);
+
+    try {
+      if (url.pathname === "/join") {
+        const body = joinRequestSchema.safeParse(
+          await request.json().catch(() => null),
+        );
+        if (!body.success) {
+          throw new RoomError(
+            "bad_request",
+            "expected a JSON body with a name",
+          );
+        }
+        return Response.json(this.join(body.data.name));
+      }
+
+      if (url.pathname === "/ws") {
+        if (request.headers.get("upgrade")?.toLowerCase() !== "websocket") {
+          throw new RoomError("bad_request", "expected a WebSocket upgrade");
+        }
+        const participant = url.searchParams.get("p");
+        if (!participant) {
+          throw new RoomError("bad_request", "missing participant id");
+        }
+        return this.openSocket(participant);
+      }
+    } catch (error) {
+      if (error instanceof RoomError) {
+        return error.toResponse();
+      }
+      throw error;
+    }
+
+    return new Response("not found", { status: 404 });
+  }
+
+  // --- roster API, also called directly by unit tests ---------------------
 
   /**
    * Registers a participant and returns the roster as they will see it.
@@ -93,12 +136,13 @@ export class Room extends DurableObject<Env> {
     server.addEventListener("close", drop);
     server.addEventListener("error", drop);
 
+    // No broadcast: connecting does not change the roster. Everyone already
+    // learned about this participant when `join()` registered them.
     this.#send(server, {
       type: "welcome",
       self: participantId,
       participants: this.roster(),
     });
-    this.#broadcastRoster();
 
     return new Response(null, { status: 101, webSocket: client });
   }

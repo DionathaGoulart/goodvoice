@@ -67,7 +67,7 @@ No Rust in this phase — Worker + DO only, integration-tested with vitest.
   participant for roster pushes. Zod-validate every inbound message.
   DoD: unit tests cover join/leave/cap/last-out-reset.
   Verify: `cd server && npx vitest run` (uses `@cloudflare/vitest-pool-workers`).
-- [ ] **1.2 Worker routes** — `server/src/index.ts`. `POST /rooms/:code/join` →
+- [x] **1.2 Worker routes** — `server/src/index.ts`. `POST /rooms/:code/join` →
   routes to DO by room code (idFromName), `GET /rooms/:code/ws` → WebSocket upgrade
   proxied to DO, `GET /health`. No other routes. CORS: `origin: *`.
   DoD: route tests pass. Verify: `npx vitest run`.
