@@ -90,6 +90,10 @@ No Rust in this phase — Worker + DO only, integration-tested with vitest.
   account; document required secrets in `wrangler.toml` comments.
   DoD: deployed URL passes health + join flow with curl/websocat script committed
   as `server/scripts/smoke.sh`. Verify: `bash server/scripts/smoke.sh <url>`.
+  **Blocked on:** the Cloudflare account switch (a project-scoped API token in
+  `server/.env`, see `.env.example`) plus a Realtime app for the two `CALLS_*`
+  secrets. `smoke.sh` is written and passes against `wrangler dev` with a local
+  stand-in for the Realtime API; only the real deploy is missing.
 
 ## Phase 2 — Voice MVP (2 people)
 
