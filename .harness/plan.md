@@ -52,7 +52,7 @@ Goal: repo builds, CI green, hello-world client and worker exist and deploy.
   DoD: probe output from a real Windows gaming machine pasted into a Decision
   Record in this file (devices found, min buffer ms, hw encoders found).
   Verify: `cargo run --bin probe` on Windows host.
-- [ ] **0.6 README + LICENSE + .gitignore checked in** — root. README states the
+- [x] **0.6 README + LICENSE + .gitignore checked in** — root. README states the
   three features, perf budgets, self-host one-liner; MIT LICENSE.
   DoD: files exist, README renders. Verify: `git ls-files | grep -E 'README|LICENSE'`.
 
