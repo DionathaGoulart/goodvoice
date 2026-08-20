@@ -41,6 +41,10 @@ Goal: repo builds, CI green, hello-world client and worker exist and deploy.
   (windows-latest runner), server/ui prettier+tsc, `wrangler deploy --dry-run`.
   DoD: workflow file is valid and passes on push.
   Verify: `gh run watch` on the push, or `act` locally if available.
+  **Blocked on:** no git remote yet, and neither `act` nor `actionlint` is
+  installed. The file parses and every step's command was run by hand and
+  passes (rust gates on macOS, not the windows-latest runner). Check the box
+  only after a real run is green.
 - [ ] **0.5 [WIN] Hardware risk probe (spike)** — `client/src-tauri/src/bin/probe.rs`.
   Tiny binary that (a) enumerates WASAPI render/capture devices + their shared-mode
   min buffer sizes, (b) enumerates Media Foundation H.264 encoders and flags which
