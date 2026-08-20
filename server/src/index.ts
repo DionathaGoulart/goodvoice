@@ -9,7 +9,7 @@ export { Room } from "./room";
  */
 const CORS_HEADERS: Record<string, string> = {
   "access-control-allow-origin": "*",
-  "access-control-allow-methods": "GET, POST, OPTIONS",
+  "access-control-allow-methods": "GET, POST, PUT, OPTIONS",
   "access-control-allow-headers": "content-type",
   "access-control-max-age": "86400",
 };
@@ -36,7 +36,7 @@ function matchRoom(
   method: string,
 ): { code: string; path: string } | null {
   const parts = pathname.split("/").filter(Boolean);
-  if (parts.length !== 3 || parts[0] !== "rooms") {
+  if (parts.length < 3 || parts[0] !== "rooms") {
     return null;
   }
 
@@ -46,11 +46,22 @@ function matchRoom(
   }
 
   const action = parts[2];
-  if (action === "join" && method === "POST") {
-    return { code: code.data, path: "/join" };
+
+  if (parts.length === 3) {
+    if (action === "join" && method === "POST") {
+      return { code: code.data, path: "/join" };
+    }
+    if (action === "ws" && method === "GET") {
+      return { code: code.data, path: "/ws" };
+    }
+    return null;
   }
-  if (action === "ws" && method === "GET") {
-    return { code: code.data, path: "/ws" };
+
+  // `/rooms/:code/sfu/<operation>`, where the operation is the whole remainder
+  // because Realtime spells some of them with a slash (`tracks/new`). Which
+  // operations exist, and which method each takes, is the room's call.
+  if (action === "sfu") {
+    return { code: code.data, path: `/sfu/${parts.slice(3).join("/")}` };
   }
   return null;
 }

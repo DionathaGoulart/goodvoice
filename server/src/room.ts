@@ -7,17 +7,29 @@ import {
   joinRequestSchema,
   MAX_PARTICIPANTS,
   RoomError,
+  sfuProxyBodySchema,
   type ClientMessage,
   type Participant,
   type ServerMessage,
 } from "./protocol";
-import { createSfuSession } from "./sfu";
+import {
+  createSfuSession,
+  isSfuOperation,
+  proxySfuRequest,
+  sfuOperationMethod,
+} from "./sfu";
 
 /** A participant plus the bits that never leave the server. */
 interface Member extends Participant {
   socket: WebSocket | null;
   /** Last time we heard anything at all from them. */
   lastSeen: number;
+  /**
+   * The Realtime session created for them at join. Null between taking the
+   * roster slot and the credential exchange coming back — and for participants
+   * created straight through {@link Room.join} in tests.
+   */
+  sessionId: string | null;
 }
 
 /**
@@ -78,11 +90,16 @@ export class Room extends DurableObject<Env> {
         const joined = this.join(body.data.name);
         try {
           const sfu = await createSfuSession(this.env);
+          this.attachSession(joined.self, sfu.sessionId);
           return Response.json({ ...joined, sfu });
         } catch (error) {
           this.leave(joined.self);
           throw error;
         }
+      }
+
+      if (url.pathname.startsWith("/sfu/")) {
+        return await this.#proxySfu(url, request);
       }
 
       if (url.pathname === "/ws") {
@@ -136,6 +153,7 @@ export class Room extends DurableObject<Env> {
       sharing: false,
       socket: null,
       lastSeen: now,
+      sessionId: null,
     });
 
     // The clock starts here, not at the WebSocket: a client that joins and
@@ -143,6 +161,18 @@ export class Room extends DurableObject<Env> {
     this.#queueAlarmWork(() => this.#scheduleSweep());
     this.#broadcastRoster();
     return { self: id, participants: this.roster() };
+  }
+
+  /**
+   * Binds the Realtime session the credential exchange just created to the
+   * participant it was created for. Nothing else may negotiate on it: this
+   * mapping is what the SFU proxy authorises against.
+   */
+  attachSession(participantId: string, sessionId: string): void {
+    const member = this.#members.get(participantId);
+    if (member) {
+      member.sessionId = sessionId;
+    }
   }
 
   /**
@@ -207,8 +237,12 @@ export class Room extends DurableObject<Env> {
     return [...this.#members.values()]
       .sort((a, b) => a.joinedAt - b.joinedAt)
       .map(
-        ({ socket: _socket, lastSeen: _lastSeen, ...participant }) =>
-          participant,
+        ({
+          socket: _socket,
+          lastSeen: _lastSeen,
+          sessionId: _sessionId,
+          ...participant
+        }) => participant,
       );
   }
 
@@ -260,6 +294,89 @@ export class Room extends DurableObject<Env> {
   }
 
   // --- internals ----------------------------------------------------------
+
+  /**
+   * `/rooms/:code/sfu/<operation>` — track negotiation, signed with the app
+   * secret on the way out (DR-2). The room decides two things the SFU cannot:
+   * that the caller owns the session being negotiated, and that any session
+   * they pull from is one of their roommates'.
+   */
+  async #proxySfu(url: URL, request: Request): Promise<Response> {
+    const operation = url.pathname.slice("/sfu/".length);
+    if (!isSfuOperation(operation)) {
+      throw new RoomError(
+        "bad_request",
+        `unsupported SFU operation: ${operation}`,
+      );
+    }
+    if (request.method !== sfuOperationMethod(operation)) {
+      throw new RoomError(
+        "bad_request",
+        `${operation} expects ${sfuOperationMethod(operation)}`,
+      );
+    }
+
+    const participantId = url.searchParams.get("p");
+    if (!participantId) {
+      throw new RoomError("bad_request", "missing participant id");
+    }
+
+    const member = this.#members.get(participantId);
+    if (!member) {
+      throw new RoomError("unknown_participant", "join the room first");
+    }
+    if (!member.sessionId) {
+      throw new RoomError(
+        "sfu_unavailable",
+        "this participant has no Realtime session",
+      );
+    }
+
+    const body = await request.text();
+    this.#assertTracksStayInTheRoom(body);
+
+    // Negotiating a track proves the client is alive just as well as a
+    // heartbeat does, and a long negotiation must not age them out.
+    this.touch(participantId);
+
+    return proxySfuRequest(this.env, member.sessionId, operation, body);
+  }
+
+  /**
+   * Rejects a body that pulls from a session belonging to no one here. The
+   * session id of a stranger is not secret enough to be a capability — without
+   * this check, learning one would be enough to subscribe to their audio from
+   * outside their room.
+   */
+  #assertTracksStayInTheRoom(body: string): void {
+    const parsed = sfuProxyBodySchema.safeParse(
+      ((): unknown => {
+        try {
+          return JSON.parse(body);
+        } catch {
+          return null;
+        }
+      })(),
+    );
+    if (!parsed.success) {
+      throw new RoomError("bad_request", "expected a JSON body");
+    }
+
+    const inRoom = new Set(
+      [...this.#members.values()]
+        .map((member) => member.sessionId)
+        .filter((sessionId): sessionId is string => sessionId !== null),
+    );
+
+    for (const track of parsed.data.tracks ?? []) {
+      if (track.sessionId !== undefined && !inRoom.has(track.sessionId)) {
+        throw new RoomError(
+          "bad_request",
+          "track refers to a session outside this room",
+        );
+      }
+    }
+  }
 
   #queueAlarmWork(task: () => Promise<unknown>): void {
     this.#alarmWork = this.#alarmWork.then(task, task);

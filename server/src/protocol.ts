@@ -23,6 +23,24 @@ export const joinRequestSchema = z.object({
 
 export type JoinRequest = z.infer<typeof joinRequestSchema>;
 
+/**
+ * Body of a proxied `/rooms/:code/sfu/*` call — but only the part the room has
+ * to police. A track that names a `sessionId` is pulling someone else's media,
+ * and the room checks that someone is in it.
+ *
+ * Everything else is deliberately loose and forwarded untouched: the SDP and
+ * the track flags are between the client and the SFU, and mirroring
+ * Cloudflare's request model here would mean re-releasing the Worker every
+ * time they extend it.
+ */
+export const sfuProxyBodySchema = z.looseObject({
+  tracks: z
+    .array(z.looseObject({ sessionId: z.string().optional() }))
+    .optional(),
+});
+
+export type SfuProxyBody = z.infer<typeof sfuProxyBodySchema>;
+
 /** A participant as broadcast to everyone in the room. */
 export interface Participant {
   id: string;
