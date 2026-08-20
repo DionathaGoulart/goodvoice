@@ -16,6 +16,11 @@ publish = false
 name = "goodvoice_client_lib"
 crate-type = ["staticlib", "cdylib", "rlib"]
 
+# styleguide.md: pedantic on at the crate root, no blanket allows. Declared here
+# so binaries and tests inherit it too, not just `lib.rs`.
+[lints.clippy]
+pedantic = { level = "warn", priority = -1 }
+
 [build-dependencies]
 tauri-build = { version = "2.6", features = [] }
 

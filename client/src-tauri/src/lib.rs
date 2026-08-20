@@ -1,5 +1,3 @@
-#![warn(clippy::pedantic)]
-
 //! goodvoice client core.
 //!
 //! The Tauri shell is a thin host: every concern lives in its own module and

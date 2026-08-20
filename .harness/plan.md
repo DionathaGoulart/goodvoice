@@ -32,7 +32,7 @@ Goal: repo builds, CI green, hello-world client and worker exist and deploy.
   `Room` declared and bound (empty shell).
   DoD: local dev server answers health check.
   Verify: `cd server && npm install && npx wrangler dev` + `curl localhost:8787/health`.
-- [ ] **0.3 Lint/format gates** — `client/src-tauri` (clippy pedantic per
+- [x] **0.3 Lint/format gates** — `client/src-tauri` (clippy pedantic per
   styleguide), Prettier config for `server/` and `client/ui`.
   DoD: all four commands pass clean:
   `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings`,
