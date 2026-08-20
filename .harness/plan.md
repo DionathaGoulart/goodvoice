@@ -20,7 +20,7 @@
 
 Goal: repo builds, CI green, hello-world client and worker exist and deploy.
 
-- [ ] **0.1 Rust workspace + Tauri v2 hello world** — `client/src-tauri/*`,
+- [x] **0.1 Rust workspace + Tauri v2 hello world** — `client/src-tauri/*`,
   `client/ui/*`. Init Tauri v2 app (SolidJS + TS + Vite template) in `client/`;
   workspace compiles with empty `audio/capture/rtc/tray` modules declared.
   DoD: dev build opens a window showing "goodvoice".

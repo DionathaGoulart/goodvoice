@@ -1,0 +1,32 @@
+[workspace]
+members = ["."]
+resolver = "2"
+
+[package]
+name = "goodvoice-client"
+version = "0.1.0"
+description = "goodvoice — lightweight voice chat for Windows gamers"
+edition = "2021"
+rust-version = "1.82"
+license = "MIT"
+publish = false
+
+[lib]
+# `_lib` suffix keeps the lib from colliding with the binary on Windows.
+name = "goodvoice_client_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2.6", features = [] }
+
+[dependencies]
+tauri = { version = "2.11", features = [] }
+serde = { version = "1", features = ["derive"] }
+thiserror = "2"
+
+[profile.release]
+codegen-units = 1
+lto = true
+opt-level = "s"
+panic = "abort"
+strip = true

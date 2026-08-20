@@ -1,0 +1,94 @@
+@import "./palettes.css";
+
+:root {
+  --bg: var(--palette-void);
+  --surface: var(--palette-shell);
+  --border: var(--palette-line);
+  --fg: var(--palette-ink);
+  --fg-muted: var(--palette-muted);
+  --accent: var(--palette-signal);
+
+  --font-mono:
+    "JetBrains Mono", ui-monospace, SFMono-Regular, "SF Mono", Menlo, monospace;
+
+  color-scheme: dark;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#root {
+  height: 100%;
+  margin: 0;
+}
+
+body {
+  background: var(--bg);
+  color: var(--fg);
+  font-family: var(--font-mono);
+  font-size: 14px;
+  line-height: 1.5;
+  -webkit-font-smoothing: antialiased;
+  user-select: none;
+}
+
+::selection {
+  background: var(--accent);
+  color: var(--bg);
+}
+
+:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+.shell {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  height: 100%;
+}
+
+.wordmark {
+  font-size: 28px;
+  font-weight: 800;
+  letter-spacing: -0.03em;
+}
+
+.wordmark-accent {
+  color: var(--accent);
+}
+
+.tagline {
+  color: var(--fg-muted);
+  font-size: 12px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+/* Entrance: fade + short slide, ease-out, zero overshoot (styleguide.md §2.4). */
+.animate-enter {
+  animation: enter 200ms cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+
+@keyframes enter {
+  from {
+    opacity: 0;
+    transform: translateY(4px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .animate-enter {
+    animation: none;
+  }
+}

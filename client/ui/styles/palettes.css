@@ -1,0 +1,16 @@
+/*
+ * The only file in the repository allowed to contain a raw colour value.
+ * Everything else references var(--palette-*) or a theme token derived from it.
+ * (styleguide.md §2.1)
+ */
+
+:root {
+  --palette-void: #0a0c10;
+  --palette-shell: #12151c;
+  --palette-line: #232833;
+  --palette-ink: #e6e9ef;
+  --palette-muted: #8b94a7;
+  --palette-signal: #4ade80;
+  --palette-warn: #fbbf24;
+  --palette-error: #f87171;
+}
