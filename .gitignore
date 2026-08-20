@@ -8,6 +8,7 @@ dist/
 # Cloudflare
 .wrangler/
 .dev.vars
+.env
 
 # Tauri
 client/src-tauri/gen/

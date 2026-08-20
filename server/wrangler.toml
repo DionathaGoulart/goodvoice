@@ -1,0 +1,27 @@
+name = "goodvoice"
+main = "src/index.ts"
+compatibility_date = "2026-08-20"
+compatibility_flags = ["nodejs_compat"]
+
+# Secrets (never committed — set with `npx wrangler secret put <NAME>`):
+#   CALLS_APP_ID      — Cloudflare Realtime (Calls) app id
+#   CALLS_APP_SECRET  — Cloudflare Realtime (Calls) app secret
+# See docs/self-hosting.md.
+
+[vars]
+# Quality caps, tunable per self-host. Bits per second.
+MAX_AUDIO_BITRATE = "32000"
+MAX_VIDEO_BITRATE = "2500000"
+
+[observability]
+enabled = true
+
+[durable_objects]
+bindings = [{ name = "ROOM", class_name = "Room" }]
+
+# SQLite-backed classes are the only kind available on the free plan. goodvoice
+# keeps room state purely in memory and never touches the storage API — rooms
+# are ephemeral by design (prd.md §7).
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["Room"]

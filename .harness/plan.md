@@ -26,7 +26,7 @@ Goal: repo builds, CI green, hello-world client and worker exist and deploy.
   DoD: dev build opens a window showing "goodvoice".
   Verify: `cd client && npm install && npm run tauri build -- --debug` (on
   non-Windows dev hosts: `cargo check` inside `client/src-tauri` at minimum).
-- [ ] **0.2 Worker hello world** — `server/src/index.ts`, `server/wrangler.toml`,
+- [x] **0.2 Worker hello world** — `server/src/index.ts`, `server/wrangler.toml`,
   `server/package.json`, `server/tsconfig.json`. Minimal Hono-less router (plain
   `fetch` handler) returning `{"ok":true}` on `GET /health`; Durable Object class
   `Room` declared and bound (empty shell).
