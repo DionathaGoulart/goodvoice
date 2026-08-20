@@ -1,0 +1,18 @@
+# Rust
+target/
+
+# Node
+node_modules/
+dist/
+
+# Cloudflare
+.wrangler/
+.dev.vars
+
+# Tauri
+client/src-tauri/gen/
+
+# OS / editor
+.DS_Store
+Thumbs.db
+*.log
