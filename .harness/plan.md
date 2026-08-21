@@ -216,27 +216,18 @@ Goal: two clients talking through the SFU. Riskiest phase — spikes first.
   reference feed).
   DoD: speaker-echo test call shows no self-echo; DR records config chosen.
   Verify: manual echo test + `cargo test`.
-  Built: `audio/processing.rs` — AEC3, noise suppression and AGC2 over the
-  20 ms frame in two 10 ms passes, which is the only size WebRTC accepts. The
-  reference feed the task calls for is a lock-free ring the render callback
-  fills with exactly the mono block it sends to the device; the stage drains it
-  10 ms at a time and trims the backlog rather than following it. It sits
-  *below* `device.rs`'s seam, inside `Microphone::next_frame`, so a synthetic
-  source has nothing to cancel and every captured frame goes through the module
-  even when mute or the gate is about to throw it away — skipping frames would
-  lose the canceller its place in the stream. It also means the voice detector
-  from 3.3 sees denoised audio. A module that will not start is reported and
-  skipped: an echo is worse than no echo and much better than no call.
-  Verified without hardware: the echo test is automated. Speakers play noise,
-  the microphone hears exactly that, and after a second of convergence the
-  residual is **32 dB down** — DR-11 has the config, the numbers and the
-  convergence curve.
-  **Blocked on one thing:** the crate has never been built for Windows.
-  Upstream's CI is ubuntu and macOS only and its `build.rs` has no Windows
-  branch, though the C++ underneath does have one (DR-11). `cargo test` is
-  green on Linux; windows-latest is the judge and has not run yet. CI now
-  installs meson and ninja for it. If that build fails, DR-11 lists the two
-  fallbacks and the swap is one file.
+  **Built once, then parked — read DR-11 before starting.** The whole task was
+  written and working in commit `726da92`: `audio/processing.rs` (AEC3 + noise
+  suppression + AGC2 over the 20 ms frame in two 10 ms passes), the render tap
+  that gives the canceller its far end, and an automated echo test measuring
+  **32 dB** of cancellation. It was reverted, not abandoned — the dependency
+  will not build on Windows, for five shallow reasons DR-11 lists one by one.
+  `git show 726da92` is the implementation; DR-11 is why it is not here.
+  Whoever picks this up decides one thing first: vendor a patched
+  `webrtc-audio-processing-sys` into the repo, or wait for an upstream fix. The
+  design above does not change either way, and neither does the reference tap.
+  Until then a call has no echo cancellation, which costs nothing to anyone on
+  a headset and makes speakers unusable.
 - [x] **3.5 Auto-reconnect** — `rtc/reconnect.rs`. Exponential backoff, rejoin same
   room, resubscribe all tracks; UI shows reconnecting state.
   DoD: kill network 10 s mid-call → call resumes without restart.
@@ -727,69 +718,16 @@ frames** (80 ms) before it drops. That overhang renews goodvoice's own 300 ms
 hangover before it starts counting down, so the real tail after a sentence is
 about 380 ms. Digital silence from a cold detector never reads as voice.
 
-### DR-11: the echo canceller works, on a platform that is not the target (2026-08-20)
+### DR-11: the echo canceller works; its build script does not know Windows (2026-08-20)
 
 **Context.** Task 3.4 wanted `webrtc-audio-processing` between capture and
 encode. Unlike its VAD (DR-10), the parts this task needs — AEC3, noise
 suppression, gain control — are all present and current in 2.1.
 
-**What it costs to build.** `bundled` compiles the vendored C++ with meson and
-ninja and generates bindings with `bindgen`, so libclang joins the toolchain
-DR-3 worked to keep out. That was acceptable here in a way it was not for a
-codec binding: there is no second implementation of AEC3, and echo cancellation
-is the difference between "speakers work" and "speakers are unusable".
-
-**The unknown, stated plainly.** The crate has never been built for Windows.
-Upstream's CI matrix is `ubuntu-latest` and `macos-latest`; its `build.rs` has
-no `target_os = "windows"` branch. The C++ *is* Windows-aware — the vendored
-`meson.build` has a `host_system == 'windows'` arm with `WEBRTC_WIN`, `NOMINMAX`
-and MSVC's `/arch:AVX2` — so this is untested rather than unsupported. Nothing
-in this session can settle it: the only Windows host in reach has no Rust
-toolchain.
-
-**Decision.** Take it, and contain it. The whole dependency lives in
-`audio/processing.rs` behind one call, `Processing::run(&mut Frame)`, so
-replacing it touches one file — the containment DR-3 and DR-10 both relied on.
-CI's windows-latest job now installs meson and ninja and is what says yes or no.
-
-**If it says no**, in order of preference:
-
-1. **`speexdsp`** — MDF echo canceller plus a preprocessor that does noise
-   suppression and gain. Plain C, builds with `cc` under MSVC. A weaker
-   canceller than AEC3, and the one PulseAudio shipped for years.
-2. **Windows' own Voice Capture DSP** (`MFPKEY_WMAAECMA`) — AEC, NS and AGC
-   built into the operating system, no dependency at all, and a COM object to
-   drive plus a WASAPI loopback reference. Windows-only, which for this client
-   is not a limitation.
-
-**The reference feed.** Cancelling an echo means knowing what was played, and
-until now nothing outside the render callback saw that. The callback now copies
-its mono block into a lock-free ring on the way to the device — a push, so the
-callback still allocates and locks nothing — and the processing stage drains it
-10 ms at a time. Backlog past 100 ms is dropped rather than consumed: it means
-playback ran ahead while this side stalled, and old reference audio subtracted
-from the wrong moment is worse than no reference at all.
-
-Where the stage sits matters. It is *below* `device.rs`'s seam, inside
-`Microphone::next_frame`, which buys three things: a synthetic source stays as
-simple as it was, every captured frame goes through the module even when mute
-or the transmit gate is about to discard it — skip frames and AEC3 loses its
-place in the stream — and the voice detector from 3.3 sees denoised audio.
-
-**Config chosen**, and why not its neighbours:
-
-| Field | Value | Why |
-|---|---|---|
-| `echo_canceller` | `Full { stream_delay_ms: None }` | AEC3, delay left to its own estimator. The true figure is whatever WASAPI's buffers add up to on a machine nobody here can see, and a confident wrong number is worse than none. |
-| `noise_suppression` | `Moderate` | `High`/`VeryHigh` buy a quieter fan by chewing into consonants. A room asking "what?" is worse than a room with a fan in it. |
-| `gain_controller` | AGC2, adaptive digital, `input_volume_controller_enabled: false` | The alternative reaches out and moves the microphone slider in the operating system. That is the user's setting, not ours. |
-| `high_pass_filter` | on, full band | Recommended alongside AEC, and it takes desk knocks and breath rumble out from under the voice. |
-| `capture_amplifier` | none | The gain that matters is applied after the canceller has had its look. |
-
-**Measurements (Linux x86-64, debug build).** Deterministic noise played into
-the reference ring and fed back as the capture frame — a perfect echo, which is
-the hardest case for a canceller because there is no near-end speech to hide
-behind. RMS in ≈ 4 800 throughout:
+**It works.** Written, integrated and measured (commit `726da92`, reverted).
+Deterministic noise played into the reference ring and fed straight back as the
+capture frame — a perfect echo, the hardest case, with no near-end speech to
+hide behind. RMS in ≈ 4 800 throughout, on Linux x86-64, debug:
 
 | Frame (20 ms each) | Residual | Down by |
 |---|---|---|
@@ -798,19 +736,68 @@ behind. RMS in ≈ 4 800 throughout:
 | 50 (1 s) | 92 | ~34 dB |
 | 90 (1.8 s) | 114 | ~32 dB |
 
-It converges inside 200 ms and then gives a little back as the adaptive gain
+It converges inside 200 ms, then gives a little back as the adaptive gain
 controller lifts what is left. `residual_echo_likelihood` reads 0.0 at the end.
-The committed test asserts 20 dB rather than the measured 32, so it fails only
-when an echo is genuinely audible again.
 
-**Consequences.**
+**It does not build on Windows.** Upstream's CI is `ubuntu-latest` and
+`macos-latest`; its `build.rs` contains no `target_os = "windows"` branch and
+`main` has none either. Run on a real Windows host with MSVC 14.44, the Windows
+SDK, meson, ninja and LLVM all present, it fails in five places — none of them
+a real incompatibility:
 
-- Building the client now needs meson, ninja and libclang as well as cmake.
-  docs/self-hosting.md's contributor section (task 6.1) has to say so.
-- `AudioError` grew `Processing(String)`, used only to report a module that
-  would not start.
-- The first CI build on each runner is slow — the C++ is not small. `rust-cache`
-  covers the ones after it.
+| # | What | Why it is shallow |
+|---|---|---|
+| 1 | `Command::new("cp")` to copy the sources | The crate already has `fs_extra` in its build-dependencies |
+| 2 | `Command::new("nm")` to list symbols | GNU spelling; `llvm-nm` answers identically |
+| 3 | meson's `cpp_std=c++17` | One file, `agc2/input_volume_stats_reporter.cc:89`, uses designated initializers. GCC and Clang take them in C++17 as an extension; MSVC wants `/std:c++20` |
+| 4 | `.flag("-std=c++17").flag("-Wno-unused-parameter")` on `wrapper.cpp` | GCC flags handed to `cl.exe`, which reads `-Wno-...` as `/W` plus a non-number. `cc::Build::flag_if_supported` is the portable call |
+| 5 | Looks for `libwebrtc_audio_processing_wrapper.a` | MSVC writes `.lib`, so the wrapper's symbol prefixing is skipped silently and the link would then not resolve |
+
+1, 2 and 3 can be worked around from outside (Git for Windows on the tail of
+`PATH`, an `nm.exe` copied from `llvm-nm`, `CXXFLAGS=/std:c++20`). **4 and 5
+cannot** — they are `.flag()` calls and a hardcoded filename inside the crate.
+
+**Everything hard already worked.** With 1–3 worked around, all 440 objects of
+the WebRTC C++ compiled under MSVC, abseil built as a meson subproject, and
+`rust-objcopy` prefixed 60 248 symbols in the resulting COFF archive. What is
+left is five lines of build script.
+
+**Decision: parked, not swapped.** The alternatives are worse than waiting:
+
+- **Voice Capture DSP** (Windows' own AEC, `CLSID_CWMAudioAEC`) — no dependency
+  at all, and disqualified by one line of its documentation: output is
+  *"8,000; 11,025; 16,000; or 22,050"* samples per second. goodvoice runs at 48
+  kHz and does not resample (`opus::SAMPLE_RATE_HZ`). Routing every call through
+  16 kHz and back would put a permanent telephone-quality ceiling on the product's
+  main feature, plus resampler latency, to fix an echo only speaker users have.
+- **`speexdsp`** — the crate does not vendor its C. `speexdsp-sys` 0.1.2 (2018)
+  finds a system library through pkg-config and its `build` feature uses
+  autotools, which is worse on Windows than meson. Vendoring speex's `mdf.c`
+  ourselves is writing a `-sys` crate from scratch.
+- **`nnnoiseless`** — pure Rust and builds anywhere, but it is noise suppression
+  only. No echo cancellation, so it does not answer this task.
+
+**The two ways back**, for whoever picks this up:
+
+1. **Vendor.** `webrtc-audio-processing-sys` unpacks to 5.3 MB across 677 files.
+   Copy it under `vendor/`, apply the five fixes, point `[patch.crates-io]` at
+   the path. Self-contained, no external hosting, and the fixes to 1–3 mean the
+   `PATH` workarounds go away too. The cost is a C++ tree in the repository
+   larger than goodvoice itself, and somebody remembering to drop it when
+   upstream catches up.
+2. **Upstream.** All five are obviously-correct patches against
+   `tonarino/webrtc-audio-processing`. A PR that lands makes this a version bump.
+
+**Consequences of parking.**
+
+- A call has no echo cancellation. On a headset — the PRD's user, §2 — nothing
+  changes. On speakers the room hears itself, and that is a known hole rather
+  than a bug to hunt.
+- No noise suppression or gain control either; both came from the same module.
+- The build needs no meson, ninja or libclang after all. cmake stays, for the
+  vendored libopus (DR-4).
+- `audio/vad.rs`'s detector sees the raw microphone rather than a denoised one,
+  which is what its `Aggressive` setting was already chosen for (DR-10).
 
 ### DR-2: the client cannot talk to the SFU directly (2026-08-20)
 
