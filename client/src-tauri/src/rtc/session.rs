@@ -64,6 +64,7 @@ use crate::audio::{
     opus::{
         silent_frame, Frame, VoiceDecoder, VoiceEncoder, FRAME_MS, MAX_PACKET_BYTES, SAMPLE_RATE_HZ,
     },
+    vad::{Gate, TransmitMode},
 };
 
 /// The track name a goodvoice client publishes its microphone under. A closed
@@ -125,6 +126,11 @@ pub struct CallOptions {
     pub room: String,
     /// Display name, as the rest of the room will see it.
     pub name: String,
+    /// How transmission is gated to begin with. Carried in rather than
+    /// defaulted because the setting outlives any one call: the UI restores it
+    /// from disk and hands it over, so a client that joins in push-to-talk
+    /// never has a hot microphone for the first frame.
+    pub mode: TransmitMode,
 }
 
 /// One connected seat in the room, before any of the call's tasks are running.
@@ -193,6 +199,18 @@ async fn establish(
 struct Shared {
     muted: AtomicBool,
     deafened: AtomicBool,
+    /// How transmission is gated (task 3.3). Mute is "never"; this is "right
+    /// now". One byte because the publish loop reads it every frame — see
+    /// [`TransmitMode::code`].
+    transmit: AtomicU8,
+    /// Whether the talk key is down. Only consulted under
+    /// [`TransmitMode::PushToTalk`].
+    talk_key: AtomicBool,
+    /// Whether the last frame reached the wire. Written by the publish loop,
+    /// which is the only place the gate's verdict exists, and read by the
+    /// speaking indicator — a key that is up must stop the light immediately
+    /// rather than at the speed the meter decays.
+    gate_open: AtomicBool,
     /// Set by [`Call::leave`]. Every loop checks it before treating a closed
     /// socket as a failure — a call the user ended is not a call that dropped.
     leaving: AtomicBool,
@@ -221,10 +239,18 @@ struct Shared {
 }
 
 impl Shared {
-    fn new(self_id: String, participants: Vec<Participant>, sink: Arc<dyn AudioSink>) -> Arc<Self> {
+    fn new(
+        self_id: String,
+        participants: Vec<Participant>,
+        sink: Arc<dyn AudioSink>,
+        mode: TransmitMode,
+    ) -> Arc<Self> {
         Arc::new(Self {
             muted: AtomicBool::new(false),
             deafened: AtomicBool::new(false),
+            transmit: AtomicU8::new(mode.code()),
+            talk_key: AtomicBool::new(false),
+            gate_open: AtomicBool::new(true),
             leaving: AtomicBool::new(false),
             commands: Mutex::new(None),
             state: watch::Sender::new(CallState::Live),
@@ -242,9 +268,18 @@ impl Shared {
         self.leaving.load(Ordering::Relaxed)
     }
 
-    /// Whether the encode loop should be putting packets on the wire.
+    /// Whether the user has left the microphone on at all. What reaches the
+    /// wire is this *and* whatever [`Gate`] makes of the frame.
     fn is_transmitting(&self) -> bool {
         !self.muted.load(Ordering::Relaxed)
+    }
+
+    fn transmit_mode(&self) -> TransmitMode {
+        TransmitMode::from_code(self.transmit.load(Ordering::Relaxed))
+    }
+
+    fn talk_key_down(&self) -> bool {
+        self.talk_key.load(Ordering::Relaxed)
     }
 
     /// The playback slot a participant is being played in, if any.
@@ -270,8 +305,12 @@ impl Shared {
             })
             .unwrap_or_default();
 
-        // Muted is not talking, whatever the microphone says.
-        if self.microphone.is_speaking() && self.is_transmitting() {
+        // Muted is not talking, whatever the microphone says — and neither
+        // is a push-to-talk key that is up or a voice gate that never opened.
+        if self.microphone.is_speaking()
+            && self.is_transmitting()
+            && self.gate_open.load(Ordering::Relaxed)
+        {
             talking.push(self.self_id.borrow().clone());
         }
         talking.sort_unstable();
@@ -424,7 +463,12 @@ impl Call {
         source: Box<dyn AudioSource>,
         sink: Arc<dyn AudioSink>,
     ) -> Self {
-        let shared = Shared::new(session.self_id.clone(), session.participants.clone(), sink);
+        let shared = Shared::new(
+            session.self_id.clone(),
+            session.participants.clone(),
+            sink,
+            options.mode,
+        );
         let (roster, state, self_id, speaking) = (
             shared.roster.subscribe(),
             shared.state.subscribe(),
@@ -548,6 +592,31 @@ impl Call {
     #[must_use]
     pub fn is_deafened(&self) -> bool {
         self.shared.deafened.load(Ordering::Relaxed)
+    }
+
+    /// Chooses how transmission is gated: always, on a held key, or on a
+    /// detected voice.
+    ///
+    /// Not told to the room. Mute is a state peers see because it explains a
+    /// silence they would otherwise wonder about; a talk key that is up
+    /// explains nothing, and a roster that flickered with every syllable would
+    /// be worse than one that says nothing at all.
+    pub fn set_transmit_mode(&self, mode: TransmitMode) {
+        self.shared.transmit.store(mode.code(), Ordering::Relaxed);
+    }
+
+    #[must_use]
+    pub fn transmit_mode(&self) -> TransmitMode {
+        self.shared.transmit_mode()
+    }
+
+    /// Reports the talk key going down or coming up.
+    ///
+    /// Only [`TransmitMode::PushToTalk`] reads it, but it is recorded in every
+    /// mode: a key held across a switch into push-to-talk should already be
+    /// down when the first frame arrives.
+    pub fn set_talk_key(&self, down: bool) {
+        self.shared.talk_key.store(down, Ordering::Relaxed);
     }
 
     /// Throws the current seat away and takes another one, as if the transport
@@ -1204,14 +1273,21 @@ async fn publish_loop(
     };
     let mut packet = [0_u8; MAX_PACKET_BYTES];
     let mut failures = 0_usize;
+    let mut gate = Gate::new();
 
     while let Some(frame) = source.next_frame().await {
         // Mute stops packets rather than sending silence: the room should cost
         // nothing while nobody is talking (prd.md §3 F1). Nothing is encoded
-        // either — a frame nobody will send is work nobody asked for.
-        if !shared.is_transmitting() {
-            // The meter follows what the room hears, so a muted client reads
-            // as silent however loudly they are talking.
+        // either — a frame nobody will send is work nobody asked for. The gate
+        // answers the same question one frame at a time: push-to-talk and
+        // voice activity both live there (task 3.3), and neither is consulted
+        // while muted, so a muted client does not run a detector either.
+        let open = shared.is_transmitting()
+            && gate.admits(shared.transmit_mode(), shared.talk_key_down(), &frame);
+        shared.gate_open.store(open, Ordering::Relaxed);
+        if !open {
+            // The meter follows what the room hears, so a client whose audio
+            // is going nowhere reads as silent however loudly they are talking.
             shared.microphone.observe(0);
             continue;
         }
@@ -1647,7 +1723,7 @@ fn ssrc_for_mid(sdp: &str, mid: &str) -> Option<u32> {
 mod tests {
     use super::{
         is_starting_up, play_packet, publish_loop, silent_frame, ssrc_for_mid, ssrc_of,
-        track_error, PacketSink, Shared,
+        track_error, PacketSink, Shared, TransmitMode,
     };
     use crate::audio::{
         device::{AudioSink, AudioSource, NullSink, RecordingSink, ToneSource},
@@ -1769,7 +1845,12 @@ mod tests {
     /// A call with nowhere to play: enough for anything that only cares about
     /// the encode side.
     fn test_shared() -> Arc<Shared> {
-        Shared::new("me".to_owned(), vec![], Arc::new(NullSink))
+        Shared::new(
+            "me".to_owned(),
+            vec![],
+            Arc::new(NullSink),
+            TransmitMode::Open,
+        )
     }
 
     /// A call whose speakers can be inspected afterwards.
@@ -1779,6 +1860,7 @@ mod tests {
             "me".to_owned(),
             vec![],
             Arc::clone(&ears) as Arc<dyn AudioSink>,
+            TransmitMode::Open,
         );
         (shared, ears)
     }
@@ -1894,6 +1976,7 @@ mod tests {
             "me".to_owned(),
             vec![],
             Arc::clone(&levels) as Arc<dyn AudioSink>,
+            TransmitMode::Open,
         );
         shared
             .slots
@@ -2088,6 +2171,113 @@ mod tests {
 
         pump.abort();
         drop(published);
+    }
+
+    // --- the gate, without a network -------------------------------------
+
+    /// Digital silence, for the mode that decides on the signal itself.
+    struct Quiet {
+        left: usize,
+    }
+
+    #[async_trait::async_trait]
+    impl AudioSource for Quiet {
+        async fn next_frame(&mut self) -> Option<Frame> {
+            self.left = self.left.checked_sub(1)?;
+            Some(silent_frame())
+        }
+    }
+
+    /// Runs the encode loop with the gate set up, and hands back both what
+    /// went out and what the call believed while it ran.
+    async fn pump_gated(
+        source: Box<dyn AudioSource>,
+        mode: TransmitMode,
+        key_down: bool,
+    ) -> (Arc<Shared>, Arc<CountingSender>) {
+        let shared = test_shared();
+        shared.transmit.store(mode.code(), Ordering::Relaxed);
+        shared.talk_key.store(key_down, Ordering::Relaxed);
+
+        let sender = Arc::new(CountingSender::default());
+        let (published, sinks) = watch::channel(Some(Arc::clone(&sender) as Arc<dyn PacketSink>));
+
+        publish_loop(source, sinks, Arc::clone(&shared)).await;
+        drop(published);
+        (shared, sender)
+    }
+
+    /// What plan.md task 3.3 asks for: both modes demonstrably gate
+    /// transmission, to the same bar as mute — packets stop, they do not turn
+    /// into silence.
+    #[tokio::test]
+    async fn push_to_talk_sends_nothing_while_the_key_is_up() {
+        let (shared, sender) = pump_gated(
+            Box::new(Burst { left: 25 }),
+            TransmitMode::PushToTalk,
+            false,
+        )
+        .await;
+
+        assert_eq!(sender.count(), 0, "a key nobody held put audio on the wire");
+        // And the room is not told this client is talking either: the light
+        // has to go out with the key, not at the speed the meter decays.
+        shared.microphone.observe(20_000);
+        shared.refresh_speaking();
+        assert!(shared.speaking.borrow().is_empty());
+    }
+
+    #[tokio::test]
+    async fn push_to_talk_sends_every_frame_while_the_key_is_held() {
+        let (_shared, sender) =
+            pump_gated(Box::new(Burst { left: 25 }), TransmitMode::PushToTalk, true).await;
+
+        assert_eq!(sender.count(), 25);
+    }
+
+    #[tokio::test]
+    async fn voice_activity_sends_nothing_for_a_microphone_nobody_is_talking_into() {
+        // Longer than the hangover, so a gate that opened once and never shut
+        // would be caught here rather than looking like a slow one.
+        let (_shared, sender) = pump_gated(
+            Box::new(Quiet { left: 200 }),
+            TransmitMode::VoiceActivity,
+            false,
+        )
+        .await;
+
+        assert_eq!(sender.count(), 0, "silence went out as packets");
+    }
+
+    #[tokio::test]
+    async fn voice_activity_sends_while_there_is_something_to_hear() {
+        let (_shared, sender) = pump_gated(
+            Box::new(Burst { left: 25 }),
+            TransmitMode::VoiceActivity,
+            false,
+        )
+        .await;
+
+        assert_eq!(sender.count(), 25);
+    }
+
+    /// Mute is the outer question and the mode is the inner one. A client who
+    /// muted while holding the talk key must stay silent.
+    #[tokio::test]
+    async fn mute_wins_over_a_held_talk_key() {
+        let shared = test_shared();
+        shared.muted.store(true, Ordering::Relaxed);
+        shared
+            .transmit
+            .store(TransmitMode::PushToTalk.code(), Ordering::Relaxed);
+        shared.talk_key.store(true, Ordering::Relaxed);
+
+        let sender = Arc::new(CountingSender::default());
+        let (published, sinks) = watch::channel(Some(Arc::clone(&sender) as Arc<dyn PacketSink>));
+        publish_loop(Box::new(Burst { left: 25 }), sinks, Arc::clone(&shared)).await;
+        drop(published);
+
+        assert_eq!(sender.count(), 0);
     }
 
     /// Between sessions there is nowhere to send. The microphone still has to

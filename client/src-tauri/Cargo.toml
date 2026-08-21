@@ -63,6 +63,11 @@ ringbuf = "0.5"
 # the voice path can be exercised off Windows; whether it is also the Windows
 # backend is task 2.1's measurement to make — see DR-8.
 cpal = "0.18"
+# Voice activity detection. `webrtc-audio-processing` was the PRD's pick, but
+# its `voice_detected` stat is never populated in APM v2 — see DR-10. This is
+# the standalone WebRTC VAD (libfvad), vendored C built with `cc`: no libclang,
+# no meson, same profile as the vendored libopus DR-3 settled on.
+webrtc-vad = "0.4"
 anyhow = "1"
 
 [profile.release]

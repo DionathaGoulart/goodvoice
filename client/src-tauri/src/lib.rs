@@ -16,7 +16,7 @@ use serde::Serialize;
 use tauri::{AppHandle, Emitter as _, Manager as _, State};
 use tokio::sync::{watch, Mutex};
 
-use audio::{device::AudioSink, hardware};
+use audio::{device::AudioSink, hardware, vad::TransmitMode};
 use rtc::{
     reconnect::CallState,
     session::{Call, CallOptions},
@@ -112,6 +112,7 @@ async fn join_room(
     server: String,
     room: String,
     name: String,
+    mode: TransmitMode,
 ) -> Result<CallStatus, String> {
     let mut current = state.call.lock().await;
     if current.is_some() {
@@ -125,6 +126,7 @@ async fn join_room(
             base: server,
             room: room.clone(),
             name,
+            mode,
         },
         Box::new(microphone),
         Arc::new(speakers) as Arc<dyn AudioSink>,
@@ -182,6 +184,38 @@ async fn set_deafened(state: State<'_, CurrentCall>, deafened: bool) -> Result<(
     let call = state.call.lock().await;
     let call = call.as_ref().ok_or_else(|| "not in a call".to_owned())?;
     call.set_deafened(deafened).await;
+    Ok(())
+}
+
+/// Chooses how transmission is gated: always on, a held key, or a detected
+/// voice.
+///
+/// # Errors
+///
+/// Returns an error when there is no call. The setting itself lives in the UI,
+/// which restores it and hands it to [`join_room`]; this is only how a change
+/// made mid-call reaches the microphone.
+#[tauri::command]
+async fn set_transmit_mode(
+    state: State<'_, CurrentCall>,
+    mode: TransmitMode,
+) -> Result<(), String> {
+    let call = state.call.lock().await;
+    let call = call.as_ref().ok_or_else(|| "not in a call".to_owned())?;
+    call.set_transmit_mode(mode);
+    Ok(())
+}
+
+/// Reports the push-to-talk key going down or coming up.
+///
+/// # Errors
+///
+/// Returns an error when there is no call to talk into.
+#[tauri::command]
+async fn set_talk_key(state: State<'_, CurrentCall>, down: bool) -> Result<(), String> {
+    let call = state.call.lock().await;
+    let call = call.as_ref().ok_or_else(|| "not in a call".to_owned())?;
+    call.set_talk_key(down);
     Ok(())
 }
 
@@ -262,7 +296,9 @@ pub fn run() {
             join_room,
             leave_room,
             set_muted,
-            set_deafened
+            set_deafened,
+            set_transmit_mode,
+            set_talk_key
         ])
         .run(tauri::generate_context!())
         .expect("error while running goodvoice");

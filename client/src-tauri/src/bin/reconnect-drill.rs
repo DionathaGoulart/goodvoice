@@ -27,7 +27,10 @@ use std::{
 
 use anyhow::{bail, Context as _, Result};
 use goodvoice_client_lib::{
-    audio::device::{AudioSink, RecordingSink, ToneSource},
+    audio::{
+        device::{AudioSink, RecordingSink, ToneSource},
+        vad::TransmitMode,
+    },
     rtc::{
         reconnect::CallState,
         session::{Call, CallOptions},
@@ -120,6 +123,9 @@ async fn join(
             base: base.to_owned(),
             room: room.to_owned(),
             name: name.to_owned(),
+            // Open: the source here is a pure tone, and a voice detector has
+            // every right to decide that is not a voice.
+            mode: TransmitMode::Open,
         },
         Box::new(ToneSource::new(tone_hz)),
         Arc::clone(ears) as Arc<dyn AudioSink>,

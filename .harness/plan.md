@@ -189,10 +189,28 @@ Goal: two clients talking through the SFU. Riskiest phase — spikes first.
   both flags reach everyone else's roster, they stack, they survive a late
   joiner, and a message the room cannot parse moves nothing.
   **Left for this task:** the two-client audio confirmation, by ear.
-- [ ] **3.3 Push-to-talk + VAD modes** — `audio/vad.rs`, `ui` settings. PTT
+- [x] **3.3 Push-to-talk + VAD modes** — `audio/vad.rs`, `ui` settings. PTT
   (in-window key first; global hotkey is Phase 4), VAD via webrtc-audio-processing's
   voice detection with hangover time; mode persisted locally.
   DoD: both modes demonstrably gate transmission. Verify: `cargo test audio::vad` + manual.
+  **The named crate could not supply the detector.** `webrtc-audio-processing`
+  2.1 still declares `voice_detected` and never populates it — its own tests
+  assert the field is empty. The detector is the standalone WebRTC VAD
+  (libfvad) instead; see DR-10 for what was compared and what it measured.
+  Built: `audio/vad.rs` — `TransmitMode` (open / push-to-talk / voice activity)
+  and `Gate`, which answers one question per frame. `Shared` carries the mode
+  and the key as atomics so a reconnect keeps both, and the publish loop asks
+  the gate before it encodes: a frame nobody will send is not encoded, exactly
+  as with mute. The speaking indicator follows the gate rather than the meter,
+  so releasing the key puts the light out at once. In the UI the picker is on
+  both panels — someone who wants push-to-talk wants it *before* they join —
+  and the mode and key persist in the webview's storage.
+  Verified: `cargo test` (85 tests) covers the gate on its own and through the
+  publish loop — the key up sends nothing, the key down sends every frame, a
+  silent microphone in voice mode sends nothing across 200 frames, and mute
+  still wins over a held key.
+  **Not verified:** the manual half — a person holding a key and being heard,
+  by ear.
 - [ ] **3.4 AEC/NS/AGC integration** — `audio/processing.rs`. webrtc-audio-processing
   between capture and encode; loudspeaker echo cancelled (needs render-stream
   reference feed).
@@ -626,6 +644,67 @@ that cannot do 48 kHz is refused rather than silently degraded.
   path so far has been visible there and nowhere else.
 - `GOODVOICE_SERVER` at build time points a client at a different Worker, which
   docs/self-hosting.md (task 6.1) needs.
+
+### DR-10: the VAD the PRD named does not exist any more (2026-08-20)
+
+**Context.** Task 3.3 says "VAD via webrtc-audio-processing's voice detection
+with hangover time", and prd.md §7 lists the same crate for AEC/NS/AGC (task
+3.4). The intent was one dependency serving both.
+
+**Finding.** It cannot serve the first. `webrtc-audio-processing` 2.1.0 wraps
+PulseAudio's repackaging of the modern WebRTC `AudioProcessing` module, where
+the legacy VAD is gone. The `voice_detected` field survives in
+`AudioProcessingStats` and in the crate's FFI struct, but nothing writes it —
+the crate's own test says so in as many words:
+
+```rust
+// Fields declared in upstream but never populated in v2.1.
+assert!(!stats.voice_detected.has_value);
+```
+
+Enabling it is not a config away; the module that produced it was deleted
+upstream. So task 3.3 needed a detector of its own regardless of what 3.4 does.
+
+**Options considered.**
+
+| | `webrtc-audio-processing` 2.1 | `webrtc-vad` 0.4 (libfvad) | an energy gate |
+|---|---|---|---|
+| Voice detection | **none** — never populated | yes, the original WebRTC GMM VAD | RMS threshold only |
+| Build tooling | `bindgen` (libclang) + `meson`/`ninja` | `cc` only, bindings pre-generated | none |
+| C source | vendored, built with meson | vendored, built with `cc` | — |
+| Windows | meson build unproven with MSVC | plain C, `cc` handles MSVC | — |
+| Last release | May 2026 | Oct 2019 | — |
+| Tells noise from speech | — | yes | no |
+
+**Decision.** `webrtc-vad` 0.4. It is the same WebRTC VAD the PRD wanted, taken
+from before it was deleted, and its build profile is the one DR-3 already
+settled for: vendored C, no libclang, nothing for a contributor to install
+beyond a C compiler. An energy gate needs no dependency at all but cannot tell
+a fan from a voice, which is the entire job.
+
+The crate is six years old and that is the cost. It is 12 C files and one
+`unsafe` FFI call behind `is_voice_segment`, all of it confined to
+`audio/vad.rs`, so replacing it is a one-file change — the same containment
+DR-3 relied on for `opus`.
+
+**Consequences.**
+
+- `Gate` holds a `*mut Fvad` and is therefore `!Send`; the publish loop is a
+  spawned task, so `audio/vad.rs` carries an `unsafe impl Send` with the
+  argument for it. libfvad keeps all its state in the instance and the instance
+  is created inside that loop and never shared.
+- Task 3.4 still brings `webrtc-audio-processing` in for AEC/NS/AGC, and it
+  will bring libclang and meson with it. That is now 3.4's risk alone, taken
+  where it buys something, rather than 3.3's as well.
+- `mode: TransmitMode` joined `CallOptions`. A client joins in the mode the
+  user last chose, so push-to-talk never has one hot frame at the start.
+
+**Measurements.** libfvad in `Aggressive` mode at 48 kHz, 20 ms frames: a voiced
+frame registers on the **first** frame — no onset delay to compensate for — and
+after the sound stops the detector keeps answering "voice" for **four more
+frames** (80 ms) before it drops. That overhang renews goodvoice's own 300 ms
+hangover before it starts counting down, so the real tail after a sentence is
+about 380 ms. Digital silence from a cold detector never reads as voice.
 
 ### DR-2: the client cannot talk to the SFU directly (2026-08-20)
 

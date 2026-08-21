@@ -16,7 +16,7 @@ use std::{env, io::BufRead as _, sync::Arc, time::Duration};
 
 use anyhow::{Context as _, Result};
 use goodvoice_client_lib::{
-    audio::{device::AudioSink, hardware},
+    audio::{device::AudioSink, hardware, vad::TransmitMode},
     rtc::session::{Call, CallOptions},
 };
 
@@ -134,6 +134,9 @@ fn args() -> CallOptions {
         base: env::var("GOODVOICE_BASE").unwrap_or_else(|_| DEFAULT_BASE.to_owned()),
         room: DEFAULT_ROOM.to_owned(),
         name: whoami(),
+        // A windowless client has no key to hold and nobody watching a
+        // setting, so it talks whenever its microphone does.
+        mode: TransmitMode::Open,
     };
 
     let mut argv = env::args().skip(1);
