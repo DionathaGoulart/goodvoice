@@ -21,6 +21,10 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
+      # webrtc-audio-processing builds its bundled C++ with meson and ninja
+      # (DR-11); neither is on the runner's PATH. Both ship as wheels, and the
+      # image already has Python.
+      - run: pip install meson ninja
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: client/src-tauri
