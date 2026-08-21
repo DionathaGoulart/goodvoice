@@ -153,6 +153,15 @@ Goal: two clients talking through the SFU. Riskiest phase — spikes first.
   DoD: measured number recorded in a Decision Record vs the 80 ms budget; if over
   budget, the DR lists the suspects (buffer sizes, jitter buffer depth) and next steps.
   Verify: committed measurement notes + reproducible run instructions.
+  The harness is written and builds: `bin/latency.rs` runs both ends in one
+  process against the live SFU, so both timestamps come off one clock and there
+  is no synchronisation to get wrong. One side is silent but for a 5 ms burst
+  once a second; the other stops the clock on the burst's leading edge. It
+  reports min/median/p95/max for the wire path, adds DR-12's 20 ms of device
+  period, and compares the total against the 80 ms budget.
+  **It has never produced a number.** Every join fails with "ICE gathering
+  never completed" — see DR-13, which is a live blocker on 2.4 and 3.x's
+  automated proofs too, not only on this task.
 
 ## Phase 3 — Full rooms
 
@@ -722,6 +731,57 @@ after the sound stops the detector keeps answering "voice" for **four more
 frames** (80 ms) before it drops. That overhang renews goodvoice's own 300 ms
 hangover before it starts counting down, so the real tail after a sentence is
 about 380 ms. Digital silence from a cold detector never reads as voice.
+
+### DR-13: ICE gathering never completes on the Windows host (2026-08-21)
+
+**Context.** Task 2.5's harness was written to answer the ≤80 ms budget
+(prd.md §4). It has produced no number, because neither client can join.
+
+**Symptom.** Every `Call::join` fails all three attempts with
+`webrtc: ICE gathering never completed`. Reproducible on this host with
+`cargo run --bin latency`, and identically from WSL and from native Windows.
+
+**What has been ruled out.**
+
+- *The deploy.* `GET /health` answers `{"ok":true}` and `POST /rooms/:code/join`
+  returns a real `sessionId` plus eight ICE URLs — two STUN, six TURN, with
+  username and credential.
+- *UDP being blocked outright.* A raw STUN binding request to
+  `stun.cloudflare.com:3478` gets 32 bytes back. `stun.l.google.com:19302`
+  answers too. **`stun.cloudflare.com:53` times out**, which is ordinary — a
+  great many networks drop outbound UDP/53 to anything that is not their
+  resolver — and the server hands that URL out anyway, along with
+  `turn:turn.cloudflare.com:53?transport=udp`.
+- *Slowness.* `CONNECT_TIMEOUT` was raised from 25 s to 120 s. Three attempts,
+  376 seconds, same failure. Gathering does not finish late; it does not finish.
+
+**The lead.** With an `eprintln` in `Events::on_ice_gathering_state_change`,
+**nothing is ever printed** — not `Gathering`, not `Complete`. The callback
+never fires at all, so the `watch` this code waits on never leaves `New`. That
+points at the handler or at `PeerConnectionBuilder`, not at the network.
+
+Two candidates, untested:
+
+1. `with_udp_addrs(vec![format!("{}:0", local_ip())])` pins gathering to one
+   interface (DR-8's fix for machines with VPNs and container bridges). This
+   host has WSL virtual adapters; if the pinned address is wrong, or if pinning
+   interacts badly with the state callback in webrtc-rs 0.20 on Windows,
+   gathering may never be driven to completion.
+2. `PeerConnectionEventHandler::on_ice_gathering_state_change` may simply not be
+   invoked by webrtc-rs 0.20 in this configuration, in which case waiting on it
+   is the bug and the SDP should be taken once candidates stop arriving instead.
+
+**Why it matters beyond 2.5.** Every automated proof that needs a live call
+runs through this path: `bin/rtc-spike.rs` (task 2.3), `bin/reconnect-drill.rs`
+(task 3.5), and the multi-client runs that tasks 2.4 and 3.1 still owe. DR-7
+and DR-8 recorded those passing — **from macOS**. Nothing has re-run them on
+Windows, and this is the first attempt that did.
+
+**Next step.** Print the gathering state from inside webrtc-rs (`RUST_LOG`
+plus a subscriber, which this client does not install yet), or bisect by
+building a peer connection with no ICE servers and with the wildcard address,
+and see which of the two candidates above moves it. Until then no measurement
+in Phase 2 can be taken on this machine.
 
 ### DR-12: what the target machine actually offers (2026-08-20)
 
