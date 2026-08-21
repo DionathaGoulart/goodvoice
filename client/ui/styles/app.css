@@ -192,6 +192,16 @@ body {
   color: var(--palette-warn);
 }
 
+/*
+ * Chosen out of a set. Deliberately not `.action-on`: mute and deafen are
+ * things going wrong on purpose and are warn-coloured for it, while a transmit
+ * mode is just the one you picked.
+ */
+.action-picked {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
 .action-leave {
   color: var(--palette-error);
 }
@@ -203,6 +213,13 @@ body {
 .controls {
   display: grid;
   grid-template-columns: 1fr 1fr;
+  gap: 8px;
+}
+
+/* Three modes, equal weight: none of them is the one you are meant to pick. */
+.modes {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
   gap: 8px;
 }
 

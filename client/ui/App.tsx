@@ -61,6 +61,55 @@ const SPEAKING_EVENT = "goodvoice://speaking";
  */
 const ROOM_CODE = /^[a-zA-Z0-9-]{4,24}$/;
 
+/** Mirrors `TransmitMode` in `src-tauri/src/audio/vad.rs`. */
+type TransmitMode = "open" | "push-to-talk" | "voice-activity";
+
+/** The modes, in the order they take control away from the microphone. */
+const MODES: { id: TransmitMode; label: string; hint: string }[] = [
+  {
+    id: "open",
+    label: "open",
+    hint: "the microphone is live until you mute",
+  },
+  {
+    id: "push-to-talk",
+    label: "push to talk",
+    hint: "heard only while the key below is held",
+  },
+  {
+    id: "voice-activity",
+    label: "voice",
+    hint: "heard only while you are talking",
+  },
+];
+
+/**
+ * Where the transmit settings live between runs.
+ *
+ * The webview's own storage, because this window is the only thing that reads
+ * them: the mode is handed to `join_room`, and the key never leaves here. The
+ * global hotkey (plan.md task 4.3) is the point at which Rust needs its own
+ * copy, and that is the task that should give it one.
+ */
+const MODE_STORE = "goodvoice.transmit-mode";
+const TALK_KEY_STORE = "goodvoice.talk-key";
+
+/**
+ * What a fresh install holds down. Space is reachable without a chord and is
+ * not a shortcut anywhere in this window.
+ */
+const DEFAULT_TALK_KEY = "Space";
+
+const isMode = (value: string | null): value is TransmitMode =>
+  MODES.some((mode) => mode.id === value);
+
+/** `KeyboardEvent.code` as something a person would recognise on a keycap. */
+const keyName = (code: string) =>
+  code
+    .replace(/^(Key|Digit)/, "")
+    .replace(/(Left|Right)$/, " $1")
+    .toLowerCase();
+
 const App: Component = () => {
   const [info] = createResource(() => invoke<ClientInfo>("client_info"));
 
@@ -79,6 +128,15 @@ const App: Component = () => {
   const [speaking, setSpeaking] = createSignal<ReadonlySet<string>>(
     new Set<string>(),
   );
+
+  const savedMode = localStorage.getItem(MODE_STORE);
+  const [mode, setMode] = createSignal<TransmitMode>(
+    isMode(savedMode) ? savedMode : "open",
+  );
+  const [talkKey, setTalkKey] = createSignal(
+    localStorage.getItem(TALK_KEY_STORE) ?? DEFAULT_TALK_KEY,
+  );
+  const [rebinding, setRebinding] = createSignal(false);
 
   // Subscribed once for the life of the window: the room the events belong to
   // is whichever call is open, and there is only ever one.
@@ -103,10 +161,75 @@ const App: Component = () => {
       }
     }),
   ];
+
+  /** A key pressed into a text field is text, not a talk key. */
+  const isTyping = (event: KeyboardEvent) =>
+    event.target instanceof HTMLInputElement;
+
+  /**
+   * Tells the call the talk key moved. Failures are dropped on purpose: the
+   * only way this rejects is a key that arrives as the call ends, and there is
+   * nothing left to gate by then.
+   */
+  const pressTalk = (down: boolean) => {
+    if (!call()) {
+      return;
+    }
+    void invoke("set_talk_key", { down }).catch(() => {});
+  };
+
+  const onKeyDown = (event: KeyboardEvent) => {
+    if (rebinding()) {
+      event.preventDefault();
+      if (event.code !== "Escape") {
+        setTalkKey(event.code);
+        localStorage.setItem(TALK_KEY_STORE, event.code);
+      }
+      setRebinding(false);
+      return;
+    }
+    if (
+      isTyping(event) ||
+      mode() !== "push-to-talk" ||
+      event.code !== talkKey()
+    ) {
+      return;
+    }
+    // Space would otherwise press whichever button has focus.
+    event.preventDefault();
+    // Holding a key repeats keydown; only the first one is news.
+    if (!event.repeat) {
+      pressTalk(true);
+    }
+  };
+
+  const onKeyUp = (event: KeyboardEvent) => {
+    if (
+      isTyping(event) ||
+      mode() !== "push-to-talk" ||
+      event.code !== talkKey()
+    ) {
+      return;
+    }
+    event.preventDefault();
+    pressTalk(false);
+  };
+
+  // A key held while the window loses focus never sends its keyup, and the
+  // microphone would stay open behind whatever the user alt-tabbed into.
+  const onBlur = () => pressTalk(false);
+
+  window.addEventListener("keydown", onKeyDown);
+  window.addEventListener("keyup", onKeyUp);
+  window.addEventListener("blur", onBlur);
+
   onCleanup(() => {
     for (const pending of stopping) {
       void pending.then((stop) => stop());
     }
+    window.removeEventListener("keydown", onKeyDown);
+    window.removeEventListener("keyup", onKeyUp);
+    window.removeEventListener("blur", onBlur);
   });
 
   const canJoin = () => ROOM_CODE.test(room().trim()) && !joining();
@@ -133,6 +256,7 @@ const App: Component = () => {
         server: info()?.server ?? "",
         room: room().trim(),
         name: name().trim() || "anon",
+        mode: mode(),
       });
       setCall(status);
       setRoster(status.participants);
@@ -154,6 +278,21 @@ const App: Component = () => {
     setSpeaking(new Set<string>());
   };
 
+  /**
+   * Switches how transmission is gated. Saved whether or not there is a call
+   * to apply it to — it is a setting, and the next join carries it.
+   */
+  const chooseMode = (next: TransmitMode) => {
+    setMode(next);
+    localStorage.setItem(MODE_STORE, next);
+    // A key held across the switch has no keyup to look forward to under the
+    // new mode, so it is let go here.
+    pressTalk(false);
+    if (call()) {
+      void invoke("set_transmit_mode", { mode: next }).catch(() => {});
+    }
+  };
+
   const toggleMute = async () => {
     const next = !muted();
     setMuted(next);
@@ -165,6 +304,45 @@ const App: Component = () => {
     setDeafened(next);
     await invoke("set_deafened", { deafened: next });
   };
+
+  /**
+   * How the microphone is gated. On both panels: someone who wants push to
+   * talk wants it *before* they join, and someone who guessed wrong wants it
+   * without leaving.
+   */
+  const TransmitSettings = () => (
+    <div class="field">
+      <span class="field-label">transmit</span>
+      <div class="modes">
+        <For each={MODES}>
+          {(option) => (
+            <button
+              class="action"
+              classList={{ "action-picked": mode() === option.id }}
+              type="button"
+              aria-pressed={mode() === option.id}
+              onClick={() => chooseMode(option.id)}
+            >
+              {option.label}
+            </button>
+          )}
+        </For>
+      </div>
+      <p class="notice">{MODES.find((it) => it.id === mode())?.hint}</p>
+      <Show when={mode() === "push-to-talk"}>
+        <button
+          class="action"
+          classList={{ "action-picked": rebinding() }}
+          type="button"
+          onClick={() => setRebinding(true)}
+        >
+          {rebinding()
+            ? "press a key, or escape"
+            : `key: ${keyName(talkKey())}`}
+        </button>
+      </Show>
+    </div>
+  );
 
   return (
     <main class="shell">
@@ -207,6 +385,8 @@ const App: Component = () => {
                 disabled={joining()}
               />
             </label>
+
+            <TransmitSettings />
 
             <button
               class="action action-primary"
@@ -297,6 +477,8 @@ const App: Component = () => {
                 {deafened() ? "undeafen" : "deafen"}
               </button>
             </div>
+
+            <TransmitSettings />
 
             <button class="action action-leave" type="button" onClick={leave}>
               leave
