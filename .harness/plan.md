@@ -42,13 +42,18 @@ Goal: repo builds, CI green, hello-world client and worker exist and deploy.
   DoD: workflow file is valid and passes on push.
   Verify: `gh run watch` on the push, or `act` locally if available.
   Green on run 32386485723 — all four jobs, including rust on windows-latest.
-- [ ] **0.5 [WIN] Hardware risk probe (spike)** — `client/src-tauri/src/bin/probe.rs`.
+- [x] **0.5 [WIN] Hardware risk probe (spike)** — `client/src-tauri/src/bin/probe.rs`.
   Tiny binary that (a) enumerates WASAPI render/capture devices + their shared-mode
   min buffer sizes, (b) enumerates Media Foundation H.264 encoders and flags which
   are hardware (NVENC/AMF/QuickSync). Front-loads the two hardware unknowns.
   DoD: probe output from a real Windows gaming machine pasted into a Decision
   Record in this file (devices found, min buffer ms, hw encoders found).
   Verify: `cargo run --bin probe` on Windows host.
+  Run on the RTX 2060 machine, output in DR-12. Two answers worth having
+  early: `IAudioClient3` offers **nothing beyond the default period** on this
+  hardware, which is most of task 2.1's argument, and NVENC is present, which
+  is task 5.2's. Off Windows the binary refuses and exits 2 rather than
+  printing an empty report that would read like a machine with no devices.
 - [x] **0.6 README + LICENSE + .gitignore checked in** — root. README states the
   three features, perf budgets, self-host one-liner; MIT LICENSE.
   DoD: files exist, README renders. Verify: `git ls-files | grep -E 'README|LICENSE'`.
@@ -717,6 +722,72 @@ after the sound stops the detector keeps answering "voice" for **four more
 frames** (80 ms) before it drops. That overhang renews goodvoice's own 300 ms
 hangover before it starts counting down, so the real tail after a sentence is
 about 380 ms. Digital silence from a cold detector never reads as voice.
+
+### DR-12: what the target machine actually offers (2026-08-20)
+
+**Context.** Task 0.5 front-loads two hardware unknowns: how small a buffer
+WASAPI will run in shared mode (most of the ≤80 ms budget, prd.md §4, and the
+crux of task 2.1) and whether H.264 encoding can happen in silicon (task 5.2).
+`src/bin/probe.rs` asks the machine rather than a datasheet.
+
+**The machine.** Windows 11 (10.0.26200), NVIDIA GeForce RTX 2060, HyperX
+headset out, fifine USB microphone in. One gaming desktop — the caveats below
+matter because of that.
+
+**Output**, verbatim:
+
+```
+## render endpoints
+- Headset Earphone (HyperX Virtual Surround Sound) — 48000 Hz, 2 ch, 32-bit;
+  default period 10.0 ms, minimum 3.0 ms;
+  IAudioClient3 default 480 frames (10.0 ms), minimum 480 (10.0 ms), maximum 480 (10.0 ms)
+
+## capture endpoints
+- Microphone (fifine Microphone) — 48000 Hz, 2 ch, 32-bit;
+  default period 10.0 ms, minimum 3.0 ms;
+  IAudioClient3 default 480 frames (10.0 ms), minimum 480 (10.0 ms), maximum 480 (10.0 ms)
+
+## H.264 encoders
+- NVIDIA H.264 Encoder MFT — hardware
+- Microsoft AVC DX12 Encoder — hardware
+- H264 Encoder MFT — software
+```
+
+**Reading the audio numbers.** The two periods answer different questions and
+it is easy to quote the wrong one. `GetDevicePeriod`'s *minimum* of 3.0 ms is
+the **exclusive-mode** floor — it needs the device to itself, which a client
+that must coexist with a game's audio cannot have. What shared mode will
+actually run is `IAudioClient3`, and here it reports minimum = default =
+maximum = **480 frames, 10.0 ms**. There is no low-latency mode to unlock.
+
+That matters because unlocking it is the entire case for the `wasapi` crate
+over `cpal` (DR-8): cpal takes the default period and never calls
+`GetSharedModeEnginePeriod`. On this hardware the two would land on the same
+10 ms, so a second backend would buy nothing. **This is not a general result** —
+an interface with a low-latency-capable driver can report 128 frames (2.67 ms),
+and the probe should be re-run on one before task 2.1 closes the question for
+everyone. But the burden of proof has moved: `wasapi` now has to show a device
+where it wins.
+
+Both endpoints are natively 48 kHz, which is what `opus::SAMPLE_RATE_HZ`
+assumes and refuses to resample around. Both are 32-bit float, so `pick_config`
+takes its `f32` path, not the preferred `i16` one.
+
+**Reading the encoder list.** NVENC is present and Media Foundation exposes it
+as a regular MFT, so task 5.2 has a hardware path that does not need NVIDIA's
+own SDK. The DX12 encoder is a second hardware option and a useful fallback on
+machines without NVIDIA. The software encoder exists and is exactly what the
+~0-FPS-impact budget rules out.
+
+**Consequences.**
+
+- Task 2.1's question is mostly settled on this class of hardware; what it
+  still owes is the loopback and the round-trip number, which overlaps 2.5.
+- The client depends on `windows` for the probe alone, behind
+  `[target.'cfg(windows)'.dependencies]` and at the same major tauri already
+  pulls, so it costs no extra build.
+- 10 ms of device period each way is 20 ms of the 80 ms budget before a single
+  packet moves. Task 2.5 measures what the rest of the path adds.
 
 ### DR-11: the echo canceller works; its build script does not know Windows (2026-08-20)
 
