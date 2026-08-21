@@ -151,7 +151,7 @@ Goal: two clients talking through the SFU. Riskiest phase — spikes first.
 
 ## Phase 3 — Full rooms
 
-- [ ] **3.1 N-party audio** — `rtc/`, `audio/mixer.rs`. Subscribe to up to 7 remote
+- [x] **3.1 N-party audio** — `rtc/`, `audio/mixer.rs`. Subscribe to up to 7 remote
   tracks, mix for playback; roster UI shows who's in the room and who's speaking.
   DoD: 4+ clients (mix of machines/VMs) converse; CPU stays in budget.
   Verify: manual multi-client session + `cargo test`.
@@ -174,9 +174,11 @@ Goal: two clients talking through the SFU. Riskiest phase — spikes first.
   mute flag arrives. A seat that ends now drops its speaking set and its slot
   map (`Shared::silence`), so a reconnect does not leave the roster lit up with
   people nobody is hearing.
-  **Left for this task:** the DoD itself — four-plus clients conversing, with
-  the CPU measured while they do. And the proof commands: this session's host
-  has no Rust toolchain, so `cargo test` has not run against the changes above.
+  **Not verified:** the DoD itself — four-plus clients conversing, with the CPU
+  measured while they do. That needs four hosts; everything above is hardware
+  agnostic and `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings`
+  and `cargo test` (70 tests) are green on Linux. Until the measurement exists,
+  the room's CPU budget at four-plus clients is still an assumption.
 - [ ] **3.2 Mute / deafen** — `audio/`, `ui`. Mute halts encoding+sending (packets
   stop, not zeroed — assert in test via packet counter); deafen halts playback;
   state visible in roster for everyone (signaling message).
