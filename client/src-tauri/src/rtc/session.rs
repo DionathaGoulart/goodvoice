@@ -281,6 +281,23 @@ impl Shared {
         }
     }
 
+    /// Forgets who was talking, for a seat that is over.
+    ///
+    /// The meter loop lives inside the session, so without this the last set
+    /// it pushed would stand for the whole of a reconnect — a roster lit up
+    /// with people who are, by then, not being heard at all. The slot map goes
+    /// with it: the next seat hands out its own slots, and a name still
+    /// pointing at an old one would meter whoever inherited it.
+    fn silence(&self) {
+        if let Ok(mut slots) = self.slots.lock() {
+            slots.clear();
+        }
+        self.microphone.reset();
+        if !self.speaking.borrow().is_empty() {
+            self.speaking.send_replace(Vec::new());
+        }
+    }
+
     /// Hands a message to whichever session is current. Silently dropped when
     /// there is none: a mute pressed while reconnecting is replayed by
     /// [`Self::adopt`] when the new seat comes up.
@@ -775,6 +792,7 @@ async fn run_session(supervisor: &Supervisor, session: Session) -> SessionEnd {
         subscription.playback.abort();
         subscriber.shared.sink.clear(subscription.slot);
     }
+    subscriber.shared.silence();
 
     // Hand the seat back on the way out. A drop does not always mean the room
     // is unreachable — a dead sender or a stalled ICE leaves the WebSocket
@@ -1933,6 +1951,30 @@ mod tests {
             shared.speaking.borrow().is_empty(),
             "a muted client showed up as talking; nobody can hear them"
         );
+    }
+
+    #[test]
+    fn a_seat_that_ends_takes_its_speaking_set_with_it() {
+        // Otherwise the last set the meter loop pushed stands for the whole of
+        // a reconnect, and the roster shows people talking who are not being
+        // heard at all (prd.md §5 flow E).
+        let (shared, levels) = metered();
+        levels.set(0, SPEAKING_LEVEL * 2.0);
+        shared.microphone.observe(20_000);
+        shared.refresh_speaking();
+        assert_eq!(shared.speaking.borrow().len(), 2);
+
+        shared.silence();
+
+        assert!(shared.speaking.borrow().is_empty());
+        assert!(
+            shared.slot_of("them").is_none(),
+            "a name still pointing at a slot the next seat will re-hand-out"
+        );
+        // The levels the sink reports have not moved; it is this client that
+        // has stopped believing them.
+        shared.refresh_speaking();
+        assert!(shared.speaking.borrow().is_empty());
     }
 
     // --- the encode loop, without a network ------------------------------

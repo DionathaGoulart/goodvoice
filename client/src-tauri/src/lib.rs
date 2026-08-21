@@ -38,6 +38,14 @@ const ROSTER_EVENT: &str = "goodvoice://roster";
 /// or over. A dropped call must never look like a quiet one (prd.md §5 flow E).
 const STATE_EVENT: &str = "goodvoice://state";
 
+/// The event the UI listens on for who is talking, as participant ids.
+///
+/// Separate from the roster because the two move at completely different
+/// rates: a roster changes when somebody joins or leaves, this changes with
+/// every sentence. Sending them together would mean re-rendering the whole
+/// roster ten times a second.
+const SPEAKING_EVENT: &str = "goodvoice://speaking";
+
 /// Identity of the running client, surfaced to the UI on boot.
 #[derive(Debug, Clone, Serialize)]
 pub struct ClientInfo {
@@ -133,6 +141,7 @@ async fn join_room(
     // Watch receivers, not the call: these outlive `leave_room` taking the
     // call apart, and they end on their own when its state is dropped.
     tauri::async_runtime::spawn(push_roster(app.clone(), call.roster()));
+    tauri::async_runtime::spawn(push_speaking(app.clone(), call.speaking()));
     tauri::async_runtime::spawn(push_state(app, call.state(), call.self_id_watch()));
     *current = Some(call);
 
@@ -188,6 +197,21 @@ async fn push_roster(app: AppHandle, mut roster: watch::Receiver<Vec<Participant
         let _ = app.emit(ROSTER_EVENT, participants);
 
         if roster.changed().await.is_err() {
+            return;
+        }
+    }
+}
+
+/// Forwards the set of people talking to the webview until the call ends.
+///
+/// The call only sends when the set actually changes, so a room full of
+/// listeners costs this loop one wakeup and no events at all.
+async fn push_speaking(app: AppHandle, mut speaking: watch::Receiver<Vec<String>>) {
+    loop {
+        let talking = speaking.borrow_and_update().clone();
+        let _ = app.emit(SPEAKING_EVENT, talking);
+
+        if speaking.changed().await.is_err() {
             return;
         }
     }

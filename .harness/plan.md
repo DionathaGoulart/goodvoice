@@ -166,9 +166,17 @@ Goal: two clients talking through the SFU. Riskiest phase — spikes first.
   mixer a buffer. `Call` exposes it as `speaking()`, `level_of()` and
   `set_gain_of()` (per-listener gain: turning someone down needs nobody's
   agreement).
-  **Left for this task:** the UI half — no Tauri event carries `speaking()` to
-  the webview yet, so the roster still cannot show who is talking. And the DoD
-  itself: four-plus clients conversing, with the CPU measured while they do.
+  The UI half is in too: `goodvoice://speaking` carries the set of talking
+  participant ids to the webview — its own event and not part of the roster's,
+  because a roster changes when somebody joins and this changes with every
+  sentence. The roster dot grows a halo for whoever is talking; muted wins over
+  talking, since a peer's last buffered frames can still be playing when their
+  mute flag arrives. A seat that ends now drops its speaking set and its slot
+  map (`Shared::silence`), so a reconnect does not leave the roster lit up with
+  people nobody is hearing.
+  **Left for this task:** the DoD itself — four-plus clients conversing, with
+  the CPU measured while they do. And the proof commands: this session's host
+  has no Rust toolchain, so `cargo test` has not run against the changes above.
 - [ ] **3.2 Mute / deafen** — `audio/`, `ui`. Mute halts encoding+sending (packets
   stop, not zeroed — assert in test via packet counter); deafen halts playback;
   state visible in roster for everyone (signaling message).

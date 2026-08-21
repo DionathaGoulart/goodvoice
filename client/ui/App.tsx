@@ -51,6 +51,9 @@ const ROSTER_EVENT = "goodvoice://roster";
 /** The event `push_state` emits. Kept in step with `STATE_EVENT`. */
 const STATE_EVENT = "goodvoice://state";
 
+/** The event `push_speaking` emits. Kept in step with `SPEAKING_EVENT`. */
+const SPEAKING_EVENT = "goodvoice://speaking";
+
 /**
  * The room code the server will accept: `roomCodeSchema` in
  * `server/src/protocol.ts`. Checked here only so a typo is a hint rather than
@@ -71,11 +74,19 @@ const App: Component = () => {
   const [muted, setMuted] = createSignal(false);
   const [deafened, setDeafened] = createSignal(false);
   const [health, setHealth] = createSignal<CallState>({ state: "live" });
+  // Ids, not names: two people in a room may share a name, and the id is what
+  // the roster rows are keyed on anyway.
+  const [speaking, setSpeaking] = createSignal<ReadonlySet<string>>(
+    new Set<string>(),
+  );
 
   // Subscribed once for the life of the window: the room the events belong to
   // is whichever call is open, and there is only ever one.
   const stopping = [
     listen<Participant[]>(ROSTER_EVENT, (event) => setRoster(event.payload)),
+    listen<string[]>(SPEAKING_EVENT, (event) =>
+      setSpeaking(new Set(event.payload)),
+    ),
     listen<CallHealth>(STATE_EVENT, (event) => {
       const { self_id, ...state } = event.payload;
       setHealth(state);
@@ -85,6 +96,7 @@ const App: Component = () => {
       if (state.state === "ended") {
         setCall(null);
         setRoster([]);
+        setSpeaking(new Set<string>());
         if (state.reason !== "left") {
           setError(state.detail);
         }
@@ -124,6 +136,7 @@ const App: Component = () => {
       });
       setCall(status);
       setRoster(status.participants);
+      setSpeaking(new Set<string>());
       setMuted(false);
       setDeafened(false);
       setHealth({ state: "live" });
@@ -138,6 +151,7 @@ const App: Component = () => {
     await invoke("leave_room");
     setCall(null);
     setRoster([]);
+    setSpeaking(new Set<string>());
   };
 
   const toggleMute = async () => {
@@ -234,9 +248,15 @@ const App: Component = () => {
               >
                 {(peer) => (
                   <li class="roster-row">
+                    {/* Muted wins over talking: their last few buffered
+                        frames can still be playing when the flag arrives, and
+                        a dot that says both at once says neither. */}
                     <span
                       class="presence"
-                      classList={{ "presence-quiet": peer.muted }}
+                      classList={{
+                        "presence-quiet": peer.muted,
+                        "presence-live": !peer.muted && speaking().has(peer.id),
+                      }}
                       aria-hidden="true"
                     />
                     <span class="roster-name">{peer.name}</span>
