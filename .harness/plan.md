@@ -216,6 +216,27 @@ Goal: two clients talking through the SFU. Riskiest phase — spikes first.
   reference feed).
   DoD: speaker-echo test call shows no self-echo; DR records config chosen.
   Verify: manual echo test + `cargo test`.
+  Built: `audio/processing.rs` — AEC3, noise suppression and AGC2 over the
+  20 ms frame in two 10 ms passes, which is the only size WebRTC accepts. The
+  reference feed the task calls for is a lock-free ring the render callback
+  fills with exactly the mono block it sends to the device; the stage drains it
+  10 ms at a time and trims the backlog rather than following it. It sits
+  *below* `device.rs`'s seam, inside `Microphone::next_frame`, so a synthetic
+  source has nothing to cancel and every captured frame goes through the module
+  even when mute or the gate is about to throw it away — skipping frames would
+  lose the canceller its place in the stream. It also means the voice detector
+  from 3.3 sees denoised audio. A module that will not start is reported and
+  skipped: an echo is worse than no echo and much better than no call.
+  Verified without hardware: the echo test is automated. Speakers play noise,
+  the microphone hears exactly that, and after a second of convergence the
+  residual is **32 dB down** — DR-11 has the config, the numbers and the
+  convergence curve.
+  **Blocked on one thing:** the crate has never been built for Windows.
+  Upstream's CI is ubuntu and macOS only and its `build.rs` has no Windows
+  branch, though the C++ underneath does have one (DR-11). `cargo test` is
+  green on Linux; windows-latest is the judge and has not run yet. CI now
+  installs meson and ninja for it. If that build fails, DR-11 lists the two
+  fallbacks and the swap is one file.
 - [x] **3.5 Auto-reconnect** — `rtc/reconnect.rs`. Exponential backoff, rejoin same
   room, resubscribe all tracks; UI shows reconnecting state.
   DoD: kill network 10 s mid-call → call resumes without restart.
@@ -705,6 +726,91 @@ after the sound stops the detector keeps answering "voice" for **four more
 frames** (80 ms) before it drops. That overhang renews goodvoice's own 300 ms
 hangover before it starts counting down, so the real tail after a sentence is
 about 380 ms. Digital silence from a cold detector never reads as voice.
+
+### DR-11: the echo canceller works, on a platform that is not the target (2026-08-20)
+
+**Context.** Task 3.4 wanted `webrtc-audio-processing` between capture and
+encode. Unlike its VAD (DR-10), the parts this task needs — AEC3, noise
+suppression, gain control — are all present and current in 2.1.
+
+**What it costs to build.** `bundled` compiles the vendored C++ with meson and
+ninja and generates bindings with `bindgen`, so libclang joins the toolchain
+DR-3 worked to keep out. That was acceptable here in a way it was not for a
+codec binding: there is no second implementation of AEC3, and echo cancellation
+is the difference between "speakers work" and "speakers are unusable".
+
+**The unknown, stated plainly.** The crate has never been built for Windows.
+Upstream's CI matrix is `ubuntu-latest` and `macos-latest`; its `build.rs` has
+no `target_os = "windows"` branch. The C++ *is* Windows-aware — the vendored
+`meson.build` has a `host_system == 'windows'` arm with `WEBRTC_WIN`, `NOMINMAX`
+and MSVC's `/arch:AVX2` — so this is untested rather than unsupported. Nothing
+in this session can settle it: the only Windows host in reach has no Rust
+toolchain.
+
+**Decision.** Take it, and contain it. The whole dependency lives in
+`audio/processing.rs` behind one call, `Processing::run(&mut Frame)`, so
+replacing it touches one file — the containment DR-3 and DR-10 both relied on.
+CI's windows-latest job now installs meson and ninja and is what says yes or no.
+
+**If it says no**, in order of preference:
+
+1. **`speexdsp`** — MDF echo canceller plus a preprocessor that does noise
+   suppression and gain. Plain C, builds with `cc` under MSVC. A weaker
+   canceller than AEC3, and the one PulseAudio shipped for years.
+2. **Windows' own Voice Capture DSP** (`MFPKEY_WMAAECMA`) — AEC, NS and AGC
+   built into the operating system, no dependency at all, and a COM object to
+   drive plus a WASAPI loopback reference. Windows-only, which for this client
+   is not a limitation.
+
+**The reference feed.** Cancelling an echo means knowing what was played, and
+until now nothing outside the render callback saw that. The callback now copies
+its mono block into a lock-free ring on the way to the device — a push, so the
+callback still allocates and locks nothing — and the processing stage drains it
+10 ms at a time. Backlog past 100 ms is dropped rather than consumed: it means
+playback ran ahead while this side stalled, and old reference audio subtracted
+from the wrong moment is worse than no reference at all.
+
+Where the stage sits matters. It is *below* `device.rs`'s seam, inside
+`Microphone::next_frame`, which buys three things: a synthetic source stays as
+simple as it was, every captured frame goes through the module even when mute
+or the transmit gate is about to discard it — skip frames and AEC3 loses its
+place in the stream — and the voice detector from 3.3 sees denoised audio.
+
+**Config chosen**, and why not its neighbours:
+
+| Field | Value | Why |
+|---|---|---|
+| `echo_canceller` | `Full { stream_delay_ms: None }` | AEC3, delay left to its own estimator. The true figure is whatever WASAPI's buffers add up to on a machine nobody here can see, and a confident wrong number is worse than none. |
+| `noise_suppression` | `Moderate` | `High`/`VeryHigh` buy a quieter fan by chewing into consonants. A room asking "what?" is worse than a room with a fan in it. |
+| `gain_controller` | AGC2, adaptive digital, `input_volume_controller_enabled: false` | The alternative reaches out and moves the microphone slider in the operating system. That is the user's setting, not ours. |
+| `high_pass_filter` | on, full band | Recommended alongside AEC, and it takes desk knocks and breath rumble out from under the voice. |
+| `capture_amplifier` | none | The gain that matters is applied after the canceller has had its look. |
+
+**Measurements (Linux x86-64, debug build).** Deterministic noise played into
+the reference ring and fed back as the capture frame — a perfect echo, which is
+the hardest case for a canceller because there is no near-end speech to hide
+behind. RMS in ≈ 4 800 throughout:
+
+| Frame (20 ms each) | Residual | Down by |
+|---|---|---|
+| 0 | 4 229 | nothing — it has heard no far end yet |
+| 10 (200 ms) | 52 | ~39 dB |
+| 50 (1 s) | 92 | ~34 dB |
+| 90 (1.8 s) | 114 | ~32 dB |
+
+It converges inside 200 ms and then gives a little back as the adaptive gain
+controller lifts what is left. `residual_echo_likelihood` reads 0.0 at the end.
+The committed test asserts 20 dB rather than the measured 32, so it fails only
+when an echo is genuinely audible again.
+
+**Consequences.**
+
+- Building the client now needs meson, ninja and libclang as well as cmake.
+  docs/self-hosting.md's contributor section (task 6.1) has to say so.
+- `AudioError` grew `Processing(String)`, used only to report a module that
+  would not start.
+- The first CI build on each runner is slow — the C++ is not small. `rust-cache`
+  covers the ones after it.
 
 ### DR-2: the client cannot talk to the SFU directly (2026-08-20)
 
