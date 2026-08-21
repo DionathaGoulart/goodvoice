@@ -252,10 +252,22 @@ body {
   flex: 0 0 auto;
   height: 7px;
   width: 7px;
+  transition: box-shadow 120ms ease-out;
 }
 
 .presence-quiet {
   background: var(--fg-muted);
+}
+
+/*
+ * Talking. A halo rather than another colour: the dot's colour already carries
+ * "can be heard", and a second meaning on the same channel would make both
+ * harder to read. It is a transition and not an animation on purpose — the ring
+ * arriving *is* the signal, so there is nothing here for reduced-motion to
+ * freeze (styleguide.md §2.4).
+ */
+.presence-live {
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 30%, transparent);
 }
 
 /* --- notices ------------------------------------------------------------- */
