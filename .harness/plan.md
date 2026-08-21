@@ -231,12 +231,12 @@ Goal: two clients talking through the SFU. Riskiest phase — spikes first.
   DoD: speaker-echo test call shows no self-echo; DR records config chosen.
   Verify: manual echo test + `cargo test`.
   **Built once, then parked — read DR-11 before starting.** The whole task was
-  written and working in commit `726da92`: `audio/processing.rs` (AEC3 + noise
+  written and working in commit `e50e674`: `audio/processing.rs` (AEC3 + noise
   suppression + AGC2 over the 20 ms frame in two 10 ms passes), the render tap
   that gives the canceller its far end, and an automated echo test measuring
   **32 dB** of cancellation. It was reverted, not abandoned — the dependency
   will not build on Windows, for five shallow reasons DR-11 lists one by one.
-  `git show 726da92` is the implementation; DR-11 is why it is not here.
+  `git show e50e674` is the implementation; DR-11 is why it is not here.
   Whoever picks this up decides one thing first: vendor a patched
   `webrtc-audio-processing-sys` into the repo, or wait for an upstream fix. The
   design above does not change either way, and neither does the reference tap.
@@ -855,7 +855,7 @@ machines without NVIDIA. The software encoder exists and is exactly what the
 encode. Unlike its VAD (DR-10), the parts this task needs — AEC3, noise
 suppression, gain control — are all present and current in 2.1.
 
-**It works.** Written, integrated and measured (commit `726da92`, reverted).
+**It works.** Written, integrated and measured (commit `e50e674`, reverted).
 Deterministic noise played into the reference ring and fed straight back as the
 capture frame — a perfect echo, the hardest case, with no near-end speech to
 hide behind. RMS in ≈ 4 800 throughout, on Linux x86-64, debug:
