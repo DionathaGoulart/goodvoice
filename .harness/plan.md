@@ -290,9 +290,30 @@ Goal: two clients talking through the SFU. Riskiest phase — spikes first.
 
 ## Phase 4 — Tray & polish
 
-- [ ] **4.1 Minimize-to-tray** — `tray/`, Tauri config. Close/minimize hides window,
+- [x] **4.1 Minimize-to-tray** — `tray/`, Tauri config. Close/minimize hides window,
   tray icon persists, voice continues; restore on click.
   DoD: manual flow works; no window flicker. Verify: manual + `cargo clippy` clean.
+  Built: `tray/mod.rs` — the icon, a two-item menu (Open / Quit), and the
+  window event handler that turns close and minimise into a hide. `Call` never
+  hears about any of it: audio is in Rust and never depended on the webview
+  being visible.
+  Two things the task did not ask for and needs anyway. **Quit hands the seat
+  back** before exiting (`crate::end_call`, three-second grace) — the close
+  button no longer ends a call, so something else has to, or the next join
+  meets a room full of this client's own ghosts (DR-5). And **close-to-tray is
+  only in force while a tray exists**: a host that refuses the icon keeps a
+  window that closes normally, because close-to-tray plus a missing icon is an
+  app that cannot be quit at all.
+  Verified, scripted, on Windows (docs/testing/tray.md): closing hides the
+  window and the process lives (`ALIVE_AFTER_CLOSE=True`,
+  `VISIBLE_AFTER_CLOSE=False`), minimising does the same, and a window in the
+  state the hide leaves it in can be brought back. `cargo fmt --check`,
+  `cargo clippy --all-targets -- -D warnings` and `cargo test` (100) are green
+  on Windows and Linux. See DR-16 for the two traps the scripts are shaped
+  around — both of them cost an hour of chasing a bug that was not there.
+  **Not verified — needs a person:** that the icon is visible, that a left
+  click brings the window back without flicker, and that a call keeps running
+  audibly while the window is away. docs/testing/tray.md step 1–6.
 - [ ] **4.2 Tray menu** — `tray/menu.rs`. Mute/unmute, deafen, leave room, quit —
   all functional and state-synced with UI.
   DoD: each item verified against in-room state. Verify: manual checklist in PR.
@@ -1254,3 +1275,72 @@ whichever task builds that.
 - prd.md open question 4 is answered for this class of hardware. It stays open
   for hardware with a low-latency driver, and the probe (`bin/probe`) is what
   answers it there — one run, no listening required.
+
+### DR-16: two ways to measure minimize-to-tray and get the wrong answer (2026-08-21)
+
+**Context.** Task 4.1's DoD is "manual flow works", which usually means nothing
+is checked until someone remembers to check it. Most of it can be scripted from
+outside the process: post the window messages Windows itself would post, then
+ask whether the process is alive and whether the window is visible.
+
+**Trap 1: `MainWindowHandle` is not the app's window.** A debug build is a
+console application, so the process owns a console window as well as the Tauri
+one, and .NET's `Process.MainWindowHandle` returned the console. `WM_CLOSE` to
+that handle kills the process outright — no `CloseRequested`, no handler, no
+tray. The reading is "close-to-tray is broken", and it is entirely an artefact.
+Enumerating the process' top-level windows shows what is actually there:
+
+```
+class='tray_icon_app'            visible=False
+class='Tauri Window'             visible=True   title='goodvoice'
+class='Tao Thread Event Target'  visible=True
+class='PseudoConsoleWindow'      visible=True
+```
+
+The scripts match on the class `Tauri Window`.
+
+**Trap 2: closing during startup is handled by Windows, not by Tauri.** Even
+against the right window, a `WM_CLOSE` posted a second or two after launch
+exits the process without the handler running. Waiting eight seconds first
+makes it pass every time. Nobody can click the close button on a window they
+have not seen yet, so this is a property of the test — but for an hour it looked
+like a heisenbug, because adding an `eprintln!` to the handler "fixed" it: the
+extra work happened to move the close past the window that was still opening.
+**A test that does not wait measured the wrong thing twice and reported it
+confidently both times.**
+
+**What is settled.** Both flows, scripted (docs/testing/tray.md):
+
+```
+VISIBLE_BEFORE=True   ALIVE_AFTER_CLOSE=True     VISIBLE_AFTER_CLOSE=False
+                      ALIVE_AFTER_MINIMISE=True  VISIBLE_AFTER_MINIMISE=False
+ICONIC_WHILE_HIDDEN=False   VISIBLE_AFTER_RESTORE=True
+```
+
+`ICONIC_WHILE_HIDDEN=False` is the one worth keeping: `hide()` leaves the
+window hidden but *not* minimised, so bringing it back is a `show`, not a
+restore animation. That is what "no flicker" rests on.
+
+**Design notes worth keeping.**
+
+- **Minimise has no event to intercept.** What arrives is the `Resized` the
+  minimise already performed, so the window is hidden after the animation
+  rather than instead of it. The arm is guarded on *visible and minimised*
+  together, because `show` un-minimises while still hidden and that resize must
+  not read as a fresh minimise — the window would put itself straight back in
+  the tray, and the tray icon would look dead.
+- **`Window::is_minimized()` from inside the window-event handler is safe.**
+  It dispatches to the event loop, and the dispatcher runs it inline when it is
+  already on the main thread. That was the first suspect for the startup
+  failure above and it was innocent.
+- **Quit is the only tidy exit now.** `crate::end_call` runs behind a
+  three-second timeout: a stranded seat is reclaimed by the room, a quit that
+  hangs on a dead network is not (DR-5).
+
+**Consequences.**
+
+- `tauri`'s `tray-icon` feature is on. It builds on Linux too, so the client's
+  test suite still runs off Windows.
+- `lib.rs` grew `end_call`, and `leave_room` is now one call into it.
+- Task 4.2's menu grows from `Action`/`action_of` in `tray/mod.rs`, which is
+  the tested part; adding mute, deafen and leave is a variant each.

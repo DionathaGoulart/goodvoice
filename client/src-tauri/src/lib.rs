@@ -158,11 +158,24 @@ async fn join_room(
 /// same way it awaits the others.
 #[tauri::command]
 async fn leave_room(state: State<'_, CurrentCall>) -> Result<(), String> {
-    let taken = state.call.lock().await.take();
+    end_call_in(&state).await;
+    Ok(())
+}
+
+/// Ends whatever call is in progress, if any.
+///
+/// The UI leaves through [`leave_room`]; the tray's Quit comes here directly,
+/// because the window closing stopped meaning "goodbye" the moment task 4.1
+/// turned it into a hide.
+pub async fn end_call(app: &AppHandle) {
+    end_call_in(&app.state::<CurrentCall>()).await;
+}
+
+async fn end_call_in(current: &CurrentCall) {
+    let taken = current.call.lock().await.take();
     if let Some(call) = taken {
         call.leave().await;
     }
-    Ok(())
 }
 
 /// # Errors
@@ -289,8 +302,17 @@ pub fn run() {
     tauri::Builder::default()
         .setup(|app| {
             app.manage(CurrentCall::default());
+            app.manage(tray::Tray::default());
+
+            // A host that will not give us a tray is not a reason to refuse to
+            // run — it is a reason to keep a window that closes normally, which
+            // is what `Tray` staying uninstalled means (task 4.1).
+            if let Err(error) = tray::install(app.handle()) {
+                eprintln!("no tray icon: {error}; the window will close rather than hide");
+            }
             Ok(())
         })
+        .on_window_event(tray::window_event)
         .invoke_handler(tauri::generate_handler![
             client_info,
             join_room,
