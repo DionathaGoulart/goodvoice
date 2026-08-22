@@ -110,6 +110,7 @@ async fn main() -> Result<()> {
     .await
     .context("the listener could not join")?;
 
+    flight.ready();
     println!("both sides are in; timing {pings} bursts (about {pings} seconds)\n");
 
     let deadline = Instant::now() + Duration::from_secs(pings as u64 * 2 + 30);
@@ -143,6 +144,23 @@ fn options(base: &str, room: &str, name: &str) -> CallOptions {
 struct Flight {
     sent: Mutex<Option<Instant>>,
     lost: AtomicUsize,
+    /// When both clients were in the room, and what the first burst that was
+    /// actually heard cost to get there.
+    ///
+    /// Joining a room is not the same as being subscribed to what is in it:
+    /// the pull side has to see the talker on the roster, ask the SFU for the
+    /// track and renegotiate for it, and every burst that goes out meanwhile
+    /// is heard by nobody. Those are not lost packets and reporting them as
+    /// such would be a lie about the network, so they are counted separately
+    /// (DR-14).
+    ready: Mutex<Option<Instant>>,
+    warmup: Mutex<Option<Warmup>>,
+}
+
+/// What it took before the far end could hear anything at all.
+struct Warmup {
+    after: Duration,
+    lost: usize,
 }
 
 impl Flight {
@@ -158,11 +176,43 @@ impl Flight {
         *sent = Some(Instant::now());
     }
 
+    /// Notes that both clients are in the room, which is where the wait for
+    /// the first audible burst is timed from.
+    fn ready(&self) {
+        if let Ok(mut ready) = self.ready.lock() {
+            *ready = Some(Instant::now());
+        }
+    }
+
     /// Claims the burst in flight, if there is one, and returns how long it
     /// took. `None` means audio arrived that no burst explains.
     fn arrive(&self) -> Option<Duration> {
-        let mut sent = self.sent.lock().ok()?;
-        sent.take().map(|departed| departed.elapsed())
+        let elapsed = {
+            let mut sent = self.sent.lock().ok()?;
+            sent.take().map(|departed| departed.elapsed())
+        }?;
+        self.note_warmup();
+        Some(elapsed)
+    }
+
+    /// The first burst through is the one that says the subscription is live.
+    fn note_warmup(&self) {
+        let Ok(mut warmup) = self.warmup.lock() else {
+            return;
+        };
+        if warmup.is_some() {
+            return;
+        }
+        let since_ready = self
+            .ready
+            .lock()
+            .ok()
+            .and_then(|ready| *ready)
+            .map_or(Duration::ZERO, |ready| ready.elapsed());
+        *warmup = Some(Warmup {
+            after: since_ready,
+            lost: self.lost.load(Ordering::Relaxed),
+        });
     }
 
     /// Gives up on a burst that has been out too long, so the next one is not
@@ -177,8 +227,24 @@ impl Flight {
         }
     }
 
+    /// Bursts written off once the far end was demonstrably listening. These
+    /// are the ones that mean something: audio the network swallowed.
     fn lost(&self) -> usize {
-        self.lost.load(Ordering::Relaxed)
+        let total = self.lost.load(Ordering::Relaxed);
+        let warmed = self
+            .warmup
+            .lock()
+            .ok()
+            .and_then(|warmup| warmup.as_ref().map(|warmup| warmup.lost))
+            .unwrap_or(total);
+        total.saturating_sub(warmed)
+    }
+
+    /// How long the subscription took to carry sound, and how many bursts went
+    /// out into nothing while it did.
+    fn warmup(&self) -> Option<(Duration, usize)> {
+        let warmup = self.warmup.lock().ok()?;
+        warmup.as_ref().map(|warmup| (warmup.after, warmup.lost))
     }
 }
 
@@ -334,6 +400,13 @@ fn report(heard: &Listener, flight: &Flight, wanted: usize) -> Result<()> {
         times.len(),
         flight.lost()
     );
+    if let Some((after, before_it)) = flight.warmup() {
+        println!(
+            "  first burst heard {:.1} s after both clients were in the room\n\
+             \x20 ({before_it} went out before the pull was carrying anything)\n",
+            after.as_secs_f64()
+        );
+    }
     println!("  wire path (encode → SFU → decode)");
     println!("    min     {:6.1} ms", ms(times[0]));
     println!("    median  {median:6.1} ms");

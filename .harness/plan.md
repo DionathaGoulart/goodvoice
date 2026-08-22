@@ -133,7 +133,8 @@ Goal: two clients talking through the SFU. Riskiest phase — spikes first.
   a 440 Hz tone as `mic`, a listener finds it on the roster, pulls it, and
   decodes it back. It passed against the live deploy on the first run, and the
   `[WIN]` tag it used to carry was wrong: nothing on this path is
-  Windows-specific. See DR-7.
+  Windows-specific. See DR-7. It now also passes on the Windows host, which it
+  could not before DR-14.
 - [x] **2.4 Wire join flow end-to-end** — `rtc/session.rs`, `audio/`, minimal UI
   (`client/ui`): room code input → join → publish mic → subscribe/playback peers.
   DoD: two Windows machines (or machine+VM) hold a conversation.
@@ -147,21 +148,26 @@ Goal: two clients talking through the SFU. Riskiest phase — spikes first.
   tones. See DR-8 for what the live runs turned up.
   **Not verified:** the DoD's two Windows machines. Everything here is hardware
   agnostic and was exercised on macOS; the Windows leg needs a Windows host.
-- [ ] **2.5 [WIN] Latency measurement harness** — `client/src-tauri/src/bin/latency.rs`
+- [x] **2.5 [WIN] Latency measurement harness** — `client/src-tauri/src/bin/latency.rs`
   or in-app debug overlay. Measure mouth-to-ear latency (loopback tone timestamp
   method) across the real SFU path.
   DoD: measured number recorded in a Decision Record vs the 80 ms budget; if over
   budget, the DR lists the suspects (buffer sizes, jitter buffer depth) and next steps.
   Verify: committed measurement notes + reproducible run instructions.
-  The harness is written and builds: `bin/latency.rs` runs both ends in one
-  process against the live SFU, so both timestamps come off one clock and there
-  is no synchronisation to get wrong. One side is silent but for a 5 ms burst
-  once a second; the other stops the clock on the burst's leading edge. It
-  reports min/median/p95/max for the wire path, adds DR-12's 20 ms of device
-  period, and compares the total against the 80 ms budget.
-  **It has never produced a number.** Every join fails with "ICE gathering
-  never completed" — see DR-13, which is a live blocker on 2.4 and 3.x's
-  automated proofs too, not only on this task.
+  `bin/latency.rs` runs both ends in one process against the live SFU, so both
+  timestamps come off one clock and there is no synchronisation to get wrong.
+  One side is silent but for a 5 ms burst once a second; the other stops the
+  clock on the burst's leading edge. It reports min/median/p95/max for the wire
+  path, adds DR-12's 20 ms of device period, and compares the total against the
+  80 ms budget.
+  **Measured, on native Windows: 41.4 ms mouth to ear, against 80 ms** — a
+  21.4 ms median wire path plus DR-12's 20 ms of device period, 30 bursts, none
+  lost. See DR-14 for the run and for what the number leaves out (no jitter
+  buffer exists yet, and it will spend some of the 38 ms of headroom).
+  DR-13's blocker is closed by DR-14: one ICE URL this network cannot reach was
+  keeping webrtc-rs' gathering from ever completing. The same fix is what let
+  `bin/rtc-spike.rs` and `bin/reconnect-drill.rs` run on Windows at all — both
+  PASS there now, where DR-7 and DR-8 had only ever seen them pass on macOS.
 
 ## Phase 3 — Full rooms
 
@@ -256,7 +262,8 @@ Goal: two clients talking through the SFU. Riskiest phase — spikes first.
   any one seat, and sessions come and go underneath. `bin/reconnect-drill.rs`
   is the automated proof; docs/testing/reconnect.md has both it and the
   `pfctl` run that takes the network away for real. Both DR-8 cases are
-  covered, and both were seen happening in the drill's output. See DR-9.
+  covered, and both were seen happening in the drill's output. See DR-9. The
+  drill passes on the Windows host too as of DR-14.
   **Not verified:** the netdown run itself, on either host. The drill kills the
   session; only pulling the network checks that the client *notices* — see
   docs/testing/reconnect.md.
@@ -783,6 +790,10 @@ building a peer connection with no ICE servers and with the wildcard address,
 and see which of the two candidates above moves it. Until then no measurement
 in Phase 2 can be taken on this machine.
 
+**Resolved by DR-14 (2026-08-21).** Neither candidate was it: the callback is
+only ever invoked once, with `Complete`, and this network never let it get
+there. The peer connection and the pinned address were both innocent.
+
 ### DR-12: what the target machine actually offers (2026-08-20)
 
 **Context.** Task 0.5 front-loads two hardware unknowns: how small a buffer
@@ -1029,3 +1040,109 @@ host.
 - A redeploy ends every call in progress and always did (DR-5). It now looks
   like a reconnect into an empty room, which is worth knowing before it looks
   like a bug.
+
+### DR-14: one unreachable STUN URL hangs the whole join (2026-08-21)
+
+**Context.** DR-13 left every live proof blocked: `Call::join` failed all three
+attempts with "ICE gathering never completed", on Windows and under WSL alike,
+and the gathering-state callback appeared never to fire.
+
+**What it actually is.** Reading webrtc-rs 0.20.3 rather than watching it:
+
+- `RTCIceGatheringState::Gathering` is *never* published. The only place a
+  state change is emitted is `add_local_candidate` in `rtc`'s core, on the
+  empty end-of-candidates entry — so the callback is expected to fire exactly
+  once, with `Complete`. "Nothing is ever printed" was half a red herring.
+- That entry is added by `finish_gathering_if_ready`, which needs both the STUN
+  gatherer and the TURN relayer to report done.
+- The TURN relayer handles its own timeouts: `TurnEvent::TransactionTimeout`
+  sets `gather_finished` and the relayer completes.
+- The STUN gatherer does not. It completes only when its `stun_clients` map
+  empties, and a client is removed on a candidate or on a socket write failure.
+  `StunEvent::TransactionTimeOut` falls into a `_ => error!("STUN error: …")`
+  arm that removes nothing (`transports/stun_gatherer.rs`). **A STUN server
+  that never answers keeps gathering open forever.**
+
+Cloudflare hands out `stun:stun.cloudflare.com:53` alongside `:3478`, and
+DR-13 already measured that this network answers on 3478 and drops 53. One
+unreachable URL out of eight was the whole outage. Nothing about the host was
+special; the previous runs (DR-7, DR-8) passed from a network that let UDP/53
+out.
+
+**Options considered.**
+
+1. *Filter the ICE list* — drop the `:53` URLs before handing them over.
+   Rejected: it guesses which port this network dislikes, and a network that
+   allows only 53 exists too.
+2. *Vendor a patched `webrtc` and remove the timed-out client* — the upstream
+   fix, and the same maintenance burden DR-11 is already parked on. Worth
+   opening upstream; too heavy to depend on for the measurement.
+3. *Stop treating `Complete` as the only way out.* Taken.
+
+**Decision.** `wait_for_gathering` (`rtc/session.rs`) accepts either `Complete`
+or **quiet**: no new local candidate for `GATHER_QUIET` (2 s) with at least one
+already in hand. `Events` counts candidates through `on_ice_candidate` for no
+other purpose. Nothing gathered at all is still a failure at `CONNECT_TIMEOUT`,
+because an SDP with no candidates is not a connection anyone can answer.
+
+**Why leaving early is safe.** Candidates are re-read out of the ICE agent
+every time the local description is asked for; the only thing `Complete` adds
+to the SDP is the `a=end-of-candidates` attribute. Cloudflare is ice-lite and
+runs no connectivity checks of its own (DR-7), so the candidates that decide
+the call are the ones this client sends *from*, not a list the far end picks
+through.
+
+**Measurements — task 2.5, at last.** `cargo run --bin latency -- --pings 30`,
+native Windows on the DR-12 machine, against the live deploy:
+
+```
+--- 30 bursts heard, 0 lost ---
+
+  first burst heard 3.1 s after both clients were in the room
+  (14 went out before the pull was carrying anything)
+
+  wire path (encode → SFU → decode)
+    min       20.9 ms
+    median    21.4 ms
+    p95       22.2 ms
+    max       76.5 ms
+
+  mouth to ear, median
+    total     41.4 ms  against a 80 ms budget
+```
+
+**41.4 ms against the 80 ms budget**, adding DR-12's 20 ms of device period to
+a 21.4 ms median wire path. The same run under WSL reports 41.9 ms, so the
+number is the network's, not the host's. Repeat it with any `--pings`; a fresh
+room is used each time.
+
+Three things the number does not say:
+
+- **No jitter buffer exists yet.** This is the raw network, and the p95/max
+  spread (22.2 ms against 76.5 ms) is exactly what a jitter buffer is for. It
+  will spend some of the 38 ms of headroom.
+- **The analog path is not in it.** Converters either side are the PRD's
+  problem too and are not measurable from here.
+- **Loss is measured only once the pull is live.** The first heard burst is
+  what proves a subscription carries sound; bursts before it were counted as
+  lost until this task, which made a clean run look like a lossy one. They are
+  reported separately now.
+
+**Consequences.**
+
+- The Windows automated proofs run for the first time: `bin/rtc-spike.rs`
+  (task 2.3) and `bin/reconnect-drill.rs` (task 3.5) both **PASS** on this
+  host. DR-7 and DR-8 recorded them from macOS only.
+- Joining is up to 2 s slower on a network where every ICE URL answers, since
+  `Complete` still arrives on its own and the quiet window only ever runs when
+  it does not. Measured cost on this network: none — the wait ends on quiet.
+- `tokio`'s `test-util` feature is a dev-dependency now, so the three new tests
+  in `rtc::session` drive a paused clock instead of waiting out 25 real
+  seconds.
+- Worth reporting upstream: the STUN gatherer's timeout arm is a one-line fix
+  in webrtc-rs, and until it lands every client of that crate hangs on any ICE
+  server it cannot reach.
+- **Teardown noise.** Both drills end with `microphone frame not sent:
+  SendError(SenderRtp(…))` — a frame handed to a sender whose session is
+  already closing on the way out of `leave()`. Cosmetic, and unrelated to this;
+  worth silencing when a task next touches that path.
