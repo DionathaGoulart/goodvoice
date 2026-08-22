@@ -13,7 +13,7 @@
 use std::{
     collections::HashMap,
     sync::{
-        atomic::{AtomicBool, AtomicU32, AtomicU8, Ordering},
+        atomic::{AtomicBool, AtomicU32, AtomicU8, AtomicUsize, Ordering},
         Arc, Mutex,
     },
     time::Duration,
@@ -45,7 +45,8 @@ use webrtc::{
     peer_connection::{
         register_default_interceptors, MediaEngine, PeerConnection, PeerConnectionBuilder,
         PeerConnectionEventHandler, RTCConfigurationBuilder, RTCIceGatheringState, RTCIceServer,
-        RTCPeerConnectionState, RTCSessionDescription, Registry, SettingEngine,
+        RTCPeerConnectionIceEvent, RTCPeerConnectionState, RTCSessionDescription, Registry,
+        SettingEngine,
     },
     rtp_transceiver::{RTCRtpTransceiverDirection, RTCRtpTransceiverInit},
     runtime::default_runtime,
@@ -78,6 +79,15 @@ const OPUS_PAYLOAD_TYPE: PayloadType = 111;
 
 /// How long ICE and DTLS get before the join is called a failure.
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(25);
+
+/// How long gathering may stay silent before the SDP is taken as it stands.
+///
+/// Waiting for `Complete` alone is waiting on every ICE URL the room handed
+/// out, including the ones this network cannot reach — one of them is enough
+/// to hang the join for the whole [`CONNECT_TIMEOUT`] (DR-14). A candidate
+/// that is coming arrives in well under two seconds; when none has arrived for
+/// that long, the ones in hand are the ones there are.
+const GATHER_QUIET: Duration = Duration::from_secs(2);
 
 /// How long a freshly pulled track gets to actually show up.
 const TRACK_TIMEOUT: Duration = Duration::from_secs(15);
@@ -883,6 +893,10 @@ async fn run_session(supervisor: &Supervisor, session: Session) -> SessionEnd {
 /// complete".
 struct Signals {
     gathering: watch::Receiver<RTCIceGatheringState>,
+    /// How many local candidates have been gathered so far. Only ever grows
+    /// within one peer connection, so a reader that sees the same number twice
+    /// knows nothing arrived in between.
+    candidates: Arc<AtomicUsize>,
     connection: watch::Receiver<RTCPeerConnectionState>,
     tracks: Arc<TrackInbox>,
 }
@@ -896,6 +910,7 @@ struct TrackInbox {
 
 struct Events {
     gathering: watch::Sender<RTCIceGatheringState>,
+    candidates: Arc<AtomicUsize>,
     connection: watch::Sender<RTCPeerConnectionState>,
     tracks: Arc<TrackInbox>,
 }
@@ -904,16 +919,19 @@ impl Events {
     fn new() -> (Arc<Self>, Signals) {
         let (gathering_tx, gathering) = watch::channel(RTCIceGatheringState::New);
         let (connection_tx, connection) = watch::channel(RTCPeerConnectionState::New);
+        let candidates = Arc::new(AtomicUsize::new(0));
         let tracks = Arc::new(TrackInbox::default());
 
         (
             Arc::new(Self {
                 gathering: gathering_tx,
+                candidates: Arc::clone(&candidates),
                 connection: connection_tx,
                 tracks: Arc::clone(&tracks),
             }),
             Signals {
                 gathering,
+                candidates,
                 connection,
                 tracks,
             },
@@ -925,6 +943,13 @@ impl Events {
 impl PeerConnectionEventHandler for Events {
     async fn on_ice_gathering_state_change(&self, state: RTCIceGatheringState) {
         let _ = self.gathering.send(state);
+    }
+
+    /// Counting them is the whole use for them: nothing here trickles, so a
+    /// candidate is interesting only as evidence that gathering is still
+    /// making progress (see [`wait_for_gathering`]).
+    async fn on_ice_candidate(&self, _event: RTCPeerConnectionIceEvent) {
+        self.candidates.fetch_add(1, Ordering::Relaxed);
     }
 
     async fn on_connection_state_change(&self, state: RTCPeerConnectionState) {
@@ -1029,32 +1054,63 @@ fn local_ip() -> String {
         .map_or_else(|_| WILDCARD.to_owned(), |address| address.ip().to_string())
 }
 
+/// Wait until the candidate list is as complete as it is going to get.
+///
+/// There are two ways out, and the tidy one is not the reliable one.
+///
+/// `Complete` is published once webrtc-rs has heard back from every STUN and
+/// TURN client it opened. A STUN server that never answers is never dropped
+/// from that set, so a single unreachable URL in the room's ICE list means the
+/// state stays `New` forever — and Cloudflare hands out
+/// `stun.cloudflare.com:53`, which any network that filters outbound UDP/53
+/// swallows (DR-14).
+///
+/// So quiet counts too: no new candidate for [`GATHER_QUIET`] with at least
+/// one already in hand. Leaving early costs only the `a=end-of-candidates`
+/// line, since the candidates themselves are re-read out of the ICE agent
+/// every time the local description is asked for — and against an ice-lite SFU
+/// that runs no checks of its own (DR-7), the candidates that matter are ours
+/// to send from, not theirs to choose between.
+async fn wait_for_gathering(signals: &Signals) -> Result<(), RtcError> {
+    let mut gathering = signals.gathering.clone();
+    let deadline = tokio::time::Instant::now() + CONNECT_TIMEOUT;
+
+    loop {
+        // The state is copied out of the watch straight away: the borrow it
+        // hands back is not `Send`, and this runs inside a spawned task.
+        let state = *gathering.borrow_and_update();
+        if state == RTCIceGatheringState::Complete {
+            return Ok(());
+        }
+
+        let before = signals.candidates.load(Ordering::Relaxed);
+        match tokio::time::timeout(GATHER_QUIET, gathering.changed()).await {
+            Ok(Ok(())) => continue,
+            Ok(Err(_)) => {
+                return Err(RtcError::Transport(
+                    "the peer connection went away during ICE gathering".to_owned(),
+                ))
+            }
+            Err(_) => {
+                let now = signals.candidates.load(Ordering::Relaxed);
+                if now > 0 && now == before {
+                    return Ok(());
+                }
+            }
+        }
+
+        if tokio::time::Instant::now() >= deadline {
+            return Err(RtcError::Transport(
+                "ICE gathering never completed".to_owned(),
+            ));
+        }
+    }
+}
+
 /// Cloudflare negotiates without trickle, so the SDP that goes up has to carry
 /// every candidate already.
 async fn local_sdp(peer: &dyn PeerConnection, signals: &Signals) -> Result<String, RtcError> {
-    let mut gathering = signals.gathering.clone();
-    // The state is copied out of the watch straight away: the borrow it hands
-    // back is not `Send`, and this runs inside a spawned task.
-    let gathered = tokio::time::timeout(
-        CONNECT_TIMEOUT,
-        gathering.wait_for(|state| *state == RTCIceGatheringState::Complete),
-    )
-    .await
-    .map(|result| result.map(|state| *state));
-
-    match gathered {
-        Ok(Ok(_)) => {}
-        Ok(Err(_)) => {
-            return Err(RtcError::Transport(
-                "the peer connection went away during ICE gathering".to_owned(),
-            ))
-        }
-        Err(_) => {
-            return Err(RtcError::Transport(
-                "ICE gathering never completed".to_owned(),
-            ))
-        }
-    }
+    wait_for_gathering(signals).await?;
 
     peer.local_description()
         .await
@@ -1723,7 +1779,9 @@ fn ssrc_for_mid(sdp: &str, mid: &str) -> Option<u32> {
 mod tests {
     use super::{
         is_starting_up, play_packet, publish_loop, silent_frame, ssrc_for_mid, ssrc_of,
-        track_error, PacketSink, Shared, TransmitMode,
+        track_error, wait_for_gathering, Events, PacketSink, PeerConnectionEventHandler,
+        RTCIceGatheringState, RTCPeerConnectionIceEvent, Shared, TransmitMode, CONNECT_TIMEOUT,
+        GATHER_QUIET,
     };
     use crate::audio::{
         device::{AudioSink, AudioSource, NullSink, RecordingSink, ToneSource},
@@ -2306,5 +2364,80 @@ mod tests {
         );
 
         pump.abort();
+    }
+    /// A gathering that finishes the way webrtc-rs means it to.
+    #[tokio::test(start_paused = true)]
+    async fn a_complete_gathering_is_not_waited_on_further() {
+        let (events, signals) = Events::new();
+        events
+            .on_ice_gathering_state_change(RTCIceGatheringState::Complete)
+            .await;
+
+        let started = tokio::time::Instant::now();
+        wait_for_gathering(&signals)
+            .await
+            .expect("a complete gathering is not a failure");
+        assert!(
+            started.elapsed() < GATHER_QUIET,
+            "a gathering that was already complete was waited on anyway"
+        );
+    }
+
+    /// The DR-14 case: one ICE URL this network cannot reach keeps `Complete`
+    /// from ever being published, and the join used to burn the whole connect
+    /// timeout and then fail with candidates sitting in hand.
+    #[tokio::test(start_paused = true)]
+    async fn candidates_that_stop_arriving_end_the_wait() {
+        let (events, signals) = Events::new();
+
+        let arriving = tokio::spawn(async move {
+            for _ in 0..3 {
+                tokio::time::sleep(GATHER_QUIET / 2).await;
+                events
+                    .on_ice_candidate(RTCPeerConnectionIceEvent::default())
+                    .await;
+            }
+            // ...and then the unreachable server's client hangs around
+            // forever, so no `Complete` ever follows.
+            std::future::pending::<()>().await;
+        });
+
+        let started = tokio::time::Instant::now();
+        wait_for_gathering(&signals)
+            .await
+            .expect("gathering went quiet with candidates in hand; that is a usable SDP");
+        assert!(
+            started.elapsed() < CONNECT_TIMEOUT,
+            "the wait ran to the connect timeout instead of stopping when the candidates did"
+        );
+        assert_eq!(
+            signals.candidates.load(Ordering::Relaxed),
+            3,
+            "the wait ended before the candidates that were coming had arrived"
+        );
+
+        arriving.abort();
+    }
+
+    /// Quiet is only an answer if something was gathered. A peer connection
+    /// that produced nothing at all has no SDP worth sending, so it waits out
+    /// the connect timeout and fails.
+    #[tokio::test(start_paused = true)]
+    async fn silence_with_no_candidates_is_still_a_failure() {
+        let (_events, signals) = Events::new();
+
+        let started = tokio::time::Instant::now();
+        let failure = wait_for_gathering(&signals)
+            .await
+            .expect_err("no candidates and no completion is not a joinable connection");
+
+        assert!(
+            format!("{failure}").contains("never completed"),
+            "unexpected failure: {failure}"
+        );
+        assert!(
+            started.elapsed() >= CONNECT_TIMEOUT,
+            "gave up before the connect timeout it was given"
+        );
     }
 }

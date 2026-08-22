@@ -70,6 +70,12 @@ cpal = "0.18"
 webrtc-vad = "0.4"
 anyhow = "1"
 
+# Tests only. `#[tokio::test(start_paused = true)]` runs the clock instead of
+# waiting on it, so a wait written in whole seconds — the ICE gathering ones in
+# `rtc::session` — costs the suite nothing to assert on.
+[dev-dependencies]
+tokio = { version = "1", features = ["test-util"] }
+
 # The 0.5 probe only. Windows-only because the two questions it answers —
 # what WASAPI will give us and which encoders are in silicon — have no
 # meaning anywhere else. Same major as the one tauri already pulls in, so
