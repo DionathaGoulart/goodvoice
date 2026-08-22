@@ -3,8 +3,8 @@
 //! The window is not the app. A voice client spends almost all of its time with
 //! nothing to show — the call runs in Rust and does not care whether a webview
 //! exists — so closing the window puts goodvoice in the notification area
-//! rather than ending the call (plan.md task 4.1). The menu that grows out of
-//! this is task 4.2 and the global hotkey is 4.3.
+//! rather than ending the call (plan.md task 4.1). What it offers while hidden
+//! is [`menu`] (task 4.2); the global hotkey is 4.3.
 //!
 //! # The trap this must not set
 //!
@@ -14,17 +14,25 @@
 //! into, and a host that could not give us one keeps an ordinary window that
 //! ordinarily closes.
 
+mod menu;
+
 use std::{
-    sync::atomic::{AtomicBool, Ordering},
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Mutex,
+    },
     time::Duration,
 };
 
 use tauri::{
-    menu::{Menu, MenuEvent, MenuItem},
+    menu::MenuEvent,
     tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
     AppHandle, Manager as _, Window, WindowEvent,
 };
 use thiserror::Error;
+
+use crate::Controls;
+use menu::{Action, TrayMenu};
 
 /// How long the call gets to hand its seat back when quitting from the tray.
 ///
@@ -52,16 +60,15 @@ pub enum TrayError {
 ///
 /// Managed state rather than a global: the window event handler is handed a
 /// window and can reach it, and nothing else has any business knowing.
-#[derive(Debug, Default)]
+#[derive(Default)]
 pub struct Tray {
     installed: AtomicBool,
+    /// The menu, once there is one. Held so the call can tick its boxes;
+    /// [`apply_controls`] is the only thing that reads it.
+    menu: Mutex<Option<TrayMenu>>,
 }
 
 impl Tray {
-    fn mark_installed(&self) {
-        self.installed.store(true, Ordering::Release);
-    }
-
     /// Whether closing the window should hide it instead.
     #[must_use]
     pub fn hides_the_window(&self) -> bool {
@@ -69,24 +76,16 @@ impl Tray {
     }
 }
 
-/// What a click on the tray menu means.
+/// Puts the tray menu in step with the call: what is ticked, and what can be
+/// clicked at all.
 ///
-/// The mapping from a menu id to an action is the part of this module that is
-/// worth testing, and the part task 4.2 grows.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Action {
-    Show,
-    Quit,
-}
-
-const SHOW_ID: &str = "show";
-const QUIT_ID: &str = "quit";
-
-fn action_of(id: &str) -> Option<Action> {
-    match id {
-        SHOW_ID => Some(Action::Show),
-        QUIT_ID => Some(Action::Quit),
-        _ => None,
+/// Called from [`crate::push_controls`], which is also what tells the window.
+/// Neither is the source of truth; the call is.
+pub fn apply_controls(app: &AppHandle, controls: Controls) {
+    if let Ok(menu) = app.state::<Tray>().menu.lock() {
+        if let Some(menu) = menu.as_ref() {
+            menu.apply(controls);
+        }
     }
 }
 
@@ -99,9 +98,7 @@ fn action_of(id: &str) -> Option<Action> {
 /// with no status-notifier host, most often. Neither is fatal: the caller is
 /// expected to carry on with a window that closes normally.
 pub fn install(app: &AppHandle) -> Result<(), TrayError> {
-    let open_item = MenuItem::with_id(app, SHOW_ID, "Open goodvoice", true, None::<&str>)?;
-    let quit_item = MenuItem::with_id(app, QUIT_ID, "Quit goodvoice", true, None::<&str>)?;
-    let menu = Menu::with_items(app, &[&open_item, &quit_item])?;
+    let menu = TrayMenu::build(app)?;
 
     let icon = app
         .default_window_icon()
@@ -111,7 +108,7 @@ pub fn install(app: &AppHandle) -> Result<(), TrayError> {
     TrayIconBuilder::with_id("goodvoice")
         .icon(icon)
         .tooltip("goodvoice")
-        .menu(&menu)
+        .menu(menu.menu())
         // The left button belongs to "show me the window", which is what a
         // person clicking a tray icon means nine times in ten. The menu is on
         // the right button, where Windows puts it.
@@ -129,16 +126,38 @@ pub fn install(app: &AppHandle) -> Result<(), TrayError> {
         })
         .build(app)?;
 
-    app.state::<Tray>().mark_installed();
+    let tray = app.state::<Tray>();
+    if let Ok(mut held) = tray.menu.lock() {
+        *held = Some(menu);
+    }
+    // Last, and only once the menu is where `apply_controls` can find it: this
+    // is what puts close-to-tray in force (see the module docs).
+    tray.installed.store(true, Ordering::Release);
     Ok(())
 }
 
 fn on_menu_event(app: &AppHandle, event: &MenuEvent) {
-    match action_of(event.id.as_ref()) {
+    match Action::of(event.id.as_ref()) {
         Some(Action::Show) => show(app),
+        // The call's own toggles are async and this is the event loop, so each
+        // is handed to the runtime rather than waited on. The tick in the menu
+        // follows from the call changing, not from the click (`push_controls`).
+        Some(Action::Mute) => on_call(app, crate::toggle_muted),
+        Some(Action::Deafen) => on_call(app, crate::toggle_deafened),
+        Some(Action::Leave) => on_call(app, crate::end_call),
         Some(Action::Quit) => quit(app),
         None => {}
     }
+}
+
+/// Runs one of the call's own operations off the event loop.
+fn on_call<F, Fut>(app: &AppHandle, operation: F)
+where
+    F: FnOnce(AppHandle) -> Fut + Send + 'static,
+    Fut: std::future::Future<Output = ()> + Send,
+{
+    let app = app.clone();
+    tauri::async_runtime::spawn(async move { operation(app).await });
 }
 
 /// Brings the window back, from hidden or from minimised or from both.
@@ -162,7 +181,7 @@ pub fn show(app: &AppHandle) {
 fn quit(app: &AppHandle) {
     let app = app.clone();
     tauri::async_runtime::spawn(async move {
-        let _ = tokio::time::timeout(LEAVE_GRACE, crate::end_call(&app)).await;
+        let _ = tokio::time::timeout(LEAVE_GRACE, crate::end_call(app.clone())).await;
         app.exit(0);
     });
 }
@@ -199,22 +218,7 @@ pub fn window_event(window: &Window, event: &WindowEvent) {
 
 #[cfg(test)]
 mod tests {
-    use super::{action_of, Action, Tray, QUIT_ID, SHOW_ID};
-
-    #[test]
-    fn the_menu_ids_are_the_ones_the_menu_is_built_with() {
-        assert_eq!(action_of(SHOW_ID), Some(Action::Show));
-        assert_eq!(action_of(QUIT_ID), Some(Action::Quit));
-    }
-
-    #[test]
-    fn an_unknown_menu_id_does_nothing() {
-        // Task 4.2 adds mute, deafen and leave. Until it does, a click that
-        // means nothing here has to mean nothing at all rather than falling
-        // through to whichever arm happens to be last.
-        assert_eq!(action_of("mute"), None);
-        assert_eq!(action_of(""), None);
-    }
+    use super::Tray;
 
     #[test]
     fn a_window_with_no_tray_behind_it_closes_normally() {
@@ -226,7 +230,8 @@ mod tests {
             "close-to-tray was in force before a tray existed"
         );
 
-        tray.mark_installed();
+        tray.installed
+            .store(true, std::sync::atomic::Ordering::Release);
         assert!(tray.hides_the_window());
     }
 }

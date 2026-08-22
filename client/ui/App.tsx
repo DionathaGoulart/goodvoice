@@ -45,6 +45,13 @@ type CallState =
 /** Mirrors `CallHealth` in `src-tauri/src/lib.rs`. */
 type CallHealth = CallState & { self_id: string };
 
+/** Mirrors `Controls` in `src-tauri/src/lib.rs`. */
+interface Controls {
+  in_call: boolean;
+  muted: boolean;
+  deafened: boolean;
+}
+
 /** The event `push_roster` emits. Kept in step with `ROSTER_EVENT`. */
 const ROSTER_EVENT = "goodvoice://roster";
 
@@ -53,6 +60,14 @@ const STATE_EVENT = "goodvoice://state";
 
 /** The event `push_speaking` emits. Kept in step with `SPEAKING_EVENT`. */
 const SPEAKING_EVENT = "goodvoice://speaking";
+
+/**
+ * The event `push_controls` emits. Kept in step with `CONTROLS_EVENT`.
+ *
+ * Mute and deafen can be changed from the tray menu, so this window is not
+ * where either of them lives — it is told, the same as the tray is.
+ */
+const CONTROLS_EVENT = "goodvoice://controls";
 
 /**
  * The room code the server will accept: `roomCodeSchema` in
@@ -145,6 +160,10 @@ const App: Component = () => {
     listen<string[]>(SPEAKING_EVENT, (event) =>
       setSpeaking(new Set(event.payload)),
     ),
+    listen<Controls>(CONTROLS_EVENT, (event) => {
+      setMuted(event.payload.muted);
+      setDeafened(event.payload.deafened);
+    }),
     listen<CallHealth>(STATE_EVENT, (event) => {
       const { self_id, ...state } = event.payload;
       setHealth(state);
@@ -293,6 +312,12 @@ const App: Component = () => {
     }
   };
 
+  /**
+   * Set here as well as awaited from `CONTROLS_EVENT`: the button should look
+   * pressed on the click rather than a round trip later. The event that
+   * follows says the same thing, and says it again when the change came from
+   * the tray instead.
+   */
   const toggleMute = async () => {
     const next = !muted();
     setMuted(next);

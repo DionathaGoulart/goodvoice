@@ -38,6 +38,12 @@ const ROSTER_EVENT: &str = "goodvoice://roster";
 /// or over. A dropped call must never look like a quiet one (prd.md §5 flow E).
 const STATE_EVENT: &str = "goodvoice://state";
 
+/// The event the UI listens on for mute and deafen.
+///
+/// Both can be changed from the tray now (task 4.2), so the window cannot be
+/// the source of truth for either — it is told, the same as the tray is.
+const CONTROLS_EVENT: &str = "goodvoice://controls";
+
 /// The event the UI listens on for who is talking, as participant ids.
 ///
 /// Separate from the roster because the two move at completely different
@@ -87,6 +93,18 @@ pub struct CallHealth {
     pub self_id: String,
 }
 
+/// What the window and the tray menu both show, and neither owns.
+///
+/// The call is the source of truth; this is the copy that gets pushed to the
+/// two things that display it. `in_call` is here because a tray menu offering
+/// "Leave room" to somebody who is not in one is a menu that lies.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
+pub struct Controls {
+    pub in_call: bool,
+    pub muted: bool,
+    pub deafened: bool,
+}
+
 /// The one call this process can be in.
 ///
 /// A `Mutex` rather than a lock-free cell because join and leave must not
@@ -94,9 +112,21 @@ pub struct CallHealth {
 /// microphone nobody can mute. The `Call` is held directly rather than behind
 /// an `Arc` so leaving can consume it — the tasks that push at the webview get
 /// watch receivers, never a handle on the call itself.
-#[derive(Default)]
 struct CurrentCall {
     call: Mutex<Option<Call>>,
+    /// Watched rather than read: [`push_controls`] forwards every change to
+    /// the window and the tray, so whoever made it does not have to know who
+    /// else is showing it.
+    controls: watch::Sender<Controls>,
+}
+
+impl Default for CurrentCall {
+    fn default() -> Self {
+        Self {
+            call: Mutex::default(),
+            controls: watch::Sender::new(Controls::default()),
+        }
+    }
 }
 
 /// Joins a room, opening the microphone and speakers on the way.
@@ -146,6 +176,12 @@ async fn join_room(
     tauri::async_runtime::spawn(push_speaking(app.clone(), call.speaking()));
     tauri::async_runtime::spawn(push_state(app, call.state(), call.self_id_watch()));
     *current = Some(call);
+    // A fresh call is unmuted and undeafened, whatever the last one ended as.
+    state.controls.send_replace(Controls {
+        in_call: true,
+        muted: false,
+        deafened: false,
+    });
 
     Ok(status)
 }
@@ -164,10 +200,10 @@ async fn leave_room(state: State<'_, CurrentCall>) -> Result<(), String> {
 
 /// Ends whatever call is in progress, if any.
 ///
-/// The UI leaves through [`leave_room`]; the tray's Quit comes here directly,
-/// because the window closing stopped meaning "goodbye" the moment task 4.1
-/// turned it into a hide.
-pub async fn end_call(app: &AppHandle) {
+/// The UI leaves through [`leave_room`]; the tray's Leave and Quit come here
+/// directly, because the window closing stopped meaning "goodbye" the moment
+/// task 4.1 turned it into a hide.
+pub async fn end_call(app: AppHandle) {
     end_call_in(&app.state::<CurrentCall>()).await;
 }
 
@@ -176,6 +212,41 @@ async fn end_call_in(current: &CurrentCall) {
     if let Some(call) = taken {
         call.leave().await;
     }
+    // The window hears the call end through `push_state` as well; this is what
+    // greys the tray menu out.
+    current.controls.send_replace(Controls::default());
+}
+
+/// Flips mute, whichever side asked.
+///
+/// The call is read for the current value rather than the copy in
+/// [`Controls`]: a toggle from the tray and one from the window can be in
+/// flight at once, and only one of them is holding the call.
+pub async fn toggle_muted(app: AppHandle) {
+    let state = app.state::<CurrentCall>();
+    let call = state.call.lock().await;
+    let Some(call) = call.as_ref() else {
+        return;
+    };
+    let muted = !call.is_muted();
+    call.set_muted(muted).await;
+    state
+        .controls
+        .send_modify(|controls| controls.muted = muted);
+}
+
+/// Flips deafen, whichever side asked.
+pub async fn toggle_deafened(app: AppHandle) {
+    let state = app.state::<CurrentCall>();
+    let call = state.call.lock().await;
+    let Some(call) = call.as_ref() else {
+        return;
+    };
+    let deafened = !call.is_deafened();
+    call.set_deafened(deafened).await;
+    state
+        .controls
+        .send_modify(|controls| controls.deafened = deafened);
 }
 
 /// # Errors
@@ -186,6 +257,9 @@ async fn set_muted(state: State<'_, CurrentCall>, muted: bool) -> Result<(), Str
     let call = state.call.lock().await;
     let call = call.as_ref().ok_or_else(|| "not in a call".to_owned())?;
     call.set_muted(muted).await;
+    state
+        .controls
+        .send_modify(|controls| controls.muted = muted);
     Ok(())
 }
 
@@ -197,6 +271,9 @@ async fn set_deafened(state: State<'_, CurrentCall>, deafened: bool) -> Result<(
     let call = state.call.lock().await;
     let call = call.as_ref().ok_or_else(|| "not in a call".to_owned())?;
     call.set_deafened(deafened).await;
+    state
+        .controls
+        .send_modify(|controls| controls.deafened = deafened);
     Ok(())
 }
 
@@ -264,6 +341,36 @@ async fn push_speaking(app: AppHandle, mut speaking: watch::Receiver<Vec<String>
     }
 }
 
+/// Lets go of a call that has ended on its own.
+///
+/// A call that drops for good ends *underneath* the two commands that take it
+/// apart, so without this the process keeps holding a `Call` nobody is in:
+/// the next join is refused with "already in a call", and the tray menu goes on
+/// offering Leave and Mute for a room that is not there. Leaving properly is
+/// [`end_call`]'s job — by here there is nothing left to tell the room.
+async fn forget_call(app: &AppHandle) {
+    let state = app.state::<CurrentCall>();
+    let _ = state.call.lock().await.take();
+    state.controls.send_replace(Controls::default());
+}
+
+/// Forwards mute and deafen to both things that show them, for the life of the
+/// process.
+///
+/// One task rather than one per call: the tray outlives every call, and a menu
+/// left ticked by a call that ended is exactly the bug this is here to avoid.
+async fn push_controls(app: AppHandle, mut controls: watch::Receiver<Controls>) {
+    loop {
+        let current = *controls.borrow_and_update();
+        let _ = app.emit(CONTROLS_EVENT, current);
+        tray::apply_controls(&app, current);
+
+        if controls.changed().await.is_err() {
+            return;
+        }
+    }
+}
+
 /// Forwards the call's health to the webview until it ends.
 ///
 /// Both watches feed one event: a reconnect changes the state and the
@@ -282,6 +389,7 @@ async fn push_state(
         let ended = health.state.is_ended();
         let _ = app.emit(STATE_EVENT, health);
         if ended {
+            forget_call(&app).await;
             return;
         }
 
@@ -310,6 +418,9 @@ pub fn run() {
             if let Err(error) = tray::install(app.handle()) {
                 eprintln!("no tray icon: {error}; the window will close rather than hide");
             }
+
+            let controls = app.state::<CurrentCall>().controls.subscribe();
+            tauri::async_runtime::spawn(push_controls(app.handle().clone(), controls));
             Ok(())
         })
         .on_window_event(tray::window_event)
@@ -328,7 +439,33 @@ pub fn run() {
 
 #[cfg(test)]
 mod tests {
-    use super::{ClientInfo, DEFAULT_SERVER};
+    use super::{ClientInfo, Controls, DEFAULT_SERVER};
+
+    /// The window reads these names out of the event (`Controls` in App.tsx).
+    /// Renaming a field here without renaming it there is a control that
+    /// silently stops following the call.
+    #[test]
+    fn the_controls_payload_is_the_one_the_window_reads() {
+        let payload = serde_json::to_value(Controls {
+            in_call: true,
+            muted: true,
+            deafened: false,
+        })
+        .expect("controls serialize");
+
+        assert_eq!(
+            payload,
+            serde_json::json!({ "in_call": true, "muted": true, "deafened": false })
+        );
+    }
+
+    #[test]
+    fn a_client_that_is_not_in_a_call_offers_nothing_to_click() {
+        // What the tray menu is greyed out by, and what the window shows before
+        // anyone joins.
+        let idle = Controls::default();
+        assert!(!idle.in_call && !idle.muted && !idle.deafened);
+    }
 
     #[test]
     fn client_info_reports_crate_metadata() {

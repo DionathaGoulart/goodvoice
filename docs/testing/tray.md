@@ -80,3 +80,33 @@ Build and run it, then:
 6. **Right-click → Quit goodvoice.** The process ends *and* the room stops
    showing you in it — Quit hands the seat back before exiting (DR-5), which
    the close button no longer does because it no longer ends anything.
+
+## The menu (task 4.2)
+
+Right-click the icon. Out of a call it reads: **Open goodvoice**, then a greyed
+**Mute**, **Deafen** and **Leave room**, then **Quit goodvoice**. Greyed is the
+point — a menu offering to leave a room you are not in is a menu that lies.
+
+Join a room from the window and go through it. Every item is checked against
+the *other* half of the app, because state that is synced in one direction only
+looks fine until you use the other one:
+
+| Do this | Tray shows | Window shows | Someone else sees |
+|---|---|---|---|
+| Join a room | all three items live | the room panel | you arrive |
+| Tray → Mute | ✔ next to Mute | the mute button lit | you go **muted** |
+| Window → unmute | tick gone | button unlit | your tag clears |
+| Tray → Deafen | ✔ next to Deafen | deafen button lit | you go **deafened** |
+| Window → mute *and* deafen | both ticked | both lit | both tags |
+| Tray → Leave room | all three greyed again | back to the join panel | you leave |
+| Join again after that | live again | the room panel | you arrive |
+
+Two of those rows exist because they used to be broken:
+
+- **The last one.** A call that ended on its own — dropped, refused, or left
+  from the tray — used to be kept in memory as if it were still running, so the
+  next join was refused with "already in a call" and the only way back into a
+  room was to restart the app. `push_state` lets go of it now.
+- **The unmute row.** The window sets its own button on the click *and* is told
+  by the event that follows. Both, so the button answers instantly and still
+  ends up saying what the call actually says.

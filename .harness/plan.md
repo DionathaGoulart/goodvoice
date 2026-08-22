@@ -287,6 +287,11 @@ Goal: two clients talking through the SFU. Riskiest phase — spikes first.
   **Not verified:** the netdown run itself, on either host. The drill kills the
   session; only pulling the network checks that the client *notices* — see
   docs/testing/reconnect.md.
+  One thing the drill could not see, found while wiring the tray menu (4.2):
+  the *app* kept holding a call that had ended, so a client whose call dropped
+  for good could not join anything again without being restarted. The drill
+  drives `Call` directly and never went through `CurrentCall`, which is where
+  it was stuck.
 
 ## Phase 4 — Tray & polish
 
@@ -314,9 +319,35 @@ Goal: two clients talking through the SFU. Riskiest phase — spikes first.
   **Not verified — needs a person:** that the icon is visible, that a left
   click brings the window back without flicker, and that a call keeps running
   audibly while the window is away. docs/testing/tray.md step 1–6.
-- [ ] **4.2 Tray menu** — `tray/menu.rs`. Mute/unmute, deafen, leave room, quit —
+- [x] **4.2 Tray menu** — `tray/menu.rs`. Mute/unmute, deafen, leave room, quit —
   all functional and state-synced with UI.
   DoD: each item verified against in-room state. Verify: manual checklist in PR.
+  Built: `tray/menu.rs` — Open, a separator, **Mute** and **Deafen** as check
+  items, **Leave room**, and Quit. Ids and actions are one table, so an item
+  cannot be added without an arm to answer it; a menu with a dead button in it
+  is worse than one item short.
+  **Neither half owns the state.** The call does, and `Controls`
+  (`{in_call, muted, deafened}`) is the copy pushed to both: `push_controls`
+  forwards every change to the webview as `goodvoice://controls` *and* to the
+  menu's ticks. So a mute from the tray lights the window's button and a mute
+  from the window ticks the tray's box, without either one knowing the other
+  exists. `in_call` is what greys the three items out — a menu offering to
+  leave a room you are not in is a menu that lies.
+  **Fixed on the way past:** a call that ended on its own was still being held
+  as if it were running, so the next join was refused with "already in a call"
+  and the only way back into a room was to restart the app. `push_state` lets
+  go of it now, which is also what greys the menu out when a call drops.
+  **`cargo test` had to be rescued to say any of that.** Mutating a menu item
+  pulls comctl32 v6 into the library, and the library's unit-test executable is
+  the one target `tauri_build`'s manifest does not reach — so every test on
+  Windows became one unexplained `0xc0000139`. `build.rs` delay-loads comctl32;
+  DR-17 has why the obvious fix does not work.
+  Verified: `cargo test` (103) covers the id table and the `Controls` payload
+  the window parses; `cargo fmt --check`, `cargo clippy --all-targets -- -D
+  warnings`, `npm run typecheck` and `prettier --check` are green, and 4.1's
+  two drills still pass on Windows after the refactor.
+  **Not verified:** the checklist itself — docs/testing/tray.md, "The menu",
+  seven rows, each one checked against the window and against a roommate.
 - [ ] **4.3 [WIN] Global push-to-talk hotkey** — `tray/hotkey.rs`. Low-level
   keyboard hook (`WH_KEYBOARD_LL`); works while a fullscreen game has focus.
   Write the anti-cheat Decision Record (EAC/BattlEye/Vanguard stance, PRD open q3).
@@ -1344,3 +1375,78 @@ restore animation. That is what "no flicker" rests on.
 - `lib.rs` grew `end_call`, and `leave_room` is now one call into it.
 - Task 4.2's menu grows from `Action`/`action_of` in `tray/mod.rs`, which is
   the tested part; adding mute, deafen and leave is a variant each.
+
+### DR-17: `cargo test` stopped starting on Windows, and it was the menu (2026-08-21)
+
+**Context.** Task 4.2 gave the tray menu items that change — a tick against
+Mute, greying out Leave when there is no room to leave. The moment the library
+mutated a menu item, `cargo test` on Windows stopped running at all:
+
+```
+error: test failed, to rerun pass `--lib`
+  process didn't exit successfully: goodvoice_client_lib-<hash>.exe
+  (exit code: 0xc0000139, STATUS_ENTRYPOINT_NOT_FOUND)
+```
+
+No test ran. Nothing was printed. `cargo build` and the app itself were fine.
+
+**What it is.** `dumpbin /imports` on the test executable:
+
+```
+comctl32.dll
+    DefSubclassProc
+    SetWindowSubclass
+    RemoveWindowSubclass
+    TaskDialogIndirect
+```
+
+All four are exported by **comctl32 version 6**, and a process gets version 6
+only by asking for it in its manifest. `tauri_build` embeds a manifest that
+asks — through `embed-resource`, which emits `cargo:rustc-link-arg-bins`. Bins
+and *their* test harnesses get it. The library's own unit-test executable is
+not a binary target, so it gets nothing, binds to the version 5 in `system32`,
+and dies in the loader before `main`.
+
+**Why the obvious fix does not work.** Handing the same manifest to every
+target with `cargo:rustc-link-arg=/MANIFEST:EMBED` plus a
+`/MANIFESTDEPENDENCY` is the first thing to try, and the linker refuses it:
+
+```
+CVTRES : fatal error CVT1100: duplicate resource. type:MANIFEST, name:1
+LINK : fatal error LNK1123: failure during conversion to COFF
+```
+
+— because the binaries already have one. `cargo:rustc-link-arg-tests` is the
+narrow version of the same idea and does not apply either: it means `tests/`
+integration targets, and this crate's tests live inside the library
+("the package does not have a test target"). Cargo has no way to aim a link
+argument at the one target that is short.
+
+**Decision.** `build.rs` delay-loads it: `/DELAYLOAD:comctl32.dll` plus
+`delayimp`, on MSVC only. The test executable never calls into comctl32 and now
+never loads it. The app resolves it on the first call, by which time its
+manifest has long since asked for version 6 — verified by both tray drills
+passing afterwards (docs/testing/tray.md), which exercise exactly the
+window-subclassing path that needs it.
+
+**Options considered.**
+
+1. *Drop the menu features that pull it in.* `PredefinedMenuItem` (the
+   separators) drags in `TaskDialogIndirect`, so it was the first suspect —
+   removing it changed nothing. It is any item **mutation** that does it:
+   `set_checked`, `set_enabled`, `set_text` all go through Tauri's
+   `run_item_main_thread!`. Task 4.2 is a menu that changes; there is nothing
+   to give up here.
+2. *Move the Tauri shell out of the library into `main.rs`.* Would work, and
+   costs the crate its shape for a linker detail.
+3. *`#[cfg(not(test))]` around the mutation.* Product code that vanishes under
+   test, so that the tests can pass. No.
+
+**Consequences.**
+
+- One more thing that only bites on Windows and only in a test build. The
+  symptom is memorable enough to grep for: **`0xc0000139` means a missing DLL
+  export, not a failing test.**
+- Delay-loading is per-DLL and comctl32 only. If a future dependency needs
+  another version-6-only DLL bound at startup, the same fix extends by one
+  line.
