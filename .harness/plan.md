@@ -395,10 +395,53 @@ Goal: two clients talking through the SFU. Riskiest phase — spikes first.
   Verified: five runs, all five heard, on the DR-12 machine against the live
   deploy — and `rtc-spike`, `reconnect-drill` and `latency` all still pass on
   the same build, because the gathering rule decides what goes in every SDP.
-- [ ] **4.5 [WIN] Idle CPU/RAM budget verification** — 30-min idle-in-room soak:
+- [x] **4.5 [WIN] Idle CPU/RAM budget verification** — 30-min idle-in-room soak:
   CPU <2%, RAM ≤120 MB.
   DoD: numbers in DR, budgets met (or DR explains the gap + fix tasks added).
   Verify: soak script + Task Manager/ETW capture committed to `docs/perf/`.
+  **CPU met, with room: 0.39% median of a twelve-processor machine against a
+  2% budget. RAM not met: 361 MB against 120.** Nothing in those two sentences
+  is about the same code. `goodvoice-client.exe` — the devices, Opus, the
+  mixer, the transport, the roster — is **34 MB**; the other 327 are the six
+  WebView2 processes, all of them resident with the window hidden. DR-20 has
+  the breakdown, the options and what each is worth; **task 4.6** is the fix.
+  Built: `bin/soak` — launches the release app, joins it to a real room with a
+  second client already in it, minimises it into the tray, and reads the
+  **whole process tree** every two seconds. Measuring only the process with our
+  name on it would have reported 34 MB and passed a budget the app misses by
+  three times.
+  Two things it refuses to measure without. **Somebody in the room**: an app
+  alone in a room subscribes to nothing and decodes nothing, which is a cheaper
+  client than anybody runs. And **liveness** — the second client counts frames
+  arriving from the app, because a soak where the app quietly fell out of the
+  room is a measurement of an idle process and would be the cheapest possible
+  way to pass. 897 of 897 samples carried audio.
+  `docs/perf/idle-soak.ps1` measures the same tree through CIM and .NET while
+  the soak runs: no shared code, no shared API. The two agree on CPU to two
+  decimal places and on memory to a megabyte, so the numbers are about the app
+  rather than about one implementation of the arithmetic.
+  **Nothing grows.** Working set by five-minute bucket: 361.0, 363.9, 363.4,
+  361.1, 361.0, 361.0 MB. Per process over 26 minutes the largest change in the
+  tree is half a megabyte.
+  Verified: 897 samples on the DR-12 machine against the live deploy, both
+  captures committed to `docs/perf/`; `cargo fmt --check`, `cargo clippy
+  --all-targets -- -D warnings` and `cargo test` green on Windows and Linux
+  (the soak's arithmetic is six tests that run on any host).
+- [ ] **4.6 [WIN] Get the idle client under 120 MB** — `tray/`, `lib.rs`,
+  `tauri.conf.json`. 4.5 measured 361 MB idle, of which 34 is goodvoice and 327
+  is WebView2 with the window hidden (DR-20). Three levers, cheapest first:
+  **(a)** `additionalBrowserArgs` — no GPU process for a 420-pixel roster, one
+  renderer, no features nobody uses; **(b)** `ICoreWebView2_3::TrySuspend` while
+  the window is hidden and `Resume` on show, reached through
+  `WebviewWindow::with_webview` and `webview2-com` (**pinned to tauri's `windows`
+  0.61, not this crate's 0.62** — they are different crates and the COM types
+  do not interconvert); **(c)** dropping the webview entirely while in the tray
+  and rebuilding it on show — the only one that reaches the 34 MB floor, and
+  the one that gives up 4.1's "coming back is instant".
+  DoD: `bin/soak` reports a peak at or under 120 MB with the call audible in
+  every sample — or a DR says which levers were tried, what each measured, and
+  why the budget is being restated instead.
+  Verify: `cargo run --release --bin soak`, 30 minutes, both captures updated.
 
 ## Phase 5 — Screen share
 
@@ -1653,3 +1696,103 @@ that path taking seconds when it goes wrong.
   run that greps for `BUILD=` rather than `BUILD=0` will measure it and report
   the old numbers with a straight face. That happened once here; see the
   toolchain note about `tauri-winres` losing `RC.EXE`.
+
+### DR-20: the voice client fits in a quarter of the budget; the window does not (2026-08-22)
+
+**Context.** Task 4.5: half an hour idle in a room, under 2% CPU and at or
+under 120 MB (prd.md §4). CPU turned out not to be the story.
+
+**The harness.** `bin/soak` launches the release app, joins it to a real room
+with a second client already in it, minimises it into the tray, and reads the
+whole process tree every two seconds: kernel+user time differenced against the
+wall clock and the machine's twelve processors, and the sum of the tree's
+working sets and, separately, its private bytes.
+
+Three decisions in that sentence are the measurement:
+
+- **The tree, not the process.** A Tauri app on Windows is
+  `goodvoice-client.exe` plus six `msedgewebview2.exe` processes. Reading only
+  ours would have reported 34 MB and passed.
+- **Somebody in the room.** An app alone in a room subscribes to nothing and
+  decodes nothing. That is a cheaper client than anybody runs.
+- **Liveness.** The second client counts frames arriving from the app, so a
+  soak where the app quietly fell out of the room is reported as such rather
+  than as a very good result. 897 of 897 samples carried audio.
+
+`docs/perf/idle-soak.ps1` reads the same tree through CIM and .NET while the
+soak runs — no shared code, no shared API. Two implementations agreeing is
+evidence about the app; two disagreeing would have been evidence about the
+arithmetic.
+
+**Measurement, 30 minutes, minimised in a room, DR-12 machine, live deploy:**
+
+```
+  CPU, share of the machine     median 0.39 %   p95 0.65 %   max  1.04 %
+  CPU, share of one core        median 4.66 %   p95 7.79 %   max 12.48 %
+  memory, tree working sets     median  361 MB              max   404 MB
+  memory, tree private bytes    median  157 MB              max   185 MB
+
+  CPU  WITHIN BUDGET   0.39 % against 2 %
+  RAM  OVER BUDGET       361 MB against 120 MB
+```
+
+The second opinion: CPU median 0.39%, memory median 361.1 MB. The peaks differ
+(404 against 367) because two-second sampling catches a transient eighth
+process — a WebView2 utility worth about 40 MB for a few seconds — that
+five-second sampling steps over.
+
+**Nothing leaks.** Working set by five-minute bucket: 361.0, 363.9, 363.4,
+361.1, 361.0, 361.0 MB. Private bytes: 157.4, 157.4, 156.6, 156.4, 156.2,
+156.2. Per process, start against end after 26 minutes, the largest change
+anywhere in the tree is half a megabyte. Half an hour is not a leak test, but a
+slope worth chasing before ship would have shown here, and there is none.
+
+**Where the 361 MB is.** `--type=` is what each WebView2 process was started as:
+
+```
+  goodvoice-client    main               34.2 MB ws     7.2 MB private
+  msedgewebview2      main              130.6 MB ws    39.8 MB private
+  msedgewebview2      gpu-process        63.0 MB ws    59.8 MB private
+  msedgewebview2      renderer           61.3 MB ws    26.7 MB private
+  msedgewebview2      utility            39.6 MB ws    12.8 MB private
+  msedgewebview2      utility            20.1 MB ws     8.7 MB private
+  msedgewebview2      crashpad-handler   12.8 MB ws     2.9 MB private
+```
+
+**Everything the budget is about is in the first line, and the first line is a
+quarter of the ceiling.** The other six are the WebView2 runtime, and they are
+all resident *with the window hidden*: a GPU process compositing nothing, a
+renderer holding a 420-pixel roster nobody is looking at, two utilities and a
+crash handler. It is not an artefact of counting shared pages twice either —
+private bytes, which count nothing shared, come to 157 MB across the tree, and
+7 MB of that is ours.
+
+**Decision.** Report the gap rather than move the budget, and fix it in
+**task 4.6**. prd.md §4 says 120 MB and the app ships at 361; the number that
+should change first is the app's, and there are three untried levers before
+anybody argues about the PRD:
+
+| | what it should buy | what it costs |
+|---|---|---|
+| `additionalBrowserArgs`: no GPU process, one renderer, features off | the 63 MB GPU process, some of the 130 MB browser | a config line, and a UI that must not need GPU compositing (it does not) |
+| `ICoreWebView2_3::TrySuspend` while hidden, `Resume` on show | the renderer's 61 MB, and Chromium frees more under suspension | COM through `with_webview`, and a resume on every restore |
+| close the webview in the tray, rebuild it on show | everything above the 34 MB floor | 4.1's "coming back is instant" — a rebuild is the ~320 ms setup DR-19 measured |
+
+Two traps for whoever takes 4.6. **`webview2-com` is pinned to tauri's `windows`
+0.61 and this crate depends on 0.62** — different crates, and their COM types do
+not interconvert, so the suspend path has to be written against tauri's. And a
+webview that is closed and rebuilt has to be handed the call's current state on
+the way back: roster, health and controls are pushed *on change*
+(`push_roster`, `push_state`, `push_controls`), and a window that arrives after
+the last change learns nothing until the next one.
+
+**Consequences.**
+
+- prd.md §4's 120 MB was written against a client, not against a client plus a
+  browser. If 4.6's three levers land short, that row needs restating with what
+  is actually being bounded — and F2's acceptance box goes with it.
+- CPU has margin to spend: 0.39% of twelve processors, with open-mic
+  transmitting continuously. Screen share (Phase 5) is the next thing that will
+  want it, and its own budget is FPS rather than this one.
+- `bin/soak` is the regression test for 4.6 and for anything else that changes
+  what the app keeps resident. It exits non-zero when a budget is missed.
