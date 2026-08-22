@@ -228,7 +228,7 @@ Goal: two clients talking through the SFU. Riskiest phase — spikes first.
   agnostic and `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings`
   and `cargo test` (70 tests) are green on Linux. Until the measurement exists,
   the room's CPU budget at four-plus clients is still an assumption.
-- [ ] **3.2 Mute / deafen** — `audio/`, `ui`. Mute halts encoding+sending (packets
+- [x] **3.2 Mute / deafen** — `audio/`, `ui`. Mute halts encoding+sending (packets
   stop, not zeroed — assert in test via packet counter); deafen halts playback;
   state visible in roster for everyone (signaling message).
   DoD: tests + two-client visual/audio confirmation. Verify: `cargo test` + `npx vitest run`.
@@ -237,7 +237,29 @@ Goal: two clients talking through the SFU. Riskiest phase — spikes first.
   again on unmute), and `server/test/presence.test.ts` covers the room's half:
   both flags reach everyone else's roster, they stack, they survive a late
   joiner, and a message the room cannot parse moves nothing.
-  **Left for this task:** the two-client audio confirmation, by ear.
+  **The two-client confirmation is in, and it is measured rather than heard:**
+  `bin/mute-drill.rs` puts two real `Call`s through the live SFU with crossed
+  tones and watches the far sink's frame counter across four transitions.
+  Counting frames at the far end is the strongest form the "packets stop, not
+  zeroed" assertion can take — a client sending silence would keep the count
+  climbing; only one sending nothing freezes it. Two consecutive runs:
+
+  | Transition | What the far end saw |
+  |---|---|
+  | alice mutes | 0 frames in 2 s, and bob's roster reads `muted=true` |
+  | alice unmutes | 100 frames in 2 s, roster back to `muted=false` |
+  | bob deafens | 0 frames at bob, 100 at alice — deafen is one ear, not a drop |
+  | bob undeafens | 100 frames, roster back to `deafened=false` |
+
+  Each flag is read from the *other* client's roster, which is what the DoD's
+  "visible for everyone" means. Verify: `cargo run --bin mute-drill`, plus
+  `cargo test` (116) and `npx vitest run` (85, `presence.test.ts` among them).
+  **Not verified:** the two things a machine cannot sign off — the silence
+  heard by a person, and the muted icon seen in the roster UI.
+  Found by the drill and fixed here: leaving a call printed the whole RTP
+  packet it failed to send, because a channel `SendError`'s `Display` embeds
+  it. A client on its way out has no track by definition, so that first
+  failure is expected rather than news.
 - [x] **3.3 Push-to-talk + VAD modes** — `audio/vad.rs`, `ui` settings. PTT
   (in-window key first; global hotkey is Phase 4), VAD via webrtc-audio-processing's
   voice detection with hangover time; mode persisted locally.

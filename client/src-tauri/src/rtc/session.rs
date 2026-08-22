@@ -1312,8 +1312,24 @@ impl PacketSink for Published {
                 ..Default::default()
             })
             .await
-            .map_err(|error| error.to_string())
+            .map_err(one_line)
     }
+}
+
+/// A transport error as something a log can hold.
+///
+/// `write_sample` failing because the track is gone surfaces as a channel
+/// `SendError`, and its `Display` embeds the whole RTP packet it could not
+/// deliver — header, payload bytes and all. That is several hundred characters
+/// of hex describing a condition with exactly one meaning, and it prints on
+/// every leave, because the last frame races the teardown. Anything else is
+/// passed through untouched.
+fn one_line(error: impl std::fmt::Display) -> String {
+    let text = error.to_string();
+    if text.starts_with("SendError") {
+        return "the track is closed".to_owned();
+    }
+    text
 }
 
 impl Published {
@@ -1490,7 +1506,9 @@ async fn publish_loop(
             Ok(()) => failures = 0,
             Err(error) => {
                 failures += 1;
-                if failures == 1 {
+                // A client on its way out has no working track by definition,
+                // so the first failure is the expected one rather than news.
+                if failures == 1 && !shared.leaving.load(Ordering::Relaxed) {
                     eprintln!("microphone frame not sent: {error}");
                 }
                 if failures >= PUBLISH_FAILURE_LIMIT {
