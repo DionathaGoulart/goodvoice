@@ -74,7 +74,7 @@ async fn main() -> Result<()> {
     let (base, exe, runs) = args();
     if !exe.exists() {
         bail!(
-            "no app to launch at {}\n  build it first: cargo build --bin goodvoice-client",
+            "no app to launch at {}\n  build it first: cargo build --release --features custom-protocol --bin goodvoice-client",
             exe.display()
         );
     }

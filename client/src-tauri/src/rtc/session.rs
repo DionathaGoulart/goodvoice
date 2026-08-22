@@ -447,6 +447,10 @@ impl Shared {
 /// A live call. Dropping it leaves the room.
 pub struct Call {
     shared: Arc<Shared>,
+    /// The room this call is in. A `Call` outlives the window that asked for
+    /// it now (task 4.6), so it has to be able to say where it is rather than
+    /// relying on whoever joined to still be around and remember.
+    room: String,
     roster: watch::Receiver<Vec<Participant>>,
     state: watch::Receiver<CallState>,
     self_id: watch::Receiver<String>,
@@ -505,6 +509,7 @@ impl Call {
         source: Box<dyn AudioSource>,
         sink: Arc<dyn AudioSink>,
     ) -> Self {
+        let room = options.room.clone();
         let shared = Shared::new(
             session.self_id.clone(),
             session.participants.clone(),
@@ -541,6 +546,7 @@ impl Call {
 
         Self {
             shared,
+            room,
             roster,
             state,
             self_id,
@@ -548,6 +554,12 @@ impl Call {
             supervisor: Some(supervisor),
             tasks,
         }
+    }
+
+    /// The room this call is in.
+    #[must_use]
+    pub fn room(&self) -> &str {
+        &self.room
     }
 
     /// This client's participant id, as everyone else sees it.

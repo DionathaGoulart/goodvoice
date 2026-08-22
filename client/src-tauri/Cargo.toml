@@ -21,6 +21,15 @@ crate-type = ["staticlib", "cdylib", "rlib"]
 [lints.clippy]
 pedantic = { level = "warn", priority = -1 }
 
+[features]
+# What tells `generate_context!` to embed `../dist` instead of pointing the
+# webview at the Vite dev server. Off by default so `npm run tauri dev` still
+# gets hot reload; the Tauri CLI turns it on for `tauri build`, and anything
+# building a *release* binary by hand — the soak, the cold-start harness, the
+# tray drills — has to turn it on too, or it measures a window showing
+# "localhost refused to connect".
+custom-protocol = ["tauri/custom-protocol"]
+
 [build-dependencies]
 tauri-build = { version = "2.6", features = [] }
 

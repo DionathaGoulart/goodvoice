@@ -37,10 +37,16 @@
 //! # Running it
 //!
 //! ```text
-//! cargo build --release --bin goodvoice-client --bin soak
+//! cargo build --release --features custom-protocol --bin goodvoice-client
+//! cargo build --release --bin soak
 //! cargo run --release --bin soak                       # 30 minutes, the budget run
 //! cargo run --release --bin soak -- --minutes 2        # a shakedown
 //! ```
+//!
+//! `--features custom-protocol` is not optional and not cosmetic. Without it
+//! `generate_context!` points the webview at the Vite dev server instead of
+//! embedding `../dist`, and what gets measured is a `WebView2` showing "localhost
+//! refused to connect" — the same runtime, a different app.
 //!
 //! Every sample is written to `docs/perf/idle-soak.csv` as it is taken, so a
 //! run that is interrupted at minute 25 still leaves 25 minutes of evidence,
@@ -280,7 +286,7 @@ mod platform {
         let options = Options::parse();
         if !options.exe.exists() {
             bail!(
-                "no app to launch at {}\n  build it first: cargo build --release --bin goodvoice-client",
+                "no app to launch at {}\n  build it first: cargo build --release --features custom-protocol --bin goodvoice-client",
                 options.exe.display()
             );
         }

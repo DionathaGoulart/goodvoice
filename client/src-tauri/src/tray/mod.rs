@@ -28,7 +28,7 @@ use std::{
 use tauri::{
     menu::MenuEvent,
     tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
-    AppHandle, Manager as _, Window, WindowEvent,
+    AppHandle, Manager as _, WebviewWindowBuilder, Window, WindowEvent,
 };
 use thiserror::Error;
 
@@ -64,6 +64,9 @@ pub enum TrayError {
 #[derive(Default)]
 pub struct Tray {
     installed: AtomicBool,
+    /// Set while [`show`] is part-way through opening. See the comment there:
+    /// without it, a double click on the tray icon wedges the event loop.
+    opening: AtomicBool,
     /// The menu, once there is one. Held so the call can tick its boxes;
     /// [`apply_controls`] is the only thing that reads it.
     menu: Mutex<Option<TrayMenu>>,
@@ -161,18 +164,68 @@ where
     tauri::async_runtime::spawn(async move { operation(app).await });
 }
 
-/// Brings the window back, from hidden or from minimised or from both.
+/// Brings the window back — from minimised, from hidden, or from not existing.
 ///
-/// The order is what keeps it from flickering: a minimised window is
-/// un-minimised while it is still hidden, so the restore animation happens
-/// where nobody can see it, and only then is it shown and focused.
+/// There are two ways back because there are two ways away. A window that is
+/// merely hidden is un-minimised while it is still hidden, so the restore
+/// animation happens where nobody can see it, and only then shown and focused.
+/// A window that was **destroyed** (see [`window_event`]) has to be built
+/// again from the same config the app declares, which is what makes the rebuilt
+/// one the same size, title and shape as the original rather than a
+/// second-class copy of it.
+///
+/// The rebuild costs what a webview costs to start — 127 ms from click to
+/// window on the DR-12 machine — and buys back 327 MB (DR-21). It is also why
+/// the window asks for [`crate::Snapshot`] on mount: a window built in the
+/// middle of a call has missed every event that ever described it.
 pub fn show(app: &AppHandle) {
-    let Some(window) = app.get_webview_window("main") else {
+    // One Open at a time.
+    //
+    // Building a webview pumps the message loop, and Tauri registers the
+    // window before the build returns — so a second Open arriving in the
+    // middle of the first finds a half-built window and asks it to
+    // un-minimise, which is a dispatch to the main thread, which is the thread
+    // inside the build. What comes back is a window on screen and an event
+    // loop that answers nothing: no close, no quit, no tray,
+    // `IsHungAppWindow` true, and the call still running underneath. That is
+    // the worst version of it, because nothing looks wrong until you try to
+    // put goodvoice away.
+    //
+    // Honestly: a real double click on the icon does not do this here, because
+    // the build finishes in ~130 ms and the second click lands after it. What
+    // does it every time is UI Automation's `Invoke` twice in a row, which is
+    // why `tray-roundtrip.ps1` clicks once. A slower machine closes that gap
+    // on its own. Dropping the second Open costs nothing and is what the
+    // second Open wanted anyway — a window, which is on its way.
+    let tray = app.state::<Tray>();
+    if tray.opening.swap(true, Ordering::AcqRel) {
         return;
+    }
+    let opened = open(app);
+    tray.opening.store(false, Ordering::Release);
+
+    if let Err(error) = opened {
+        eprintln!("the window could not be opened: {error}");
+    }
+}
+
+/// Shows the window, or builds one. [`show`] is what serialises the calls.
+fn open(app: &AppHandle) -> Result<(), tauri::Error> {
+    if let Some(window) = app.get_webview_window("main") {
+        window.unminimize()?;
+        window.show()?;
+        return window.set_focus();
+    }
+
+    let Some(config) = app.config().app.windows.first().cloned() else {
+        // Nothing declares a window, so there is nothing to rebuild. Not fatal
+        // and not silent: a tray whose Open does nothing needs explaining.
+        eprintln!("no window is declared in the app config; nothing to open");
+        return Ok(());
     };
-    let _ = window.unminimize();
-    let _ = window.show();
-    let _ = window.set_focus();
+    WebviewWindowBuilder::from_config(app, &config)?
+        .build()?
+        .set_focus()
 }
 
 /// Leaves the room and ends the process.
@@ -187,33 +240,51 @@ fn quit(app: &AppHandle) {
     });
 }
 
-/// Turns the window's close and minimise into a hide.
+/// Turns the window's close and minimise into goodvoice going away entirely.
 ///
 /// Wired up in [`crate::run`]. Both paths leave the call running: audio lives
-/// in Rust and never depended on the webview being visible.
+/// in Rust and never depended on the webview existing, let alone being visible.
+///
+/// **The window is destroyed, not hidden** (task 4.6). Hidden was cheaper to
+/// write and cost 327 MB: a hidden webview keeps its browser process, its GPU
+/// process, its renderer and two utilities resident, and DR-20 measured a
+/// client idling at 361 MB against a 120 MB budget with nothing on screen.
+/// Destroying it leaves the 34 MB that is actually goodvoice. What it costs is
+/// [`show`] having to build a new one, and the new one having to be told what
+/// it missed ([`crate::Snapshot`]).
+///
+/// Nothing here fires when there is no tray: an app whose window closes into
+/// nothing is an app that cannot be reopened.
 pub fn window_event(window: &Window, event: &WindowEvent) {
     if !window.state::<Tray>().hides_the_window() {
         return;
     }
 
-    match event {
-        // There is no "minimise requested" to intercept — what arrives is the
-        // resize the minimise already did, so the window is hidden after the
-        // animation rather than instead of it. The visibility check is what
-        // keeps [`show`] from undoing itself: it un-minimises while still
-        // hidden, and that resize must not read as a fresh minimise.
-        WindowEvent::Resized(_)
-            if window.is_visible().unwrap_or(false) && window.is_minimized().unwrap_or(false) =>
-        {
-            let _ = window.hide();
-        }
-        WindowEvent::CloseRequested { api, .. } => {
-            // Hiding rather than closing means the webview survives, so coming
-            // back is instant and the UI is still in the room it was in.
-            api.prevent_close();
-            let _ = window.hide();
-        }
-        _ => {}
+    // A close is not intercepted at all any more: it destroys the window,
+    // `crate::run` refuses the exit that would otherwise follow the last one
+    // closing, and the tray is what is left of goodvoice until somebody clicks
+    // it. Minimise is the one that needs help — there is no "minimise
+    // requested" to answer, only the resize the minimise already did, so the
+    // window goes after the animation rather than instead of it. The
+    // visibility check is what keeps a restore from undoing itself.
+    if matches!(event, WindowEvent::Resized(_))
+        && window.is_visible().unwrap_or(false)
+        && window.is_minimized().unwrap_or(false)
+    {
+        destroy(window);
+    }
+}
+
+/// Takes the window and its webview apart.
+///
+/// `destroy` rather than `close`: closing asks, and asking arrives back here as
+/// another [`WindowEvent::CloseRequested`]. This is the answer, not the
+/// question.
+fn destroy(window: &Window) {
+    if let Err(error) = window.destroy() {
+        // Leave it on screen rather than in some half state — a window that
+        // will not go away is a bug worth seeing, and the call is unaffected.
+        eprintln!("the window would not close: {error}");
     }
 }
 
@@ -234,5 +305,31 @@ mod tests {
         tray.installed
             .store(true, std::sync::atomic::Ordering::Release);
         assert!(tray.hides_the_window());
+    }
+
+    #[test]
+    fn a_second_open_arriving_inside_the_first_is_dropped() {
+        // What this guards is not a race between threads: it is one click
+        // arriving while the other is still opening, on the same thread,
+        // because building a webview pumps the message loop. The nested call
+        // dispatches to a main thread that is busy building, and the event
+        // loop stops answering anything at all.
+        use std::sync::atomic::Ordering;
+
+        let tray = Tray::default();
+        assert!(
+            !tray.opening.swap(true, Ordering::AcqRel),
+            "the first Open should have found the way clear"
+        );
+        assert!(
+            tray.opening.swap(true, Ordering::AcqRel),
+            "a second Open got past the guard and would wedge the event loop"
+        );
+
+        tray.opening.store(false, Ordering::Release);
+        assert!(
+            !tray.opening.swap(true, Ordering::AcqRel),
+            "the guard did not let go once the window was up"
+        );
     }
 }

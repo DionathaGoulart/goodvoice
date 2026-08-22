@@ -46,6 +46,15 @@ const AUTOJOIN_ENV: &str = "GOODVOICE_AUTOJOIN";
 /// The event the UI listens on for room changes.
 const ROSTER_EVENT: &str = "goodvoice://roster";
 
+/// The event that says a call has begun, carrying the room it is in.
+///
+/// The window usually learns that from [`join_room`] returning, because the
+/// window is what asked. Two things join without asking it: [`AUTOJOIN_ENV`],
+/// and task 6.2's invite link. Neither has a window to hand the answer back
+/// to, and none of the other events carries the room name — so without this a
+/// client can be in a call while its window still shows the join form.
+const CALL_EVENT: &str = "goodvoice://call";
+
 /// The event the UI listens on for the call's own health: live, reconnecting,
 /// or over. A dropped call must never look like a quiet one (prd.md §5 flow E).
 const STATE_EVENT: &str = "goodvoice://state";
@@ -103,6 +112,25 @@ pub struct CallHealth {
     #[serde(flatten)]
     pub state: CallState,
     pub self_id: String,
+}
+
+/// Everything a window that has just been built needs in order to catch up.
+///
+/// The other payloads are *changes*: `push_roster`, `push_state` and
+/// `push_controls` emit when something moves and say nothing in between. That
+/// was enough while a window was created once and lived as long as the process
+/// — and it stopped being enough in task 4.6, which drops the webview while
+/// goodvoice is in the tray and builds a new one when it comes back. A window
+/// can now arrive in the middle of a call, and a window that arrives in the
+/// middle of a call and is told nothing shows an empty room.
+#[derive(Debug, Clone, Serialize)]
+pub struct Snapshot {
+    /// The call, if there is one. `None` is a client sitting in no room, which
+    /// is exactly what the window shows before anybody joins.
+    pub call: Option<CallStatus>,
+    pub controls: Controls,
+    pub health: Option<CallHealth>,
+    pub speaking: Vec<String>,
 }
 
 /// What the window and the tray menu both show, and neither owns.
@@ -240,7 +268,6 @@ async fn join_call(app: &AppHandle, options: CallOptions) -> Result<CallStatus, 
         return Err("already in a call".to_owned());
     }
 
-    let room = options.room.clone();
     let (microphone, speakers) = hardware::open().map_err(|error| error.to_string())?;
 
     let call = Call::join(
@@ -251,11 +278,19 @@ async fn join_call(app: &AppHandle, options: CallOptions) -> Result<CallStatus, 
     .await
     .map_err(|error| error.to_string())?;
 
+    // From the call rather than from `options`: the call is what `Snapshot`
+    // will be asked about later, so both answers come from the same place.
     let status = CallStatus {
         self_id: call.self_id(),
-        room,
+        room: call.room().to_owned(),
         participants: call.roster().borrow().clone(),
     };
+
+    // For any window that did not ask for this call: autojoin, and whatever
+    // else joins without one (see `CALL_EVENT`). A window that *did* ask has
+    // already set itself from the returned status and sets it again to the
+    // same thing.
+    let _ = app.emit(CALL_EVENT, status.clone());
 
     // Watch receivers, not the call: these outlive `leave_room` taking the
     // call apart, and they end on their own when its state is dropped.
@@ -464,6 +499,43 @@ fn client_info() -> ClientInfo {
     ClientInfo::current()
 }
 
+/// The call as it stands right now, for a window that has just been built.
+///
+/// Asked once, on mount. Everything after that arrives as events — see
+/// [`Snapshot`] for why a window needs both.
+///
+/// # Errors
+///
+/// Never. The `Result` is there so the UI can await it like the others.
+#[tauri::command]
+async fn current_status(state: State<'_, CurrentCall>) -> Result<Snapshot, String> {
+    let controls = *state.controls.borrow();
+    let call = state.call.lock().await;
+    let Some(call) = call.as_ref() else {
+        return Ok(Snapshot {
+            call: None,
+            controls,
+            health: None,
+            speaking: Vec::new(),
+        });
+    };
+
+    let self_id = call.self_id();
+    Ok(Snapshot {
+        call: Some(CallStatus {
+            self_id: self_id.clone(),
+            room: call.room().to_owned(),
+            participants: call.roster().borrow().clone(),
+        }),
+        controls,
+        health: Some(CallHealth {
+            state: call.state().borrow().clone(),
+            self_id,
+        }),
+        speaking: call.speaking().borrow().clone(),
+    })
+}
+
 /// Joins the room named in [`AUTOJOIN_ENV`], if there is one.
 ///
 /// Deliberately not waiting for the webview: the microphone, the transport and
@@ -622,6 +694,7 @@ pub fn run() {
         .on_window_event(tray::window_event)
         .invoke_handler(tauri::generate_handler![
             client_info,
+            current_status,
             join_room,
             leave_room,
             set_muted,
@@ -631,13 +704,36 @@ pub fn run() {
             set_talk_binding,
             talk_key_is_global
         ])
-        .run(tauri::generate_context!())
-        .expect("error while running goodvoice");
+        .build(tauri::generate_context!())
+        .expect("error while running goodvoice")
+        .run(|app, event| {
+            // The last window closing is not the app closing. Task 4.1 made
+            // that true by hiding the window; 4.6 makes it true by destroying
+            // the webview and rebuilding it on the way back, and a destroyed
+            // window is indistinguishable from a quit unless this says
+            // otherwise.
+            //
+            // `code: None` is the difference between the two: a quit from the
+            // tray goes through `app.exit(0)` and arrives here carrying a code,
+            // and that one is meant. And only while there is a tray to come
+            // back from — an app with no icon and no window is a process
+            // nobody can reach.
+            if let tauri::RunEvent::ExitRequested {
+                code: None, api, ..
+            } = event
+            {
+                if app.state::<tray::Tray>().hides_the_window() {
+                    api.prevent_exit();
+                }
+            }
+        });
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{ClientInfo, Controls, DEFAULT_SERVER};
+    use super::{
+        CallHealth, CallState, CallStatus, ClientInfo, Controls, Snapshot, DEFAULT_SERVER,
+    };
 
     /// The window reads these names out of the event (`Controls` in App.tsx).
     /// Renaming a field here without renaming it there is a control that
@@ -655,6 +751,68 @@ mod tests {
             payload,
             serde_json::json!({ "in_call": true, "muted": true, "deafened": false })
         );
+    }
+
+    /// The window reads these names out of `current_status` (`Snapshot` in
+    /// App.tsx), and it reads them exactly once — on mount, to find out what it
+    /// missed while it did not exist (task 4.6). A field renamed here without
+    /// being renamed there is a window that comes back from the tray showing an
+    /// empty room while a call is running.
+    #[test]
+    fn the_snapshot_a_rebuilt_window_catches_up_from() {
+        let payload = serde_json::to_value(Snapshot {
+            call: None,
+            controls: Controls {
+                in_call: false,
+                muted: true,
+                deafened: false,
+            },
+            health: None,
+            speaking: Vec::new(),
+        })
+        .expect("snapshot serialize");
+
+        assert_eq!(
+            payload,
+            serde_json::json!({
+                "call": null,
+                "controls": { "in_call": false, "muted": true, "deafened": false },
+                "health": null,
+                "speaking": [],
+            })
+        );
+    }
+
+    /// A snapshot with a call in it, in the shape App.tsx destructures: the
+    /// health carries `self_id` alongside the state's own fields, because a
+    /// reconnect changes both and a window that learned them separately would
+    /// spend a frame unable to find itself in the roster.
+    #[test]
+    fn a_snapshot_of_a_live_call_carries_the_room_and_the_seat() {
+        let payload = serde_json::to_value(Snapshot {
+            call: Some(CallStatus {
+                self_id: "seat-1".to_owned(),
+                room: "friday".to_owned(),
+                participants: Vec::new(),
+            }),
+            controls: Controls {
+                in_call: true,
+                muted: false,
+                deafened: false,
+            },
+            health: Some(CallHealth {
+                state: CallState::Live,
+                self_id: "seat-1".to_owned(),
+            }),
+            speaking: vec!["seat-2".to_owned()],
+        })
+        .expect("snapshot serialize");
+
+        assert_eq!(payload["call"]["room"], "friday");
+        assert_eq!(payload["call"]["self_id"], "seat-1");
+        assert_eq!(payload["health"]["state"], "live");
+        assert_eq!(payload["health"]["self_id"], "seat-1");
+        assert_eq!(payload["speaking"][0], "seat-2");
     }
 
     #[test]

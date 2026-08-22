@@ -52,8 +52,26 @@ interface Controls {
   deafened: boolean;
 }
 
+/** Mirrors `Snapshot` in `src-tauri/src/lib.rs`. */
+interface Snapshot {
+  call: CallStatus | null;
+  controls: Controls;
+  health: CallHealth | null;
+  speaking: string[];
+}
+
 /** The event `push_roster` emits. Kept in step with `ROSTER_EVENT`. */
 const ROSTER_EVENT = "goodvoice://roster";
+
+/**
+ * A call that began without this window asking for it. Kept in step with
+ * `CALL_EVENT`.
+ *
+ * `join` below sets the call from what `join_room` returns, because it asked.
+ * Autojoin (`GOODVOICE_AUTOJOIN`) and, later, invite links do not ask, and no
+ * other event carries the room name.
+ */
+const CALL_EVENT = "goodvoice://call";
 
 /** The event `push_state` emits. Kept in step with `STATE_EVENT`. */
 const STATE_EVENT = "goodvoice://state";
@@ -177,6 +195,12 @@ const App: Component = () => {
   // is whichever call is open, and there is only ever one.
   const stopping = [
     listen<Participant[]>(ROSTER_EVENT, (event) => setRoster(event.payload)),
+    listen<CallStatus>(CALL_EVENT, (event) => {
+      setCall(event.payload);
+      setRoster(event.payload.participants);
+      setHealth({ state: "live" });
+      setError(null);
+    }),
     listen<string[]>(SPEAKING_EVENT, (event) =>
       setSpeaking(new Set(event.payload)),
     ),
@@ -200,6 +224,49 @@ const App: Component = () => {
       }
     }),
   ];
+
+  /**
+   * What this window missed before it existed.
+   *
+   * goodvoice drops its webview while it sits in the tray and builds a new one
+   * when somebody opens it (plan.md task 4.6), so this component now starts up
+   * in the middle of calls it never saw begin. The events above only carry
+   * changes; `current_status` carries the state.
+   *
+   * Applied only while this window still knows nothing. The listeners are
+   * registered before the ask, so anything that happens in between arrives as
+   * an event — and an event is newer than the answer to a question asked
+   * before it.
+   */
+  void Promise.all(stopping)
+    .then(() => invoke<Snapshot>("current_status"))
+    .then((status) => {
+      if (call() !== null) {
+        return;
+      }
+      setMuted(status.controls.muted);
+      setDeafened(status.controls.deafened);
+      if (!status.call) {
+        return;
+      }
+      setCall(status.call);
+      setRoster(status.call.participants);
+      setSpeaking(new Set(status.speaking));
+      if (status.health) {
+        const { self_id: _self, ...state } = status.health;
+        setHealth(state);
+      }
+      // Asked rather than re-bound: the hook is in Rust and outlived this
+      // window, so re-binding would uninstall a working one to install the
+      // same one. All this window is missing is the answer.
+      void invoke<boolean>("talk_key_is_global")
+        .then(setGlobalKey)
+        .catch(() => setGlobalKey(false));
+    })
+    .catch(() => {
+      // A client that cannot say what it is doing is a client that is not in a
+      // call yet, which is what the window already shows.
+    });
 
   /** A key pressed into a text field is text, not a talk key. */
   const isTyping = (event: KeyboardEvent) =>

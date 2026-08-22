@@ -427,7 +427,7 @@ Goal: two clients talking through the SFU. Riskiest phase — spikes first.
   captures committed to `docs/perf/`; `cargo fmt --check`, `cargo clippy
   --all-targets -- -D warnings` and `cargo test` green on Windows and Linux
   (the soak's arithmetic is six tests that run on any host).
-- [ ] **4.6 [WIN] Get the idle client under 120 MB** — `tray/`, `lib.rs`,
+- [x] **4.6 [WIN] Get the idle client under 120 MB** — `tray/`, `lib.rs`,
   `tauri.conf.json`. 4.5 measured 361 MB idle, of which 34 is goodvoice and 327
   is WebView2 with the window hidden (DR-20). Three levers, cheapest first:
   **(a)** `additionalBrowserArgs` — no GPU process for a 420-pixel roster, one
@@ -442,6 +442,50 @@ Goal: two clients talking through the SFU. Riskiest phase — spikes first.
   every sample — or a DR says which levers were tried, what each measured, and
   why the budget is being restated instead.
   Verify: `cargo run --release --bin soak`, 30 minutes, both captures updated.
+  **Met with room to spare: 34.1 MB peak, 34.0 median, against 120.** (c), and
+  only (c). (a) and (b) share a ceiling neither can pass — they make an idle
+  browser cheaper and the browser is still running, which lands somewhere near
+  200 MB against a 120 MB budget and a 34 MB floor. A cheaper lever that does
+  not reach the budget is not a cheaper way to pass it. DR-21 has the reasoning.
+  Built: close and minimise both **destroy** the window; `run()` refuses the
+  exit that the last window closing would otherwise cause (`code: None` is what
+  tells it apart from the tray's Quit, which is meant); `tray::show` rebuilds
+  from the app config in ~130 ms. A window built mid-call has missed every
+  event that ever described it, so it asks — `current_status` returns a
+  `Snapshot` and App.tsx applies it on mount, behind anything an event has
+  already said. One hole of the same shape found on the way: a call joined
+  without a window asking for it (`GOODVOICE_AUTOJOIN`, and 6.2's invite links)
+  was never announced to the window at all, and no event carried the room name.
+  `CALL_EVENT` does now.
+  **Two defects found while verifying it, both older than this task and neither
+  catchable by anything that was in the repo** (DR-22). `cargo build --release`
+  produced a client pointed at the Vite dev server, because `Cargo.toml` never
+  declared the `custom-protocol` feature — so 4.5's measurements, and every
+  screenshot ever taken of a hand-built release, were of a WebView2 hosting
+  Edge's "localhost refused to connect". And there was no `capabilities/`
+  directory, so Tauri v2's ACL refused every `listen` in App.tsx, in dev as
+  well as release: the window had never received a roster change, a talking
+  dot, a reconnect, or anything the tray did to mute (task 4.2's whole point).
+  Both fixed here, because 4.6 cannot be verified without them.
+  Built: `docs/testing/tray-roundtrip.ps1` replaces the two 4.1 scripts and
+  checks the round trip in about a minute — joined to a real room, close (or
+  `-Via minimise`), then the notification-area icon **clicked for real**, since
+  Windows 11's tray is a XAML island with no `ToolbarWindow32` to hit-test.
+  7 processes and 333 MB with the window up; 1 process and 33.7 MB in the tray;
+  a new window 130 ms after the click, showing the room it left. It screenshots
+  both ends, because whether the rebuilt window shows the call or the join form
+  is the one thing no assertion covers. It quits through the tray menu too — an
+  app that closes into a tray it cannot be quit from is the trap this whole
+  design is shaped around.
+  **Nothing accumulates across rebuilds.** Twelve cycles: 33.7, 34.1, 34.2,
+  34.3, 34.4, 34.5, 34.8, 34.7, 34.7, 34.9, 34.9, 34.9 MB. It settles at 34.9
+  and stays, which is a fixed cost paid once, not 0.1 MB a cycle forever.
+  Verified: 896 samples over 30 minutes on the DR-12 machine against the live
+  deploy, 896 of them carrying audio, both captures committed to `docs/perf/`;
+  the PowerShell second opinion agrees to 0.1 MB and to two decimals of CPU;
+  `tray-roundtrip.ps1` PASS both ways; `cargo fmt --check`, `cargo clippy
+  --all-targets -- -D warnings` (both feature sets), `cargo test` (121),
+  `npm run typecheck` and `npm run format:check` green.
 
 ## Phase 5 — Screen share
 
@@ -1796,3 +1840,214 @@ the last change learns nothing until the next one.
   want it, and its own budget is FPS rather than this one.
 - `bin/soak` is the regression test for 4.6 and for anything else that changes
   what the app keeps resident. It exits non-zero when a budget is missed.
+
+### DR-21: the window goes away, not to sleep (2026-08-22)
+
+**Context.** Task 4.6, from DR-20: idle in a room the client costs 361 MB
+against a 120 MB budget, of which 34 MB is goodvoice and 327 MB is a WebView2
+runtime with nothing on screen. DR-20 listed three levers, cheapest first.
+
+**Options.**
+
+| | ceiling on what it can buy | what it costs |
+|---|---|---|
+| (a) `additionalBrowserArgs`: no GPU process, one renderer | the GPU process' 63 MB, part of the browser's 130 MB | a config line |
+| (b) `TrySuspend` while hidden, `Resume` on show | the renderer's 61 MB, plus whatever Chromium frees under suspension | COM through `with_webview`, against tauri's `windows` 0.61 rather than this crate's 0.62 |
+| (c) destroy the window in the tray, rebuild it on show | all 327 MB | a rebuild on the way back, and a window that has to be told what it missed |
+
+(a) and (b) share a ceiling neither can pass: they make the *idle* browser
+cheaper, and the browser is still running. Adding both together and being
+generous about what suspension frees leaves something like 200 MB. The budget is
+120 and the floor is 34. Only (c) clears it, so (c) is what was built — a
+cheaper lever that does not reach the budget is not a cheaper way to pass it.
+
+**Decision.** In the tray, goodvoice has no window at all.
+
+- `tray::window_event` stops intercepting the close: it lets the window be
+  destroyed, and `run()`'s `RunEvent::ExitRequested { code: None, .. }` refuses
+  the exit that the last window closing would otherwise cause. `code: None` is
+  what separates the two exits that reach it — the tray's Quit goes through
+  `app.exit(0)` and arrives carrying a code, and that one is meant. Minimise
+  still needs the `Resized`-while-minimised trick from task 4.1, because there
+  is no "minimise requested" to answer; it now calls `destroy` instead of
+  `hide`.
+- `tray::show` rebuilds from the app config —
+  `WebviewWindowBuilder::from_config(app, app.config().app.windows.first())` —
+  so the new window is the declared window rather than an approximation of it,
+  and its label is still `main` (which is what keeps `capabilities/default.json`
+  applying to it, DR-22).
+- A window built in the middle of a call has missed every event that ever
+  described it, because `push_roster`, `push_state`, `push_speaking` and
+  `push_controls` all emit *changes*. So the window asks: `current_status`
+  returns a `Snapshot` — call, controls, health, who is speaking — and App.tsx
+  applies it on mount, after the listeners are registered and only if no event
+  has already said something newer.
+- One more hole the same shape, found on the way: a call joined without a
+  window asking for it (`GOODVOICE_AUTOJOIN`, and task 6.2's invite links) was
+  never announced to the window at all, and no existing event carries the room
+  name. `CALL_EVENT` does now.
+- `show` takes an `opening` flag and drops a second Open that arrives while the
+  first is still in flight. Building a webview pumps the message loop and Tauri
+  registers the window *before* the build returns, so a nested Open finds a
+  half-built window and asks it to un-minimise — a dispatch to the main thread,
+  from the main thread, while it is inside the build. What comes back is a
+  window on screen and an event loop answering nothing: no close, no quit, no
+  tray, `IsHungAppWindow` true, and the call still running underneath.
+  Honestly about the evidence: a real double click on the icon does **not** do
+  this here, because the build finishes in ~130 ms and the second click lands
+  after it. What does it every time is UI Automation's `Invoke` twice in a row,
+  which is how it was found and why `tray-roundtrip.ps1` clicks once. A slower
+  machine closes that gap on its own, and dropping the second Open costs
+  nothing — it wanted a window, and one is on its way.
+
+**Measurements.** DR-12 machine, live deploy, release build with
+`--features custom-protocol` (DR-22).
+
+`docs/testing/tray-roundtrip.ps1`, joined to a room, closed to the tray and
+brought back by invoking the notification-area icon:
+
+```
+                       window up      in the tray     back
+  processes              7                 1            7
+  tree working set     333.2 MB         33.7 MB      338.6 MB
+  window handle        alive            gone         new
+  click to window                                    146 ms
+```
+
+`bin/soak`, 30 minutes minimised in a room with a second client in it, 896
+samples, all 896 carrying audio:
+
+```
+                      median      peak     budget
+  BEFORE (DR-20)      361 MB     404 MB    OVER    120 MB
+  AFTER                34.0 MB    34.1 MB  WITHIN  120 MB
+
+  CPU                0.39 %      0.97 %    WITHIN    2 %
+  processes in the tree                     1
+  drift, first sample to last              +0.0 MB
+```
+
+Working set by five-minute bucket: 33.8, 34.0, 34.0, 34.0, 34.0, 34.0 MB. The
+PowerShell second opinion, over the same half hour through CIM and .NET rather
+than Toolhelp: CPU median 0.39%, memory median 34.0 MB, peak 34.1 MB — the same
+numbers from an implementation that shares no code with the first.
+
+**Nothing accumulates across rebuilds.** Twelve close-and-reopen cycles, tree
+working set measured in the tray each time: 33.7, 34.1, 34.2, 34.3, 34.4, 34.5,
+34.8, 34.7, 34.7, 34.9, 34.9, 34.9 MB. It settles at 34.9 and stays there, so
+what the first few cycles cost is a one-off — pages the allocator keeps rather
+than a webview that never quite goes away. The rebuild itself is flat across
+all twelve: 124 to 153 ms.
+
+**Consequences.**
+
+- 4.1's "coming back is instant, and the webview is still in the room it was
+  in" is no longer true. Coming back costs ~130 ms and gives you a *new* window:
+  same size, same title, scrolled to the top, with anything typed into the join
+  form gone. That is the price of the 327 MB and it is worth saying out loud
+  rather than in a commit message. `docs/testing/tray.md` says it too.
+- The window is now the app's peak rather than its cost: ~330 MB while it is on
+  screen. Nothing budgets that, and levers (a) and (b) are still available to
+  whoever wants to.
+- prd.md F2 reads "Minimize **hides** the window; tray icon remains; voice keeps
+  running". Two of the three are unchanged and the first is now stronger than
+  what it asks for, so the box is met rather than renegotiated — but the word is
+  wrong and the next person to read it will assume the webview is still there.
+  Left as written; the PRD is the ask, not the log.
+- `Snapshot` is a second description of the call, alongside the four push
+  events, and the two can drift. Both are covered by serialisation tests
+  against the field names App.tsx destructures, which is the drift that would
+  actually hurt.
+- Screen share (Phase 5) will publish from Rust and be watched in a window that
+  can now vanish mid-share. Whatever it keeps has to live where the call lives,
+  not where the webview does.
+- Driving the Windows 11 tray from a script turned out to be most of the work
+  in this task. What it costs is written down in `docs/testing/tray.md` rather
+  than here: the notification area is a XAML island with no `ToolbarWindow32`,
+  the chevron renames itself when open, `goodvoice` matches two different
+  buttons, and the right-click menu is a `TrackPopupMenu` that UI Automation
+  reports as a pane with no children — reachable by keyboard and not otherwise.
+
+### DR-22: the release build was a different app than the one being measured (2026-08-22)
+
+**Context.** Task 4.6 needed to see the window come back from the tray with the
+call still on it. The first screenshot of a rebuilt window showed the join form
+during a live call. Chasing that turned up two defects, neither of them 4.6's,
+both of which had been true since Phase 0 and neither of which any test could
+have caught, because every test either drove the Rust side or ran under
+`tauri dev`.
+
+**One: `cargo build --release` produced a client that loads `localhost:1420`.**
+
+`generate_context!` embeds `../dist` only when the `custom-protocol` feature is
+on; without it, it bakes in `build.devUrl` and the window points at the Vite dev
+server. The Tauri CLI passes the feature for `tauri build`, so a bundled
+installer would have been fine — but `Cargo.toml` never declared the feature at
+all, and everything in this repo that builds the client builds it by hand:
+`bin/soak`, `bin/coldstart`, the tray drills. What they launched was a
+goodvoice-titled window containing Edge's "localhost refused to connect".
+
+That is not a cosmetic difference. DR-20 broke 361 MB down by process and
+concluded the WebView2 runtime was carrying 327 MB with the window hidden. It
+was carrying 327 MB *with an error page in it*. The conclusion survives — the
+runtime is the runtime, and it is nearly all of the cost either way — but the
+number was not measured against the app.
+
+**Two: no capability file, so the window heard nothing.**
+
+`src-tauri/capabilities/` did not exist. Tauri v2's ACL denies every plugin
+command that is not granted by one, and `listen` is a plugin command
+(`plugin:event|listen`) even though `invoke` of this crate's own commands is
+not. So every `listen` in App.tsx was refused, in dev as well as in release:
+
+```
+SNAPDEBUG Command plugin:event|listen not allowed by ACL
+```
+
+Which means the window had never received the roster (`push_roster`), the call's
+health (`push_state`), the talking dots (`push_speaking`) or mute and deafen
+(`push_controls`). It looked right because everything it displays *on a join it
+performed itself* comes from `join_room`'s return value. What it could not do
+was change afterwards: nobody arriving, nobody leaving, no talking dots, no
+reconnect banner, and no tray→window sync at all — the whole point of task 4.2.
+`docs/testing/tray.md` had a table of tray→window rows marked as checked. They
+cannot have been.
+
+The failure is silent by construction: `listen()` returns a rejected promise,
+and the four `listen` calls in App.tsx were never awaited for anything except
+cleanup.
+
+**Decision.** Fix both, in this task, because 4.6 cannot be verified without
+them.
+
+- `Cargo.toml` gains `custom-protocol = ["tauri/custom-protocol"]`, off by
+  default so `tauri dev` keeps its hot reload. Every documented by-hand release
+  build now passes `--features custom-protocol`, and the two harnesses that
+  launch the app say so in the error they print when the exe is missing.
+- `capabilities/default.json` grants `core:event:default` to the `main` window
+  and nothing else. Minimal on purpose: the UI's only other Tauri call is
+  `invoke` into this crate's commands, which the ACL does not gate. A rebuilt
+  window keeps the label `main`, so it is covered by the same capability.
+
+**Consequences.**
+
+- DR-20's per-process table is about a WebView2 hosting an error page. Task 4.6
+  makes the distinction moot for the budget — the tray-idle client has no
+  WebView2 at all — but nothing else should be quoted from it as "the app".
+- Task 4.4's cold start (DR-19) was measured against the same build. What it
+  times is launch → first audio frame heard by another client, which is entirely
+  Rust and does not wait on the webview, so the number stands; the webview it
+  was racing against was loading an error page rather than 23 KB of JS.
+- The tray→window half of task 4.2 has never been exercised. It is checked now,
+  in `tray-roundtrip.ps1`'s screenshots (a rebuilt window with no `listen` shows
+  an empty room) and by hand against the table in `docs/testing/tray.md`.
+- Anything added to the UI beyond `invoke` and `listen` needs a line in
+  `capabilities/default.json`, and will fail at runtime rather than at build
+  time if it does not get one.
+- **CI never builds what ships.** The rust job runs fmt, clippy and test with
+  default features, which is exactly the configuration that hid both of these:
+  the ACL is a runtime refusal, and `custom-protocol` is a feature CI does not
+  turn on (it cannot, without building `../dist` first). Task 6.3 puts
+  `npm run tauri build` in CI for the installer; that is the job that would
+  have caught the first of these, and the second still needs the app to be
+  *run*. `tray-roundtrip.ps1` is the closest thing to that in the repo.
