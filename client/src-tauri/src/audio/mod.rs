@@ -6,9 +6,12 @@
 //! [`device`] is the seam the rest of the client codes against; [`hardware`] is
 //! the `cpal` implementation behind it, and [`mixer`] is what that
 //! implementation does between the decode tasks and the speakers. [`vad`]
-//! decides whether the microphone goes on the wire at all. Echo cancellation,
+//! decides whether the microphone goes on the wire at all. [`burst`] is not
+//! part of the voice path at all: it is the measurement apparatus the latency
+//! harnesses share. Echo cancellation,
 //! noise suppression and gain control are filled in by plan.md task 3.4.
 
+pub mod burst;
 pub mod device;
 pub mod hardware;
 pub mod mixer;

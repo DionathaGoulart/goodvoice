@@ -112,6 +112,26 @@ Goal: two clients talking through the SFU. Riskiest phase — spikes first.
   backend hit the 80 ms budget, or does the `wasapi` crate's control over
   shared-mode buffer sizes buy enough to justify a second backend? Whatever wins
   lands beside `hardware.rs` and nothing above the seam moves. See DR-8.
+  **The crate decision is made: cpal stays — DR-15.** The driver reports
+  minimum = default = maximum = 480 frames (10 ms) for shared mode (DR-12), and
+  cpal runs event-driven at exactly that period, so a `wasapi` backend would
+  land on the same number. It is parked until a device reports something
+  smaller *and* the budget needs it; DR-14's 41.4 ms leaves 38 ms of headroom.
+  Built: `bin/audio-spike` — `--seconds N` plays the microphone back out of the
+  speakers through the same `hardware::open()` the app uses (2250 frames in
+  45.0 s on the DR-12 machine, no drift), and `--roundtrip` times a 5 ms burst
+  from the speakers to the microphone. Both print the negotiated configuration
+  (`hardware::describe()`), and the round trip refuses to report a spread when
+  fewer than half its bursts came back — room noise is not a measurement.
+  Also new: `audio/burst.rs`, the burst and its bookkeeping, shared with
+  `bin/latency` and tested (nine tests) where it used to be untested private
+  code in a binary.
+  **Not verified — both halves need a person at the machine:**
+  1. `cargo run --bin audio-spike` and confirm the loopback is *audible*.
+  2. `cargo run --bin audio-spike -- --roundtrip` **with the earcup held
+     against the microphone**, and put the number in DR-15.
+  Without the coupling the first attempt heard 1 burst of 33 and the harness
+  refused it, which is the correct answer and not a measurement.
 - [x] **2.2 Opus encode/decode pipeline** — `client/src-tauri/src/audio/opus.rs`.
   20 ms frames, 48 kHz, 32 kbps start; encode→decode round-trip preserves audio.
   DoD: unit tests with synthetic tones; no allocation on the frame path (assert
@@ -1146,3 +1166,91 @@ Three things the number does not say:
   SendError(SenderRtp(…))` — a frame handed to a sender whose session is
   already closing on the way out of `leave()`. Cosmetic, and unrelated to this;
   worth silencing when a task next touches that path.
+
+### DR-15: cpal stays; the case for the `wasapi` crate has to be made elsewhere (2026-08-21)
+
+**Context.** Task 2.1 and prd.md open question 4: `cpal` or the `wasapi` crate
+on Windows. The seam (`audio::device`) has always meant this decision costs
+nothing above it (DR-8), so it comes down to one question — does cpal's WASAPI
+path fit the ≤80 ms budget, or does control over shared-mode buffers buy enough
+to justify a second backend?
+
+**What the machine says.** DR-12 asked the driver directly:
+`IAudioClient3::GetSharedModeEnginePeriod` reports **minimum = default =
+maximum = 480 frames (10.0 ms)** on both endpoints. There is no low-latency
+mode to unlock here.
+
+**What cpal does with that.** `cpal-0.18.2`, `host/wasapi/device.rs`, in its own
+words:
+
+> The callback period is always `GetDevicePeriod()` regardless of what is
+> requested here; the value only affects ring-buffer latency.
+
+cpal initialises shared mode event-driven at the engine period and never calls
+`IAudioClient3`. So on this machine cpal and a hand-written `wasapi` backend
+would land on exactly the same 10 ms, and the second backend would buy nothing
+but a second thing to maintain.
+
+**What the call measures.** DR-14 timed the whole path at **41.4 ms mouth to
+ear** against the 80 ms budget, of which 21.4 ms is the wire. The devices are
+inside that number, and there is 38 ms of headroom.
+
+**Decision.** cpal stays, and it is now the Windows backend rather than a
+placeholder for one. `wasapi` is not rejected on principle: it is parked until
+a device shows up where `GetSharedModeEnginePeriod` reports something smaller
+than the default — an interface with a low-latency driver can report 128 frames
+(2.67 ms) — *and* the budget needs it. Both halves have to be true; today
+neither is. `audio/hardware.rs` keeps its place behind the seam either way.
+
+**Correcting DR-12 on one detail.** DR-12 read the endpoints' 32-bit float mix
+format and concluded `pick_config` would take its `f32` path. It does not:
+cpal enumerates several formats per endpoint and `pick_config` prefers `i16`,
+which is what both endpoints are actually opened as. `bin/audio-spike` prints
+the negotiated configuration on every run, so the next reader does not have to
+infer it:
+
+```
+  capture  Microphone (fifine Microphone) — 48000 Hz, 2 ch, i16, buffer device default
+  render   Headset Earphone (HyperX Virtual Surround Sound) — 48000 Hz, 2 ch, i16, buffer device default
+```
+
+That is one fewer conversion on the capture path than DR-12 assumed, not one
+more.
+
+**The harness.** `bin/audio-spike` has the two halves of the task's DoD:
+
+- `cargo run --bin audio-spike` — the microphone played straight back out of
+  the speakers, through the same `hardware::open()` the app uses, with a level
+  meter once a second so a run in a log still shows the microphone was alive.
+  **Wear headphones.** On the DR-12 machine: 2250 frames in 45 s, which is
+  45.0 s of audio — the loop keeps the device's clock exactly.
+- `cargo run --bin audio-spike -- --roundtrip` — a 5 ms burst out of the
+  speakers, timed until the microphone hears it. **The earcup has to be held
+  against the microphone**; there is no coupling otherwise and the run says so
+  rather than reporting a number.
+
+**Still owed by this task, and both need a person.** Whether the loopback is
+*audible*, and the round-trip measurement itself. The harness refuses to report
+a spread when fewer than half the bursts came back — the first attempt without
+coupling heard 1 of 33 and would otherwise have published a confident 238.9 ms
+of room noise, which is exactly the number that ends up quoted in a later DR.
+
+**Observed and not chased: one glitch per run.** Both a 45-second monitor and
+the round-trip runs print `audio device error: A buffer underrun or overrun
+occurred.` exactly once, mid-run rather than at startup, in a debug build. The
+frame count stays exact, so nothing is drifting. The likely cause is that the
+monitor prefills nothing: the render ring holds only what capture just produced,
+so one scheduling hiccup starves the render callback. It is the same shape of
+problem as the jitter buffer DR-14 says the call still lacks, and it belongs to
+whichever task builds that.
+
+**Consequences.**
+
+- `audio::burst` is a new library module: the burst, the leading-edge rule and
+  the one-in-the-air pairing that `bin/latency` and `bin/audio-spike` both need.
+  It was `bin/latency`'s private code and had no tests; it now has nine.
+- `hardware::describe()` reports the two default endpoints and the
+  configuration `open` would pick for them, without opening anything.
+- prd.md open question 4 is answered for this class of hardware. It stays open
+  for hardware with a low-latency driver, and the probe (`bin/probe`) is what
+  answers it there — one run, no listening required.

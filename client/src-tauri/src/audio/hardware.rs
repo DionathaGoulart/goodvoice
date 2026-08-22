@@ -114,6 +114,63 @@ pub fn open() -> Result<(Microphone, Speakers), AudioError> {
     ))
 }
 
+/// What one endpoint turned out to be, for a harness that has to say what it
+/// measured on (task 2.1).
+#[derive(Debug, Clone)]
+pub struct Endpoint {
+    pub name: String,
+    pub channels: u16,
+    pub sample_rate: u32,
+    pub format: String,
+    /// What cpal will admit about the buffer. On WASAPI's software stack this
+    /// is the device default: shared mode takes the engine's own period, and
+    /// cpal never asks `IAudioClient3` for a smaller one (DR-12, DR-15).
+    pub buffer: String,
+}
+
+/// The two default endpoints and the configuration [`open`] would pick for
+/// them, without opening anything.
+///
+/// # Errors
+///
+/// The same two as [`open`]: no endpoint, or none that runs at 48 kHz.
+pub fn describe() -> Result<(Endpoint, Endpoint), AudioError> {
+    let host = cpal::default_host();
+    let input = host.default_input_device().ok_or(AudioError::NoDevice)?;
+    let output = host.default_output_device().ok_or(AudioError::NoDevice)?;
+
+    let (input_config, input_format) = pick_config(
+        input
+            .supported_input_configs()
+            .map_err(|_| AudioError::NoDevice)?,
+    )?;
+    let (output_config, output_format) = pick_config(
+        output
+            .supported_output_configs()
+            .map_err(|_| AudioError::NoDevice)?,
+    )?;
+
+    Ok((
+        describe_one(&input, &input_config, input_format),
+        describe_one(&output, &output_config, output_format),
+    ))
+}
+
+fn describe_one(device: &Device, config: &StreamConfig, format: SampleFormat) -> Endpoint {
+    Endpoint {
+        // `Display` rather than a `name()` — cpal 0.18 requires it of every
+        // device and that is where the endpoint's name comes out.
+        name: device.to_string(),
+        channels: config.channels,
+        sample_rate: config.sample_rate,
+        format: format.to_string(),
+        buffer: match config.buffer_size {
+            cpal::BufferSize::Default => "device default".to_owned(),
+            cpal::BufferSize::Fixed(frames) => format!("{frames} frames"),
+        },
+    }
+}
+
 /// How `open` learns whether the worker thread got its streams up.
 type StartSignal = Arc<(Mutex<Option<Result<(), AudioError>>>, Condvar)>;
 

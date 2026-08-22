@@ -32,19 +32,16 @@
 
 use std::{
     env,
-    sync::{
-        atomic::{AtomicBool, AtomicUsize, Ordering},
-        Arc, Mutex,
-    },
+    sync::{Arc, Mutex},
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
 use anyhow::{bail, Context as _, Result};
 use goodvoice_client_lib::{
     audio::{
+        burst::{self, burst_frame, Edge, Spread, SILENT_PATH_THRESHOLD},
         device::{AudioSink, AudioSource, NullSink},
-        mixer::peak,
-        opus::{silent_frame, Frame, FRAME_MS, FRAME_SAMPLES, SAMPLE_RATE_HZ},
+        opus::{silent_frame, Frame, FRAME_MS},
         vad::TransmitMode,
     },
     rtc::session::{Call, CallOptions},
@@ -58,17 +55,6 @@ const DEFAULT_PINGS: usize = 30;
 /// Frames between bursts. Fifty is one second — far longer than any plausible
 /// latency, which is what keeps at most one burst in flight.
 const PING_INTERVAL_FRAMES: usize = 50;
-
-/// How long a burst lasts, in samples. Five milliseconds: long enough to
-/// survive the codec as something obviously loud, short enough that the far
-/// end sees its leading edge in exactly one frame.
-const BURST_SAMPLES: usize = (SAMPLE_RATE_HZ as usize * 5) / 1000;
-
-/// How loud the burst is, and how loud a frame has to be to count as one. The
-/// gap between them is wide because Opus smears an impulse and because
-/// anything else on this path is digital silence.
-const BURST_AMPLITUDE: i16 = 20_000;
-const HEARD_THRESHOLD: u16 = 4_000;
 
 /// Frames to let the call settle before the first burst counts. ICE finishes
 /// during the join, but the first packets after it are not representative.
@@ -138,12 +124,11 @@ fn options(base: &str, room: &str, name: &str) -> CallOptions {
 
 // --- the burst in flight ---------------------------------------------------
 
-/// The one burst that may be in the air, and the tally of the ones that were
-/// not.
+/// The burst in flight, plus what this harness has to know that the shared
+/// bookkeeping does not.
 #[derive(Default)]
 struct Flight {
-    sent: Mutex<Option<Instant>>,
-    lost: AtomicUsize,
+    inner: burst::Flight,
     /// When both clients were in the room, and what the first burst that was
     /// actually heard cost to get there.
     ///
@@ -164,16 +149,12 @@ struct Warmup {
 }
 
 impl Flight {
-    /// Records a burst leaving. A burst still in flight when the next one goes
-    /// is one nobody is ever going to hear.
     fn depart(&self) {
-        let Ok(mut sent) = self.sent.lock() else {
-            return;
-        };
-        if sent.is_some() {
-            self.lost.fetch_add(1, Ordering::Relaxed);
-        }
-        *sent = Some(Instant::now());
+        self.inner.depart();
+    }
+
+    fn expire(&self) {
+        self.inner.expire(LOST_AFTER);
     }
 
     /// Notes that both clients are in the room, which is where the wait for
@@ -187,10 +168,7 @@ impl Flight {
     /// Claims the burst in flight, if there is one, and returns how long it
     /// took. `None` means audio arrived that no burst explains.
     fn arrive(&self) -> Option<Duration> {
-        let elapsed = {
-            let mut sent = self.sent.lock().ok()?;
-            sent.take().map(|departed| departed.elapsed())
-        }?;
+        let elapsed = self.inner.arrive()?;
         self.note_warmup();
         Some(elapsed)
     }
@@ -211,26 +189,14 @@ impl Flight {
             .map_or(Duration::ZERO, |ready| ready.elapsed());
         *warmup = Some(Warmup {
             after: since_ready,
-            lost: self.lost.load(Ordering::Relaxed),
+            lost: self.inner.lost(),
         });
-    }
-
-    /// Gives up on a burst that has been out too long, so the next one is not
-    /// paired against it.
-    fn expire(&self) {
-        let Ok(mut sent) = self.sent.lock() else {
-            return;
-        };
-        if sent.is_some_and(|departed| departed.elapsed() > LOST_AFTER) {
-            *sent = None;
-            self.lost.fetch_add(1, Ordering::Relaxed);
-        }
     }
 
     /// Bursts written off once the far end was demonstrably listening. These
     /// are the ones that mean something: audio the network swallowed.
     fn lost(&self) -> usize {
-        let total = self.lost.load(Ordering::Relaxed);
+        let total = self.inner.lost();
         let warmed = self
             .warmup
             .lock()
@@ -278,30 +244,14 @@ impl AudioSource for Pinger {
         self.ticker.tick().await;
         self.produced += 1;
 
-        let mut frame = silent_frame();
         if self.produced > WARMUP_FRAMES && self.produced % PING_INTERVAL_FRAMES == 0 {
-            for (index, sample) in frame.iter_mut().take(BURST_SAMPLES).enumerate() {
-                // A 1 kHz tone rather than a single impulse: an impulse is
-                // mostly high frequency, which is the first thing a codec at
-                // 32 kbps throws away.
-                #[allow(
-                    clippy::cast_precision_loss,
-                    reason = "an index inside one frame is exact in f32"
-                )]
-                let phase = std::f32::consts::TAU * 1_000.0 * index as f32 / SAMPLE_RATE_HZ as f32;
-                #[allow(
-                    clippy::cast_possible_truncation,
-                    reason = "bounded by BURST_AMPLITUDE"
-                )]
-                {
-                    *sample = (phase.sin() * f32::from(BURST_AMPLITUDE)) as i16;
-                }
-            }
+            let frame = burst_frame();
             // Last thing before handing the frame over, so the clock starts as
             // close to the encoder as this side can get.
             self.flight.depart();
+            return Some(frame);
         }
-        Some(frame)
+        Some(silent_frame())
     }
 }
 
@@ -320,9 +270,7 @@ impl AudioSource for Silence {
 /// Ears that stop the clock on the burst's leading edge.
 struct Listener {
     flight: Arc<Flight>,
-    /// Whether the last frame was already loud, so a burst spread over two
-    /// frames is timed once rather than twice.
-    inside_burst: AtomicBool,
+    edge: Edge,
     times: Mutex<Vec<Duration>>,
 }
 
@@ -330,7 +278,9 @@ impl Listener {
     fn new(flight: Arc<Flight>) -> Self {
         Self {
             flight,
-            inside_burst: AtomicBool::new(false),
+            // Nothing but digital silence shares this path, so the threshold
+            // does not have to be measured against a noise floor.
+            edge: Edge::new(SILENT_PATH_THRESHOLD),
             times: Mutex::new(Vec::new()),
         }
     }
@@ -349,14 +299,7 @@ impl Listener {
 
 impl AudioSink for Listener {
     fn play(&self, _slot: usize, frame: &Frame) {
-        let loud = peak(frame) >= HEARD_THRESHOLD;
-        // Only the edge counts. `swap` rather than load-then-store so two
-        // decode tasks cannot both decide they saw the same edge.
-        if !loud {
-            self.inside_burst.store(false, Ordering::Relaxed);
-            return;
-        }
-        if self.inside_burst.swap(true, Ordering::Relaxed) {
+        if self.edge.crossed(frame).is_none() {
             return;
         }
         if let Some(elapsed) = self.flight.arrive() {
@@ -372,32 +315,17 @@ impl AudioSink for Listener {
 // --- the report ------------------------------------------------------------
 
 fn report(heard: &Listener, flight: &Flight, wanted: usize) -> Result<()> {
-    let mut times = heard.times();
-    if times.is_empty() {
+    let Some(spread) = Spread::of(&heard.times()) else {
         bail!(
             "no burst was ever heard — {} went out and none came back",
             flight.lost()
         );
-    }
-    times.sort_unstable();
-
-    let ms = |duration: Duration| duration.as_secs_f64() * 1_000.0;
-    let at = |fraction: f64| {
-        #[allow(
-            clippy::cast_possible_truncation,
-            clippy::cast_sign_loss,
-            reason = "an index into a vector of at most a few hundred"
-        )]
-        let index = (f64::from(u32::try_from(times.len() - 1).unwrap_or(0)) * fraction) as usize;
-        ms(times[index])
     };
-
-    let median = at(0.5);
-    let total = median + DEVICE_MS;
+    let total = spread.median + DEVICE_MS;
 
     println!(
         "--- {} bursts heard, {} lost ---\n",
-        times.len(),
+        spread.count,
         flight.lost()
     );
     if let Some((after, before_it)) = flight.warmup() {
@@ -408,19 +336,19 @@ fn report(heard: &Listener, flight: &Flight, wanted: usize) -> Result<()> {
         );
     }
     println!("  wire path (encode → SFU → decode)");
-    println!("    min     {:6.1} ms", ms(times[0]));
-    println!("    median  {median:6.1} ms");
-    println!("    p95     {:6.1} ms", at(0.95));
-    println!("    max     {:6.1} ms", ms(times[times.len() - 1]));
+    println!("    min     {:6.1} ms", spread.min);
+    println!("    median  {:6.1} ms", spread.median);
+    println!("    p95     {:6.1} ms", spread.p95);
+    println!("    max     {:6.1} ms", spread.max);
     println!("\n  devices, from DR-12 (10 ms of shared-mode period each way)");
     println!("    fixed   {DEVICE_MS:6.1} ms");
     println!("\n  mouth to ear, median");
     println!("    total   {total:6.1} ms  against a {BUDGET_MS:.0} ms budget");
 
-    if times.len() < wanted {
+    if spread.count < wanted {
         println!(
             "\nnote: only {} of {wanted} bursts were heard.",
-            times.len()
+            spread.count
         );
     }
     if total > BUDGET_MS {
@@ -475,9 +403,3 @@ fn default_room() -> String {
         .map_or(0, |since| since.as_secs());
     format!("latency-{stamp}")
 }
-
-const _: () = {
-    // The burst has to fit inside one frame, or its leading edge is not where
-    // this harness thinks it is.
-    assert!(BURST_SAMPLES < FRAME_SAMPLES);
-};
