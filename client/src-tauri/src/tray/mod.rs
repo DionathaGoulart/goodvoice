@@ -14,6 +14,7 @@
 //! into, and a host that could not give us one keeps an ordinary window that
 //! ordinarily closes.
 
+pub mod hotkey;
 mod menu;
 
 use std::{

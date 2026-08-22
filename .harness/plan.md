@@ -348,11 +348,31 @@ Goal: two clients talking through the SFU. Riskiest phase — spikes first.
   two drills still pass on Windows after the refactor.
   **Not verified:** the checklist itself — docs/testing/tray.md, "The menu",
   seven rows, each one checked against the window and against a roommate.
-- [ ] **4.3 [WIN] Global push-to-talk hotkey** — `tray/hotkey.rs`. Low-level
+- [x] **4.3 [WIN] Global push-to-talk hotkey** — `tray/hotkey.rs`. Low-level
   keyboard hook (`WH_KEYBOARD_LL`); works while a fullscreen game has focus.
   Write the anti-cheat Decision Record (EAC/BattlEye/Vanguard stance, PRD open q3).
   DoD: PTT works over a running game; DR committed.
   Verify: manual in-game test.
+  Built: `tray/hotkey.rs` — the hook, and `vk_for_code`, which turns the key
+  name the webview stores (`KeyboardEvent.code`, a physical key) into the
+  virtual-key code Windows reports. That table is the part that can be wrong
+  without anything crashing, so it is where the tests are (7 of them, and they
+  run anywhere).
+  Three things it deliberately does not do: **it does not swallow the key** —
+  a talk key a game stops seeing is a key nobody would bind to a weapon; **it
+  injects nothing anywhere**, which is the whole of the anti-cheat argument
+  (DR-18); and **it is not installed unless it is needed** — the hook goes on
+  when a call is in push-to-talk mode and comes off with the call.
+  The window says which kind of push to talk it has, because "heard from
+  anywhere" and "heard only in this window" look identical until somebody is
+  inside a game.
+  Verified, scripted: `docs/testing/hotkey.ps1` starts `bin/hotkey-drill` —
+  a process with no window at all — and synthesises three F13 presses from
+  another process. All six edges arrive, in order, and the drill exits 0. The
+  in-window handler from 3.3 is still there and still works if the hook cannot
+  be installed.
+  **Not verified — the DoD itself:** the key held over a running fullscreen
+  game, and the game still receiving it. docs/testing/hotkey.md, steps 1–5.
 - [ ] **4.4 [WIN] Cold-start budget** — measure app-launch → audible-in-room; must
   be <3 s. Optimize (lazy UI, parallel join+audio-init) until it is.
   DoD: measurement in DR, budget met. Verify: scripted timing run, 5-run median.
@@ -1450,3 +1470,74 @@ window-subclassing path that needs it.
 - Delay-loading is per-DLL and comctl32 only. If a future dependency needs
   another version-6-only DLL bound at startup, the same fix extends by one
   line.
+
+### DR-18: what a push-to-talk key is allowed to do (2026-08-21)
+
+**Context.** prd.md open question 3, and task 4.3's other deliverable: a voice
+client for gamers has to hear a key while a game has focus, and games are
+watched by anti-cheat software that is paid to be suspicious of exactly that
+kind of software. What is the safe shape?
+
+**What goodvoice does.** One `WH_KEYBOARD_LL` hook, installed only while a call
+is in push-to-talk mode, watching for one key.
+
+**What that is, precisely** — this matters, because the name "hook" covers two
+completely different things:
+
+- `WH_KEYBOARD` and `WH_GETMESSAGE` are *injected* hooks: Windows loads your DLL
+  into every process on the desktop. That is the thing anti-cheats exist to
+  notice, and goodvoice does not do it.
+- `WH_KEYBOARD_LL` is not injected. The callback stays in this process; the
+  system marshals the event to it and waits for it to return. Nothing of
+  goodvoice's is ever mapped into the game.
+
+**What it does not do, on purpose.**
+
+- **It never consumes the key.** Every event is passed on with
+  `CallNextHookEx`. The game sees the keystroke exactly as it would have.
+- **It never synthesises input.** goodvoice has no `SendInput` and no
+  `keybd_event` anywhere in it. (`docs/testing/hotkey.ps1` does, to drive the
+  drill — that is a test script, it presses F13, and it should not be run while
+  a game is open.)
+- **It reads no other process.** No `OpenProcess`, no memory reads, no overlay,
+  no graphics hooking.
+- **It is not resident.** Out of a call, or in any mode but push-to-talk, there
+  is no hook on the desktop at all.
+
+**The stance on the three anti-cheats the PRD names.** This is a *design*
+argument, not a compatibility guarantee, and it is worth saying plainly which
+is which:
+
+- The behaviour above is what every mainstream voice client does for push to
+  talk. A rule that blocked it would break the entire category, not goodvoice.
+- What these systems are built to catch — injection, memory access, synthesised
+  input, driver-level input — is a list goodvoice is absent from, and that is
+  the argument.
+- **Vanguard is the one to watch**, because it is a kernel driver loaded at
+  boot with the broadest view of the machine. Nothing here is known to conflict
+  with it, and "known" is doing real work in that sentence: policies change,
+  this has not been tested against every title, and no promise is made.
+
+**If one of them ever does object.** Three fallbacks, in the order they cost:
+
+1. **Raw Input** — `RegisterRawInputDevices` with `RIDEV_INPUTSINK` on a
+   message-only window delivers keyboard input regardless of focus with no hook
+   anywhere. Same two edges, same behaviour, a smaller footprint. This is the
+   first thing to try, and `tray::hotkey`'s surface (`listen`, returning a
+   `Listener` that stops on drop) is deliberately narrow enough that swapping
+   the implementation touches nothing else.
+2. **`RegisterHotKey`** — no hook at all, but it reports only the press. Push to
+   talk becomes toggle-to-talk, which is a different feature.
+3. **Focus-only** — the in-window handler from task 3.3, which is still there
+   and takes over on its own if the hook cannot be installed.
+
+**Consequences.**
+
+- A failed hook is not a failed join. `Hotkey::bind` reports it and the window
+  says "heard only while this window has focus" instead of pretending.
+- The hook callback runs on the input path of every process on the machine, so
+  it stays cheap: one atomic load and a comparison for a key that is not ours.
+  Windows drops hooks that take too long, and a slow one is felt as a laggy
+  keyboard everywhere, not just here.
+- Key repeat is filtered to the two edges. Holding a key would otherwise say
+  "start talking" fifty times a second.

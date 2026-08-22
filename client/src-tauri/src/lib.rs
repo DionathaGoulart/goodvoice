@@ -10,7 +10,7 @@ pub mod capture;
 pub mod rtc;
 pub mod tray;
 
-use std::sync::Arc;
+use std::sync::{Arc, Mutex as StdMutex};
 
 use serde::Serialize;
 use tauri::{AppHandle, Emitter as _, Manager as _, State};
@@ -22,6 +22,7 @@ use rtc::{
     session::{Call, CallOptions},
     signaling::Participant,
 };
+use tray::hotkey;
 
 /// The deploy a fresh install talks to. Overridable at build time so a
 /// self-hoster can ship a client pointed at their own Worker without touching
@@ -105,6 +106,66 @@ pub struct Controls {
     pub deafened: bool,
 }
 
+/// The global talk key: what the window says it is, and what is bound now.
+///
+/// The two are not the same thing. A key is configured whether or not there is
+/// a call to use it in, and the desktop-wide hook only goes on while a call is
+/// actually in push-to-talk mode — goodvoice has no business in the keyboard's
+/// way the rest of the time (task 4.3).
+#[derive(Default)]
+struct Hotkey {
+    code: StdMutex<Option<String>>,
+    bound: StdMutex<Option<(String, hotkey::Listener)>>,
+}
+
+impl Hotkey {
+    fn remember(&self, code: Option<String>) {
+        if let Ok(mut held) = self.code.lock() {
+            *held = code;
+        }
+    }
+
+    fn code(&self) -> Option<String> {
+        self.code.lock().ok().and_then(|code| code.clone())
+    }
+
+    /// Installs, replaces or removes the hook.
+    ///
+    /// Rebinding the key it is already bound to is left alone: this runs on
+    /// every mode change and every join, and taking a keyboard hook off the
+    /// desktop only to put the same one back is a way to lose a keystroke.
+    fn bind(&self, app: &AppHandle, code: Option<String>) {
+        let Ok(mut bound) = self.bound.lock() else {
+            return;
+        };
+        if bound.as_ref().map(|(code, _)| code.as_str()) == code.as_deref() {
+            return;
+        }
+
+        // Dropped first, and on purpose: one hook at a time, and the old one
+        // owns the thread the new one wants to start.
+        *bound = None;
+        let Some(code) = code else {
+            return;
+        };
+
+        let handle = app.clone();
+        match hotkey::listen(&code, move |down| {
+            // The hook callback is on the desktop's input path and holds no
+            // lock worth waiting on; the call it has to reach is behind an
+            // async mutex. So the edge is handed to the runtime, which is a
+            // queue push and nothing else.
+            let handle = handle.clone();
+            tauri::async_runtime::spawn(async move { talk_key(&handle, down).await });
+        }) {
+            Ok(listener) => *bound = Some((code, listener)),
+            Err(error) => {
+                eprintln!("push to talk is window-only: {error}");
+            }
+        }
+    }
+}
+
 /// The one call this process can be in.
 ///
 /// A `Mutex` rather than a lock-free cell because join and leave must not
@@ -114,6 +175,7 @@ pub struct Controls {
 /// watch receivers, never a handle on the call itself.
 struct CurrentCall {
     call: Mutex<Option<Call>>,
+    hotkey: Hotkey,
     /// Watched rather than read: [`push_controls`] forwards every change to
     /// the window and the tray, so whoever made it does not have to know who
     /// else is showing it.
@@ -124,6 +186,7 @@ impl Default for CurrentCall {
     fn default() -> Self {
         Self {
             call: Mutex::default(),
+            hotkey: Hotkey::default(),
             controls: watch::Sender::new(Controls::default()),
         }
     }
@@ -172,6 +235,7 @@ async fn join_room(
 
     // Watch receivers, not the call: these outlive `leave_room` taking the
     // call apart, and they end on their own when its state is dropped.
+    let app_for_hotkey = app.clone();
     tauri::async_runtime::spawn(push_roster(app.clone(), call.roster()));
     tauri::async_runtime::spawn(push_speaking(app.clone(), call.speaking()));
     tauri::async_runtime::spawn(push_state(app, call.state(), call.self_id_watch()));
@@ -182,6 +246,8 @@ async fn join_room(
         muted: false,
         deafened: false,
     });
+    drop(current);
+    refresh_hotkey(&app_for_hotkey).await;
 
     Ok(status)
 }
@@ -193,8 +259,8 @@ async fn join_room(
 /// Never fails in practice; the `Result` exists so the UI can await it the
 /// same way it awaits the others.
 #[tauri::command]
-async fn leave_room(state: State<'_, CurrentCall>) -> Result<(), String> {
-    end_call_in(&state).await;
+async fn leave_room(app: AppHandle) -> Result<(), String> {
+    end_call(app).await;
     Ok(())
 }
 
@@ -204,17 +270,42 @@ async fn leave_room(state: State<'_, CurrentCall>) -> Result<(), String> {
 /// directly, because the window closing stopped meaning "goodbye" the moment
 /// task 4.1 turned it into a hide.
 pub async fn end_call(app: AppHandle) {
-    end_call_in(&app.state::<CurrentCall>()).await;
-}
-
-async fn end_call_in(current: &CurrentCall) {
-    let taken = current.call.lock().await.take();
+    let state = app.state::<CurrentCall>();
+    let taken = state.call.lock().await.take();
     if let Some(call) = taken {
         call.leave().await;
     }
     // The window hears the call end through `push_state` as well; this is what
     // greys the tray menu out.
-    current.controls.send_replace(Controls::default());
+    state.controls.send_replace(Controls::default());
+    // Nobody is talking to anybody, so nothing needs watching the keyboard.
+    state.hotkey.bind(&app, None);
+}
+
+/// Puts the desktop-wide talk key in the state the call calls for.
+///
+/// The window says what the key *is*; whether it is watched for is decided
+/// here, from one place, because three different things can change the answer:
+/// joining, leaving, and switching transmit mode.
+async fn refresh_hotkey(app: &AppHandle) {
+    let state = app.state::<CurrentCall>();
+    let wanted = {
+        let call = state.call.lock().await;
+        match call.as_ref() {
+            Some(call) if call.transmit_mode() == TransmitMode::PushToTalk => state.hotkey.code(),
+            _ => None,
+        }
+    };
+    state.hotkey.bind(app, wanted);
+}
+
+/// Tells the call the talk key moved, from wherever it moved.
+async fn talk_key(app: &AppHandle, down: bool) {
+    let state = app.state::<CurrentCall>();
+    let call = state.call.lock().await;
+    if let Some(call) = call.as_ref() {
+        call.set_talk_key(down);
+    }
 }
 
 /// Flips mute, whichever side asked.
@@ -287,12 +378,34 @@ async fn set_deafened(state: State<'_, CurrentCall>, deafened: bool) -> Result<(
 /// made mid-call reaches the microphone.
 #[tauri::command]
 async fn set_transmit_mode(
+    app: AppHandle,
     state: State<'_, CurrentCall>,
     mode: TransmitMode,
 ) -> Result<(), String> {
-    let call = state.call.lock().await;
-    let call = call.as_ref().ok_or_else(|| "not in a call".to_owned())?;
-    call.set_transmit_mode(mode);
+    {
+        let call = state.call.lock().await;
+        let call = call.as_ref().ok_or_else(|| "not in a call".to_owned())?;
+        call.set_transmit_mode(mode);
+    }
+    // Leaving push-to-talk takes the hook off the desktop; arriving at it puts
+    // one on.
+    refresh_hotkey(&app).await;
+    Ok(())
+}
+
+/// Remembers which key the window means by "the talk key".
+///
+/// Sent whenever the window's binding changes, and again on every join —
+/// storage belongs to the webview (task 3.3) and this process learns it the
+/// same way anyone else would.
+///
+/// # Errors
+///
+/// Never. The `Result` is there so the UI can await it like the others.
+#[tauri::command]
+async fn set_talk_binding(app: AppHandle, code: Option<String>) -> Result<(), String> {
+    app.state::<CurrentCall>().hotkey.remember(code);
+    refresh_hotkey(&app).await;
     Ok(())
 }
 
@@ -307,6 +420,20 @@ async fn set_talk_key(state: State<'_, CurrentCall>, down: bool) -> Result<(), S
     let call = call.as_ref().ok_or_else(|| "not in a call".to_owned())?;
     call.set_talk_key(down);
     Ok(())
+}
+
+/// Whether the desktop-wide hook is on, for the window to say so.
+///
+/// Push to talk that only works while the window has focus is push to talk
+/// that does not work, and the difference is invisible until someone is in a
+/// game. So the window is told which one it has.
+///
+/// # Errors
+///
+/// Never. The `Result` is there so the UI can await it like the others.
+#[tauri::command]
+async fn talk_key_is_global(state: State<'_, CurrentCall>) -> Result<bool, String> {
+    Ok(state.hotkey.bound.lock().is_ok_and(|bound| bound.is_some()))
 }
 
 #[tauri::command]
@@ -352,6 +479,7 @@ async fn forget_call(app: &AppHandle) {
     let state = app.state::<CurrentCall>();
     let _ = state.call.lock().await.take();
     state.controls.send_replace(Controls::default());
+    state.hotkey.bind(app, None);
 }
 
 /// Forwards mute and deafen to both things that show them, for the life of the
@@ -431,7 +559,9 @@ pub fn run() {
             set_muted,
             set_deafened,
             set_transmit_mode,
-            set_talk_key
+            set_talk_key,
+            set_talk_binding,
+            talk_key_is_global
         ])
         .run(tauri::generate_context!())
         .expect("error while running goodvoice");

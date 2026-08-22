@@ -152,6 +152,26 @@ const App: Component = () => {
     localStorage.getItem(TALK_KEY_STORE) ?? DEFAULT_TALK_KEY,
   );
   const [rebinding, setRebinding] = createSignal(false);
+  // Whether the key is heard from anywhere or only in this window. The two
+  // look identical until somebody is inside a game, which is the one place it
+  // matters, so the window says which one it has.
+  const [globalKey, setGlobalKey] = createSignal(false);
+
+  /**
+   * Tells the client which key push to talk means, and asks back whether it
+   * managed to watch the whole desktop for it.
+   *
+   * Sent on every join and every rebind: the key is stored here (task 3.3) and
+   * the client learns it the same way anyone else would.
+   */
+  const bindTalkKey = async () => {
+    try {
+      await invoke("set_talk_binding", { code: talkKey() });
+      setGlobalKey(await invoke<boolean>("talk_key_is_global"));
+    } catch {
+      setGlobalKey(false);
+    }
+  };
 
   // Subscribed once for the life of the window: the room the events belong to
   // is whichever call is open, and there is only ever one.
@@ -203,6 +223,7 @@ const App: Component = () => {
       if (event.code !== "Escape") {
         setTalkKey(event.code);
         localStorage.setItem(TALK_KEY_STORE, event.code);
+        void bindTalkKey();
       }
       setRebinding(false);
       return;
@@ -283,6 +304,7 @@ const App: Component = () => {
       setMuted(false);
       setDeafened(false);
       setHealth({ state: "live" });
+      void bindTalkKey();
     } catch (reason) {
       setError(String(reason));
     } finally {
@@ -308,7 +330,10 @@ const App: Component = () => {
     // new mode, so it is let go here.
     pressTalk(false);
     if (call()) {
-      void invoke("set_transmit_mode", { mode: next }).catch(() => {});
+      void invoke("set_transmit_mode", { mode: next })
+        .then(() => invoke<boolean>("talk_key_is_global"))
+        .then(setGlobalKey)
+        .catch(() => setGlobalKey(false));
     }
   };
 
@@ -365,6 +390,13 @@ const App: Component = () => {
             ? "press a key, or escape"
             : `key: ${keyName(talkKey())}`}
         </button>
+        <Show when={call()}>
+          <p class="notice">
+            {globalKey()
+              ? "heard from anywhere, including over a game"
+              : "heard only while this window has focus"}
+          </p>
+        </Show>
       </Show>
     </div>
   );

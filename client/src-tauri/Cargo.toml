@@ -77,10 +77,10 @@ anyhow = "1"
 [dev-dependencies]
 tokio = { version = "1", features = ["test-util"] }
 
-# The 0.5 probe only. Windows-only because the two questions it answers —
-# what WASAPI will give us and which encoders are in silicon — have no
-# meaning anywhere else. Same major as the one tauri already pulls in, so
-# it costs no extra build.
+# The 0.5 probe (what WASAPI will give us, which encoders are in silicon) and
+# the global push-to-talk hook (task 4.3). Both are questions that only have
+# meaning on Windows. Same major as the one tauri already pulls in, so it costs
+# no extra build.
 [target.'cfg(windows)'.dependencies]
 windows = { version = "0.62", features = [
   "Win32_Devices_FunctionDiscovery",
@@ -88,8 +88,10 @@ windows = { version = "0.62", features = [
   "Win32_Media_MediaFoundation",
   "Win32_System_Com",
   "Win32_System_Com_StructuredStorage",
+  "Win32_System_Threading",
   "Win32_System_Variant",
   "Win32_UI_Shell_PropertiesSystem",
+  "Win32_UI_WindowsAndMessaging",
 ] }
 
 [profile.release]
