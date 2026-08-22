@@ -13,10 +13,10 @@
 use std::{
     collections::HashMap,
     sync::{
-        atomic::{AtomicBool, AtomicU32, AtomicU8, AtomicUsize, Ordering},
+        atomic::{AtomicBool, AtomicU32, AtomicU8, Ordering},
         Arc, Mutex,
     },
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 use bytes::Bytes;
@@ -44,9 +44,9 @@ use webrtc::{
     },
     peer_connection::{
         register_default_interceptors, MediaEngine, PeerConnection, PeerConnectionBuilder,
-        PeerConnectionEventHandler, RTCConfigurationBuilder, RTCIceGatheringState, RTCIceServer,
-        RTCPeerConnectionIceEvent, RTCPeerConnectionState, RTCSessionDescription, Registry,
-        SettingEngine,
+        PeerConnectionEventHandler, RTCConfigurationBuilder, RTCIceCandidateType,
+        RTCIceGatheringState, RTCIceServer, RTCPeerConnectionIceEvent, RTCPeerConnectionState,
+        RTCSessionDescription, Registry, SettingEngine,
     },
     rtp_transceiver::{RTCRtpTransceiverDirection, RTCRtpTransceiverInit},
     runtime::default_runtime,
@@ -77,6 +77,15 @@ const MIC_TRACK: &str = "mic";
 /// (DR-7).
 const OPUS_PAYLOAD_TYPE: PayloadType = 111;
 
+/// Set this to anything and a join prints how long each of its phases took.
+///
+/// Task 4.4 is a budget, and a budget without a breakdown is a number nobody
+/// can act on: the phases below are three server round trips and an ICE
+/// gathering, and which of them is slow is not guessable. Off unless asked,
+/// because a call that narrates itself five lines at a time is a call that is
+/// hard to read.
+const TRACE_ENV: &str = "GOODVOICE_TRACE_JOIN";
+
 /// How long ICE and DTLS get before the join is called a failure.
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(25);
 
@@ -85,9 +94,13 @@ const CONNECT_TIMEOUT: Duration = Duration::from_secs(25);
 /// Waiting for `Complete` alone is waiting on every ICE URL the room handed
 /// out, including the ones this network cannot reach — one of them is enough
 /// to hang the join for the whole [`CONNECT_TIMEOUT`] (DR-14). A candidate
-/// that is coming arrives in well under two seconds; when none has arrived for
-/// that long, the ones in hand are the ones there are.
-const GATHER_QUIET: Duration = Duration::from_secs(2);
+/// that is coming arrives long before this: a server-reflexive one is a single
+/// round trip, and a relay is an allocation and an authentication, so a
+/// straggler at three quarters of a second is a straggler that is not coming.
+///
+/// It is a floor on every join that has to pay it, which is why it is not
+/// two seconds any more (DR-19).
+const GATHER_QUIET: Duration = Duration::from_millis(750);
 
 /// How long a freshly pulled track gets to actually show up.
 const TRACK_TIMEOUT: Duration = Duration::from_secs(15);
@@ -164,11 +177,24 @@ async fn connect_once(
     signaling: &Arc<Signaling>,
     options: &CallOptions,
 ) -> Result<Session, RtcError> {
+    let phase = Instant::now();
     let joined = signaling.join(&options.name).await?;
-    let (commands, inbound) = signaling.connect(&joined.self_id).await?;
+    trace_phase("room", phase.elapsed());
 
-    match establish(signaling, &joined).await {
-        Ok((peer, signals, published)) => Ok(Session {
+    // The roster socket and the peer connection both hang off the join
+    // response and neither waits on the other, so they are opened together.
+    // Serially it is two TLS handshakes and an ICE gathering end to end, and
+    // every one of them is a person watching a window that says nothing
+    // (task 4.4, DR-19).
+    let (connected, established) = tokio::join!(
+        signaling.connect(&joined.self_id),
+        establish(signaling, &joined)
+    );
+
+    trace_phase("connected", phase.elapsed());
+
+    match (connected, established) {
+        (Ok((commands, inbound)), Ok((peer, signals, published))) => Ok(Session {
             self_id: joined.self_id,
             participants: joined.participants,
             peer,
@@ -177,10 +203,13 @@ async fn connect_once(
             commands,
             inbound,
         }),
-        Err(error) => {
+        // The seat is handed back through whichever half came up, so a failure
+        // on one side does not leave a ghost in the room (DR-5).
+        (Ok((commands, _)), Err(error)) => {
             let _ = commands.send(ClientMessage::Leave).await;
             Err(error)
         }
+        (Err(error), _) => Err(error),
     }
 }
 
@@ -192,8 +221,11 @@ async fn establish(
     let (events, signals) = Events::new();
     let peer: Arc<dyn PeerConnection> = Arc::new(open_peer(&joined.sfu.ice_servers, events).await?);
 
+    let phase = Instant::now();
     let published = publish_mic(signaling, &joined.self_id, peer.as_ref(), &signals).await?;
+    trace_phase("published", phase.elapsed());
     wait_for_connection(&signals).await?;
+    trace_phase("connection", phase.elapsed());
 
     Ok((peer, signals, published))
 }
@@ -883,6 +915,17 @@ async fn run_session(supervisor: &Supervisor, session: Session) -> SessionEnd {
     end
 }
 
+/// Reports one phase of a join, if [`TRACE_ENV`] asked for it.
+///
+/// The times are cumulative within a phase group — "how far into the join is
+/// this" — because that is the question a breakdown is read to answer.
+fn trace_phase(phase: &str, elapsed: Duration) {
+    static TRACING: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    if *TRACING.get_or_init(|| std::env::var(TRACE_ENV).is_ok()) {
+        println!("join {phase} at {} ms", elapsed.as_millis());
+    }
+}
+
 // --- peer connection -------------------------------------------------------
 
 /// Everything the session waits on, published as state rather than as edges.
@@ -893,12 +936,54 @@ async fn run_session(supervisor: &Supervisor, session: Session) -> SessionEnd {
 /// complete".
 struct Signals {
     gathering: watch::Receiver<RTCIceGatheringState>,
-    /// How many local candidates have been gathered so far. Only ever grows
-    /// within one peer connection, so a reader that sees the same number twice
-    /// knows nothing arrived in between.
-    candidates: Arc<AtomicUsize>,
+    /// Whether gathering has already been waited out once.
+    ///
+    /// Nothing here restarts ICE, so a candidate list that has gone quiet
+    /// stays quiet — and every renegotiation after the first would otherwise
+    /// pay [`GATHER_QUIET`] again for an answer that cannot change (DR-19).
+    settled: Arc<AtomicBool>,
+    /// The local candidates gathered so far. Watched rather than counted so a
+    /// candidate arriving wakes the waiter: most of a join's ICE time is spent
+    /// waiting for one more, and the rule for "enough" is about *which* ones
+    /// have arrived rather than how many (DR-19).
+    candidates: watch::Receiver<Gathered>,
     connection: watch::Receiver<RTCPeerConnectionState>,
     tracks: Arc<TrackInbox>,
+}
+
+/// What ICE has produced so far.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+struct Gathered {
+    count: usize,
+    /// A server-reflexive candidate: this client knows its own public address,
+    /// so a direct path to an ice-lite SFU exists.
+    srflx: bool,
+    /// A relay candidate: there is a way through even when the direct path is
+    /// blocked.
+    relay: bool,
+}
+
+impl Gathered {
+    fn add(&mut self, kind: RTCIceCandidateType) {
+        self.count += 1;
+        match kind {
+            RTCIceCandidateType::Srflx => self.srflx = true,
+            RTCIceCandidateType::Relay => self.relay = true,
+            _ => {}
+        }
+    }
+
+    /// Whether anything left to gather is worth waiting for.
+    ///
+    /// One direct path and one fallback is all ICE has to choose between.
+    /// Cloudflare hands out six TURN URLs — one relay on six ports, so a
+    /// firewall that blocks one lets another through — and allocating on all of
+    /// them takes about a second longer than allocating on the first. Those are
+    /// more fallbacks of a kind already in hand, and only one is ever used
+    /// (DR-19).
+    const fn enough(self) -> bool {
+        self.srflx && self.relay
+    }
 }
 
 /// Remote tracks that have arrived but not yet been claimed by a subscription.
@@ -910,7 +995,7 @@ struct TrackInbox {
 
 struct Events {
     gathering: watch::Sender<RTCIceGatheringState>,
-    candidates: Arc<AtomicUsize>,
+    candidates: watch::Sender<Gathered>,
     connection: watch::Sender<RTCPeerConnectionState>,
     tracks: Arc<TrackInbox>,
 }
@@ -919,19 +1004,20 @@ impl Events {
     fn new() -> (Arc<Self>, Signals) {
         let (gathering_tx, gathering) = watch::channel(RTCIceGatheringState::New);
         let (connection_tx, connection) = watch::channel(RTCPeerConnectionState::New);
-        let candidates = Arc::new(AtomicUsize::new(0));
+        let (candidates_tx, candidates) = watch::channel(Gathered::default());
         let tracks = Arc::new(TrackInbox::default());
 
         (
             Arc::new(Self {
                 gathering: gathering_tx,
-                candidates: Arc::clone(&candidates),
+                candidates: candidates_tx,
                 connection: connection_tx,
                 tracks: Arc::clone(&tracks),
             }),
             Signals {
                 gathering,
                 candidates,
+                settled: Arc::new(AtomicBool::new(false)),
                 connection,
                 tracks,
             },
@@ -945,11 +1031,12 @@ impl PeerConnectionEventHandler for Events {
         let _ = self.gathering.send(state);
     }
 
-    /// Counting them is the whole use for them: nothing here trickles, so a
-    /// candidate is interesting only as evidence that gathering is still
-    /// making progress (see [`wait_for_gathering`]).
-    async fn on_ice_candidate(&self, _event: RTCPeerConnectionIceEvent) {
-        self.candidates.fetch_add(1, Ordering::Relaxed);
+    /// Nothing here trickles, so a candidate matters twice: as evidence that
+    /// gathering is still making progress, and as one of the two kinds that
+    /// make waiting for the rest pointless (see [`Gathered::enough`]).
+    async fn on_ice_candidate(&self, event: RTCPeerConnectionIceEvent) {
+        self.candidates
+            .send_modify(|gathered| gathered.add(event.candidate.typ));
     }
 
     async fn on_connection_state_change(&self, state: RTCPeerConnectionState) {
@@ -1072,28 +1159,51 @@ fn local_ip() -> String {
 /// that runs no checks of its own (DR-7), the candidates that matter are ours
 /// to send from, not theirs to choose between.
 async fn wait_for_gathering(signals: &Signals) -> Result<(), RtcError> {
+    let phase = Instant::now();
+    let gathered = gather(signals).await;
+    trace_phase("gather", phase.elapsed());
+    gathered
+}
+
+async fn gather(signals: &Signals) -> Result<(), RtcError> {
+    if signals.settled.load(Ordering::Acquire) {
+        return Ok(());
+    }
+
     let mut gathering = signals.gathering.clone();
+    let mut candidates = signals.candidates.clone();
     let deadline = tokio::time::Instant::now() + CONNECT_TIMEOUT;
 
     loop {
-        // The state is copied out of the watch straight away: the borrow it
-        // hands back is not `Send`, and this runs inside a spawned task.
+        // Both are copied out of their watches straight away: the borrows they
+        // hand back are not `Send`, and this runs inside a spawned task.
         let state = *gathering.borrow_and_update();
-        if state == RTCIceGatheringState::Complete {
+        let gathered = *candidates.borrow_and_update();
+        if state == RTCIceGatheringState::Complete || gathered.enough() {
+            signals.settled.store(true, Ordering::Release);
             return Ok(());
         }
 
-        let before = signals.candidates.load(Ordering::Relaxed);
-        match tokio::time::timeout(GATHER_QUIET, gathering.changed()).await {
+        let moved = tokio::time::timeout(GATHER_QUIET, async {
+            tokio::select! {
+                changed = gathering.changed() => changed,
+                changed = candidates.changed() => changed,
+            }
+        })
+        .await;
+
+        match moved {
             Ok(Ok(())) => continue,
             Ok(Err(_)) => {
                 return Err(RtcError::Transport(
                     "the peer connection went away during ICE gathering".to_owned(),
                 ))
             }
+            // Nothing has moved for a whole window: what is in hand is what
+            // there is.
             Err(_) => {
-                let now = signals.candidates.load(Ordering::Relaxed);
-                if now > 0 && now == before {
+                if gathered.count > 0 {
+                    signals.settled.store(true, Ordering::Release);
                     return Ok(());
                 }
             }
@@ -1780,8 +1890,8 @@ mod tests {
     use super::{
         is_starting_up, play_packet, publish_loop, silent_frame, ssrc_for_mid, ssrc_of,
         track_error, wait_for_gathering, Events, PacketSink, PeerConnectionEventHandler,
-        RTCIceGatheringState, RTCPeerConnectionIceEvent, Shared, TransmitMode, CONNECT_TIMEOUT,
-        GATHER_QUIET,
+        RTCIceCandidateType, RTCIceGatheringState, RTCPeerConnectionIceEvent, Shared, TransmitMode,
+        CONNECT_TIMEOUT, GATHER_QUIET,
     };
     use crate::audio::{
         device::{AudioSink, AudioSource, NullSink, RecordingSink, ToneSource},
@@ -1795,6 +1905,13 @@ mod tests {
         Arc, Mutex,
     };
     use tokio::sync::watch;
+
+    /// One candidate of the given kind, which is all `Gathered` looks at.
+    fn candidate_of(kind: RTCIceCandidateType) -> RTCPeerConnectionIceEvent {
+        let mut event = RTCPeerConnectionIceEvent::default();
+        event.candidate.typ = kind;
+        event
+    }
 
     /// Trimmed from a real Cloudflare pull offer (DR-7).
     const PULL_OFFER: &str = "v=0\r\n\
@@ -2411,9 +2528,100 @@ mod tests {
             "the wait ran to the connect timeout instead of stopping when the candidates did"
         );
         assert_eq!(
-            signals.candidates.load(Ordering::Relaxed),
+            signals.candidates.borrow().count,
             3,
             "the wait ended before the candidates that were coming had arrived"
+        );
+
+        arriving.abort();
+    }
+
+    /// A renegotiation must not pay the quiet window twice.
+    ///
+    /// The pull side answers an offer for every track it subscribes to, and
+    /// each answer asks for the local description again. Nothing here restarts
+    /// ICE, so the candidates cannot have changed — waiting for them again is
+    /// [`GATHER_QUIET`] of silence per subscribe, on the path a person is
+    /// waiting through (DR-19).
+    #[tokio::test(start_paused = true)]
+    async fn a_gathering_that_has_settled_once_is_not_waited_on_again() {
+        let (events, signals) = Events::new();
+
+        let arriving = tokio::spawn(async move {
+            events
+                .on_ice_candidate(RTCPeerConnectionIceEvent::default())
+                .await;
+            std::future::pending::<()>().await;
+        });
+        wait_for_gathering(&signals)
+            .await
+            .expect("one candidate and then quiet is a usable SDP");
+
+        let again = tokio::time::Instant::now();
+        wait_for_gathering(&signals)
+            .await
+            .expect("the second wait has nothing to wait for");
+        assert!(
+            again.elapsed() < GATHER_QUIET,
+            "the second wait paid the quiet window again"
+        );
+
+        arriving.abort();
+    }
+
+    /// The rule that makes a join a second faster: once there is a direct path
+    /// and a fallback, whatever is still allocating is a fallback of a kind
+    /// already in hand (DR-19).
+    #[tokio::test(start_paused = true)]
+    async fn gathering_stops_once_there_is_a_path_and_a_fallback() {
+        let (events, signals) = Events::new();
+        let started = tokio::time::Instant::now();
+
+        let arriving = tokio::spawn(async move {
+            for kind in [
+                RTCIceCandidateType::Host,
+                RTCIceCandidateType::Srflx,
+                RTCIceCandidateType::Relay,
+            ] {
+                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                events.on_ice_candidate(candidate_of(kind)).await;
+            }
+            // ...and five more relays, one per TURN port Cloudflare hands out,
+            // none of them worth a person's time.
+            std::future::pending::<()>().await;
+        });
+
+        wait_for_gathering(&signals)
+            .await
+            .expect("a path and a fallback are a usable SDP");
+        assert!(
+            started.elapsed() < GATHER_QUIET,
+            "waited out the quiet window with everything it needed in hand"
+        );
+
+        arriving.abort();
+    }
+
+    /// A network with no relay to be had still waits for quiet: `enough` is a
+    /// shortcut, not the only way out.
+    #[tokio::test(start_paused = true)]
+    async fn a_direct_path_alone_still_waits_for_the_stragglers() {
+        let (events, signals) = Events::new();
+
+        let arriving = tokio::spawn(async move {
+            events
+                .on_ice_candidate(candidate_of(RTCIceCandidateType::Srflx))
+                .await;
+            std::future::pending::<()>().await;
+        });
+
+        let started = tokio::time::Instant::now();
+        wait_for_gathering(&signals)
+            .await
+            .expect("quiet with a candidate in hand is still a usable SDP");
+        assert!(
+            started.elapsed() >= GATHER_QUIET,
+            "gave up on the relay before the quiet window was out"
         );
 
         arriving.abort();

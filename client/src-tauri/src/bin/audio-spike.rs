@@ -91,9 +91,15 @@ async fn main() -> Result<()> {
     println!("  capture  {}", endpoint(&capture));
     println!("  render   {}", endpoint(&render));
 
+    // Timed because opening them is on the critical path of every join, and
+    // task 4.4 has three seconds to spend on the whole of one.
+    let opening = Instant::now();
     let (mut microphone, speakers) =
         hardware::open().context("no usable capture or render endpoint")?;
-    println!("\ndevices are open at {SAMPLE_RATE_HZ} Hz\n");
+    println!(
+        "\ndevices are open at {SAMPLE_RATE_HZ} Hz, {} ms after asking\n",
+        opening.elapsed().as_millis()
+    );
 
     match mode {
         Mode::Monitor { seconds } => monitor(&mut microphone, &speakers, seconds).await,

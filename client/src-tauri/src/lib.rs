@@ -10,7 +10,10 @@ pub mod capture;
 pub mod rtc;
 pub mod tray;
 
-use std::sync::{Arc, Mutex as StdMutex};
+use std::{
+    sync::{Arc, Mutex as StdMutex},
+    time::Instant,
+};
 
 use serde::Serialize;
 use tauri::{AppHandle, Emitter as _, Manager as _, State};
@@ -31,6 +34,14 @@ pub const DEFAULT_SERVER: &str = match option_env!("GOODVOICE_SERVER") {
     Some(url) => url,
     None => "https://goodvoice.goodvoice-server.workers.dev",
 };
+
+/// The room to join without being asked, if this variable names one.
+///
+/// For the runs that have to happen without a person clicking anything: the
+/// cold-start timing (task 4.4) and the idle soak (4.5). It is also the shape
+/// task 6.2's `goodvoice://join/<room>` link will need — a join that starts
+/// before, and independently of, the window that would normally ask for it.
+const AUTOJOIN_ENV: &str = "GOODVOICE_AUTOJOIN";
 
 /// The event the UI listens on for room changes.
 const ROSTER_EVENT: &str = "goodvoice://roster";
@@ -201,26 +212,39 @@ impl Default for CurrentCall {
 #[tauri::command]
 async fn join_room(
     app: AppHandle,
-    state: State<'_, CurrentCall>,
     server: String,
     room: String,
     name: String,
     mode: TransmitMode,
 ) -> Result<CallStatus, String> {
+    join_call(
+        &app,
+        CallOptions {
+            base: server,
+            room,
+            name,
+            mode,
+        },
+    )
+    .await
+}
+
+/// Opens the devices, joins the room, and wires everything that watches a call.
+///
+/// Behind both ways in: the window's button, and the room named in
+/// [`AUTOJOIN_ENV`].
+async fn join_call(app: &AppHandle, options: CallOptions) -> Result<CallStatus, String> {
+    let state = app.state::<CurrentCall>();
     let mut current = state.call.lock().await;
     if current.is_some() {
         return Err("already in a call".to_owned());
     }
 
+    let room = options.room.clone();
     let (microphone, speakers) = hardware::open().map_err(|error| error.to_string())?;
 
     let call = Call::join(
-        CallOptions {
-            base: server,
-            room: room.clone(),
-            name,
-            mode,
-        },
+        options,
         Box::new(microphone),
         Arc::new(speakers) as Arc<dyn AudioSink>,
     )
@@ -235,10 +259,9 @@ async fn join_room(
 
     // Watch receivers, not the call: these outlive `leave_room` taking the
     // call apart, and they end on their own when its state is dropped.
-    let app_for_hotkey = app.clone();
     tauri::async_runtime::spawn(push_roster(app.clone(), call.roster()));
     tauri::async_runtime::spawn(push_speaking(app.clone(), call.speaking()));
-    tauri::async_runtime::spawn(push_state(app, call.state(), call.self_id_watch()));
+    tauri::async_runtime::spawn(push_state(app.clone(), call.state(), call.self_id_watch()));
     *current = Some(call);
     // A fresh call is unmuted and undeafened, whatever the last one ended as.
     state.controls.send_replace(Controls {
@@ -247,7 +270,7 @@ async fn join_room(
         deafened: false,
     });
     drop(current);
-    refresh_hotkey(&app_for_hotkey).await;
+    refresh_hotkey(app).await;
 
     Ok(status)
 }
@@ -441,6 +464,39 @@ fn client_info() -> ClientInfo {
     ClientInfo::current()
 }
 
+/// Joins the room named in [`AUTOJOIN_ENV`], if there is one.
+///
+/// Deliberately not waiting for the webview: the microphone, the transport and
+/// the room have nothing to do with a window, and a cold start that waited for
+/// one would be measuring the wrong thing (task 4.4). The window catches up on
+/// its own — the roster and health events are already flowing by the time it
+/// subscribes.
+async fn autojoin(app: AppHandle, room: String, since_start: Instant) {
+    println!("autojoin starting at {} ms", millis(since_start));
+    let options = CallOptions {
+        base: DEFAULT_SERVER.to_owned(),
+        room,
+        name: "coldstart".to_owned(),
+        // Open, not push-to-talk: nobody is holding a key in a scripted run.
+        mode: TransmitMode::Open,
+    };
+
+    match join_call(&app, options).await {
+        Ok(status) => println!(
+            "autojoined {} as {} at {} ms",
+            status.room,
+            status.self_id,
+            millis(since_start)
+        ),
+        Err(error) => eprintln!("autojoin failed: {error}"),
+    }
+}
+
+/// Whole milliseconds since the app started running, for the startup marks.
+fn millis(since_start: Instant) -> u128 {
+    since_start.elapsed().as_millis()
+}
+
 /// Forwards every roster change to the webview until the call ends.
 async fn push_roster(app: AppHandle, mut roster: watch::Receiver<Vec<Participant>>) {
     loop {
@@ -535,8 +591,12 @@ async fn push_state(
 /// Panics if the webview host cannot be created — there is no useful degraded
 /// mode for a windowless GUI client.
 pub fn run() {
+    // Taken before anything else this process does, so the marks the autojoin
+    // prints are measured from the earliest point Rust code owns (task 4.4).
+    let since_start = Instant::now();
+
     tauri::Builder::default()
-        .setup(|app| {
+        .setup(move |app| {
             app.manage(CurrentCall::default());
             app.manage(tray::Tray::default());
 
@@ -549,6 +609,14 @@ pub fn run() {
 
             let controls = app.state::<CurrentCall>().controls.subscribe();
             tauri::async_runtime::spawn(push_controls(app.handle().clone(), controls));
+
+            if let Ok(room) = std::env::var(AUTOJOIN_ENV) {
+                // How much of a cold start is gone before any of this runs is
+                // the first thing to know about it: `setup` happens after the
+                // window and its webview exist.
+                println!("setup at {} ms", millis(since_start));
+                tauri::async_runtime::spawn(autojoin(app.handle().clone(), room, since_start));
+            }
             Ok(())
         })
         .on_window_event(tray::window_event)

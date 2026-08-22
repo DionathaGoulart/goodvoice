@@ -373,9 +373,28 @@ Goal: two clients talking through the SFU. Riskiest phase — spikes first.
   be installed.
   **Not verified — the DoD itself:** the key held over a running fullscreen
   game, and the game still receiving it. docs/testing/hotkey.md, steps 1–5.
-- [ ] **4.4 [WIN] Cold-start budget** — measure app-launch → audible-in-room; must
+- [x] **4.4 [WIN] Cold-start budget** — measure app-launch → audible-in-room; must
   be <3 s. Optimize (lazy UI, parallel join+audio-init) until it is.
   DoD: measurement in DR, budget met. Verify: scripted timing run, 5-run median.
+  **Met: 2692 ms median of five runs, 308 ms inside the budget.** It started at
+  9.3 s. `bin/coldstart` is the harness — it launches the real app and stops
+  the clock when a client already in the room decodes its first frame, so the
+  number covers process start, WebView2, the devices, the join, ICE, DTLS, the
+  SFU and the far end's subscribe. Nobody clicks anything: the app joins the
+  room named in `GOODVOICE_AUTOJOIN`.
+  Where the 6.6 s went, and what took it out (DR-19): **ICE gathering was 1.5 s
+  of it and is now 40 ms** — it stops once there is a direct path and one
+  fallback, instead of waiting out all six of Cloudflare's TURN ports for
+  fallbacks it will never use. A renegotiation used to pay a whole quiet window
+  again for an answer that cannot change; it does not now. The roster socket
+  and the peer connection are opened together rather than one after the other.
+  Two of the optimisations the task suggested were measured and refused:
+  opening the audio devices takes 72 ms, so there is nothing to parallelise,
+  and the window is already up 320 ms in, so a lazy UI would be racing
+  something that is not on the path.
+  Verified: five runs, all five heard, on the DR-12 machine against the live
+  deploy — and `rtc-spike`, `reconnect-drill` and `latency` all still pass on
+  the same build, because the gathering rule decides what goes in every SDP.
 - [ ] **4.5 [WIN] Idle CPU/RAM budget verification** — 30-min idle-in-room soak:
   CPU <2%, RAM ≤120 MB.
   DoD: numbers in DR, budgets met (or DR explains the gap + fix tasks added).
@@ -1541,3 +1560,96 @@ is which:
   keyboard everywhere, not just here.
 - Key repeat is filtered to the two edges. Holding a key would otherwise say
   "start talking" fifty times a second.
+
+### DR-19: the second and a half of ICE nobody was using (2026-08-22)
+
+**Context.** Task 4.4: launch to audible in under three seconds (prd.md §4).
+The first measurement was **9.3 s** in a debug build and **7.24 s** in release,
+so this was never going to be a matter of shaving.
+
+**The harness.** `bin/coldstart` launches the real app and stops the clock when
+a second client — already in the room, listening — decodes the app's first
+frame. One clock, one process boundary, and a real far end, so the number
+covers everything a person waits through: process start, WebView2, the audio
+devices, the room join, ICE, DTLS, the SFU, and the other client's subscribe.
+Nobody clicks: the app joins the room named in `GOODVOICE_AUTOJOIN`, which is
+also the shape task 6.2's `goodvoice://join/<room>` link will need.
+
+`GOODVOICE_TRACE_JOIN=1` makes a join print where its own time went. That is
+what turned this from a number into a list:
+
+```
+setup at 320 ms          process, Tauri, WebView2 — the window is already up
+join room at 530 ms      HTTPS to the Worker: the room, the SFU session, the ICE servers
+join gather at 1520 ms   ICE
+join published at 430 ms the SFU accepting the track
+join connection at 480 ms DTLS
+```
+
+**The finding.** Gathering was the single biggest item, and almost all of it was
+waiting for candidates that would never be used. Cloudflare hands out six TURN
+URLs — one relay on six ports, so a firewall that blocks one lets another
+through — and webrtc-rs allocates on all of them. The quiet-window rule from
+DR-14 then waited for the last of them to finish. **What ICE actually needs is
+one direct path and one fallback**; the other five relays are more fallbacks of
+a kind already in hand, and only one of them is ever used.
+
+**Four changes.**
+
+1. **Gathering stops at `enough`** — one server-reflexive candidate and one
+   relay. The quiet window is still there for networks where one of those never
+   arrives. **1520 ms → 41 ms.**
+2. **The quiet window is 750 ms, not 2 s** (DR-14's value). A server-reflexive
+   candidate is one round trip and a relay is an allocation and an
+   authentication; a straggler at three quarters of a second is not coming.
+3. **A gathering that has settled once is not waited on again.** Nothing here
+   restarts ICE, so every renegotiation — one per track subscribed — was paying
+   a whole window for an answer that could not have changed.
+4. **The roster socket and the peer connection are opened together.** Both hang
+   off the join response and neither waits on the other; serially they were two
+   TLS handshakes end to end.
+
+**Measurement, five runs, release, on the DR-12 machine against the live
+deploy:**
+
+```
+  launch → heard in the room      min 2498   median 2692   max 2762 ms
+  of which this client's own half min 1899   median 1981   max 2124 ms
+  and 711 ms waiting for the other client to subscribe
+
+WITHIN BUDGET, with 308 ms to spare.
+```
+
+Five runs of five were heard. Before these changes, one run in three produced
+nothing at all within 45 s — the pull side kept being told *the publisher never
+started sending* while the publisher was still gathering. Making the publisher
+fast appears to have taken that with it, which is a fix that was not aimed at
+anything.
+
+**Two optimisations the task suggested, measured and refused.**
+
+- *Parallel audio-init.* Opening the devices takes **72 ms**
+  (`bin/audio-spike` prints it). There is nothing there to overlap.
+- *Lazy UI.* `setup` runs **320 ms** in, with the window already created. The
+  autojoin does not wait for the webview and never did, so building the window
+  later would be racing something that is not on the path. Worth at most a
+  fraction of that 320 ms, and it costs the app its shape.
+
+**What is left, if the budget ever tightens.** Three server round trips —
+the room join (530 ms), the track publish (430 ms) and DTLS (480 ms) — and the
+far end's subscribe (711 ms). None is client-side work; they are the network
+and Cloudflare. The subscribe is the one with room in it: a client learns about
+a new publisher from the roster and then asks for the track, and DR-14 measured
+that path taking seconds when it goes wrong.
+
+**Consequences.**
+
+- The gathering rule decides what goes into **every** SDP, so it is regression
+  tested by everything: `rtc-spike`, `reconnect-drill` and `latency` were all
+  re-run on the same build and all pass (the mouth-to-ear median came out at
+  40.7 ms, against DR-14's 41.4 ms).
+- `GOODVOICE_AUTOJOIN` joins without a window. Task 4.5's soak needs it too.
+- A build script that fails leaves the previous binary in place, and a timing
+  run that greps for `BUILD=` rather than `BUILD=0` will measure it and report
+  the old numbers with a straight face. That happened once here; see the
+  toolchain note about `tauri-winres` losing `RC.EXE`.

@@ -30,6 +30,11 @@ fn delay_load_comctl32() {
     }
 
     println!("cargo:rustc-link-arg=/DELAYLOAD:comctl32.dll");
+    // LNK4199: the flag reaches every target of this crate, and the drills do
+    // not touch a menu, so most of them import nothing from comctl32 at all.
+    // Delay-loading nothing is exactly right there, and not worth a warning
+    // on every build.
+    println!("cargo:rustc-link-arg=/IGNORE:4199");
     // The thunk that does the loading lives here; without it the delayed
     // imports are unresolved symbols.
     println!("cargo:rustc-link-lib=delayimp");
