@@ -1,0 +1,73 @@
+/*
+ * Skins — the geometry layer, selected by `data-skin` on <html> (ui/theme.ts)
+ * and catalogued in ui/appearance.ts.
+ *
+ * A palette says which colours; a skin says what they are painted on. The two
+ * are independent on purpose, so the ten palettes work under either skin
+ * instead of the catalog having to grow twenty entries.
+ *
+ * Cascade: `:root` here carries the retro values, so a document that has not
+ * been stamped yet is already correct. `[data-skin=…]` and `[data-theme=…]`
+ * have equal specificity and both match <html>, so this file must be imported
+ * *after* themes.css — source order is what lets a skin win (styleguide.md §3).
+ *
+ * Every rule in app.css reads these tokens rather than a literal, which is
+ * what keeps law 1 of §3.3 true: no component knows which skin is on.
+ */
+
+/*
+ * Skin `retro` — the neobrutalist look: a thick frame, square corners and a
+ * hard offset shadow with no blur at all.
+ *
+ * Declared on `:root` *and* on the attribute, which is not redundant: `:root`
+ * covers the document before it is stamped, while the attribute selector lets
+ * a subtree opt back into this skin inside a terminal-skinned page — which is
+ * exactly what the appearance screen's preview swatches do. Without it the
+ * retro swatch would inherit the terminal frame and preview the wrong skin.
+ */
+:root,
+[data-skin="retro"] {
+  --frame-border: 2px;
+  --frame-shadow: 4px 4px 0 0 var(--shadow);
+  --frame-shadow-sm: 2px 2px 0 0 var(--shadow);
+
+  --radius-box: 0;
+  --radius-field: 0;
+  --radius-chip: 0;
+
+  /* The focus ring is geometry too: one rule in app.css reads these, so a skin
+     changes the ring by re-declaring a token rather than by adding a second,
+     more specific rule that then has to out-specify the ring's own parts. */
+  --focus-ring-style: solid;
+  --focus-ring-offset: 2px;
+
+  --letter-spacing-title: -0.03em;
+  --scanline-opacity: 0;
+}
+
+/*
+ * Skin `terminal` — a CRT. Hairline frames instead of the thick one, and a
+ * phosphor glow where retro casts its hard shadow. The 1px ring keeps the
+ * frame readable on a palette whose accent barely glows (crimson chalk) while
+ * the blurred halo carries the ones that do (neon matrix, cyber teal).
+ */
+[data-skin="terminal"] {
+  --frame-border: 1px;
+
+  --frame-shadow:
+    0 0 0 1px color-mix(in srgb, var(--accent) 30%, transparent),
+    0 0 18px -4px color-mix(in srgb, var(--accent) 45%, transparent);
+  --frame-shadow-sm:
+    0 0 0 1px color-mix(in srgb, var(--accent) 22%, transparent),
+    0 0 10px -4px color-mix(in srgb, var(--accent) 35%, transparent);
+
+  --radius-box: 0;
+  --radius-field: 0;
+  --radius-chip: 0;
+
+  --focus-ring-style: dashed;
+  --focus-ring-offset: 1px;
+
+  --letter-spacing-title: 0.12em;
+  --scanline-opacity: 1;
+}

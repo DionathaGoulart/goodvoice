@@ -1,0 +1,184 @@
+/*
+ * Theme catalog — every palette the appearance screen offers, assembled from
+ * the variables in palettes.css. Ten themes: four light, six dark.
+ *
+ * They are GoodChat's palettes, colour for colour, so a palette means the same
+ * thing in both apps. What differs is the token names they land on: GoodChat
+ * paints daisyUI's, goodvoice paints its own six (styleguide.md §2.2, and
+ * DR-25 for why this app has no daisyUI to paint).
+ *
+ * `goodvoice-crimson` is declared on `:root` as well as on its attribute, so a
+ * document that has not been stamped yet — the instant before boot() runs — is
+ * already correct. Every other theme must come after it: `:root` and
+ * `[data-theme=…]` have equal specificity and both match <html>, so source
+ * order is what lets the others win.
+ *
+ * Each theme also declares the three hooks the skins consume: `--shadow`,
+ * `--scanline-color` and `--crt-edge`. The theme says with what colour; the
+ * skin says with what shape.
+ *
+ * `--fg-muted` is mixed rather than picked. It is the only token with no
+ * counterpart in GoodChat's set, and inventing ten more hex values for it
+ * would put ten colours outside palettes.css (§2.1).
+ */
+
+:root,
+[data-theme="goodvoice-crimson"] {
+  color-scheme: light;
+  --bg: var(--palette-cream);
+  --surface: var(--palette-white);
+  --border: var(--palette-ink);
+  --fg: var(--palette-ink);
+  --accent: var(--palette-crimson);
+  --accent-content: var(--palette-white);
+  --warn: var(--palette-warning);
+  --error: var(--palette-error);
+  --shadow: var(--palette-ink);
+  --scanline-color: var(--palette-scanline-light);
+  --crt-edge: var(--palette-crt-edge-light);
+}
+
+[data-theme="goodvoice-frost"] {
+  color-scheme: light;
+  --bg: var(--palette-frost-bg);
+  --surface: var(--palette-frost-bg);
+  --border: var(--palette-frost-ink);
+  --fg: var(--palette-frost-ink);
+  --accent: var(--palette-abyss);
+  --accent-content: var(--palette-white);
+  --warn: var(--palette-warning);
+  --error: var(--palette-error);
+  --shadow: var(--palette-abyss);
+  --scanline-color: var(--palette-scanline-light);
+  --crt-edge: var(--palette-crt-edge-light);
+}
+
+[data-theme="goodvoice-forest"] {
+  color-scheme: light;
+  --bg: var(--palette-forest-bg);
+  --surface: var(--palette-forest-bg-raised);
+  --border: var(--palette-forest-ink);
+  --fg: var(--palette-forest-ink);
+  --accent: var(--palette-forest-green);
+  --accent-content: var(--palette-white);
+  --warn: var(--palette-warning);
+  --error: var(--palette-error);
+  --shadow: var(--palette-forest-green);
+  --scanline-color: var(--palette-scanline-light);
+  --crt-edge: var(--palette-crt-edge-light);
+}
+
+[data-theme="goodvoice-sand"] {
+  color-scheme: light;
+  --bg: var(--palette-sand-bg);
+  --surface: var(--palette-sand-bg-raised);
+  --border: var(--palette-sand-ink);
+  --fg: var(--palette-sand-ink);
+  --accent: var(--palette-copper);
+  --accent-content: var(--palette-white);
+  --warn: var(--palette-warning);
+  --error: var(--palette-error);
+  --shadow: var(--palette-copper);
+  --scanline-color: var(--palette-scanline-light);
+  --crt-edge: var(--palette-crt-edge-light);
+}
+
+[data-theme="goodvoice-rose"] {
+  color-scheme: dark;
+  --bg: var(--palette-noir);
+  --surface: var(--palette-noir-raised);
+  --border: var(--palette-cream);
+  --fg: var(--palette-cream);
+  --accent: var(--palette-rose);
+  --accent-content: var(--palette-white);
+  --warn: var(--palette-warning-soft);
+  --error: var(--palette-error-soft);
+  --shadow: var(--palette-rose);
+  --scanline-color: var(--palette-scanline-dark);
+  --crt-edge: var(--palette-crt-edge-dark);
+}
+
+[data-theme="goodvoice-gold"] {
+  color-scheme: dark;
+  --bg: var(--palette-graphite);
+  --surface: var(--palette-graphite);
+  --border: var(--palette-gold);
+  --fg: var(--palette-silver);
+  --accent: var(--palette-gold);
+  --accent-content: var(--palette-white);
+  --warn: var(--palette-warning-soft);
+  --error: var(--palette-error-soft);
+  --shadow: var(--palette-gold);
+  --scanline-color: var(--palette-scanline-dark);
+  --crt-edge: var(--palette-crt-edge-dark);
+}
+
+[data-theme="goodvoice-ember"] {
+  color-scheme: dark;
+  --bg: var(--palette-midnight);
+  --surface: var(--palette-midnight-raised);
+  --border: var(--palette-ember);
+  --fg: var(--palette-mint);
+  --accent: var(--palette-ember);
+  --accent-content: var(--palette-white);
+  --warn: var(--palette-warning-soft);
+  --error: var(--palette-error-soft);
+  --shadow: var(--palette-ember);
+  --scanline-color: var(--palette-scanline-dark);
+  --crt-edge: var(--palette-crt-edge-dark);
+}
+
+[data-theme="goodvoice-cyan"] {
+  color-scheme: dark;
+  --bg: var(--palette-cyan-bg);
+  --surface: var(--palette-cyan-bg-raised);
+  --border: var(--palette-cyan);
+  --fg: var(--palette-cyan-mist);
+  --accent: var(--palette-cyan);
+  --accent-content: var(--palette-white);
+  --warn: var(--palette-warning-soft);
+  --error: var(--palette-error-soft);
+  --shadow: var(--palette-cyan);
+  --scanline-color: var(--palette-scanline-dark);
+  --crt-edge: var(--palette-crt-edge-dark);
+}
+
+[data-theme="goodvoice-violet"] {
+  color-scheme: dark;
+  --bg: var(--palette-violet-bg);
+  --surface: var(--palette-violet-bg-raised);
+  --border: var(--palette-violet);
+  --fg: var(--palette-violet-mist);
+  --accent: var(--palette-violet);
+  --accent-content: var(--palette-white);
+  --warn: var(--palette-warning-soft);
+  --error: var(--palette-error-soft);
+  --shadow: var(--palette-violet);
+  --scanline-color: var(--palette-scanline-dark);
+  --crt-edge: var(--palette-crt-edge-dark);
+}
+
+[data-theme="goodvoice-matrix"] {
+  color-scheme: dark;
+  --bg: var(--palette-black);
+  --surface: var(--palette-matrix-bg-raised);
+  --border: var(--palette-matrix-green);
+  --fg: var(--palette-matrix-mist);
+  --accent: var(--palette-matrix-green);
+  --accent-content: var(--palette-matrix-ink);
+  --warn: var(--palette-warning-soft);
+  --error: var(--palette-error-soft);
+  --shadow: var(--palette-matrix-green);
+  --scanline-color: var(--palette-scanline-dark);
+  --crt-edge: var(--palette-crt-edge-dark);
+}
+
+/*
+ * Derived once, after every theme, so each of the ten gets it without
+ * restating it. `:root` here would lose to the attribute blocks above; a
+ * separate rule at the end wins on source order instead.
+ */
+:root,
+[data-theme] {
+  --fg-muted: color-mix(in srgb, var(--fg) 55%, var(--bg));
+}

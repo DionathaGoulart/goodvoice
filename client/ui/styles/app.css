@@ -1,17 +1,19 @@
+/*
+ * Order matters and is the whole cascade (styleguide.md §3): the raw colours,
+ * then the ten themes that name them, then the skin that decides what shape
+ * they are painted in, then the one skin that has more to say than three
+ * tokens. `[data-theme]` and `[data-skin]` have equal specificity and both
+ * match <html>, so a skin wins by coming later in the file, not by being more
+ * specific.
+ */
 @import "./palettes.css";
+@import "./themes.css";
+@import "./skins.css";
+@import "./skin-terminal.css";
 
 :root {
-  --bg: var(--palette-void);
-  --surface: var(--palette-shell);
-  --border: var(--palette-line);
-  --fg: var(--palette-ink);
-  --fg-muted: var(--palette-muted);
-  --accent: var(--palette-signal);
-
   --font-mono:
     "JetBrains Mono", ui-monospace, SFMono-Regular, "SF Mono", Menlo, monospace;
-
-  color-scheme: dark;
 }
 
 * {
@@ -37,12 +39,16 @@ body {
 
 ::selection {
   background: var(--accent);
-  color: var(--bg);
+  color: var(--accent-content);
 }
 
+/*
+ * Always visible, always the accent; a skin may change the line's style and
+ * how far it sits from the element, never whether it is there (§2.4).
+ */
 :focus-visible {
-  outline: 2px solid var(--accent);
-  outline-offset: 2px;
+  outline: 2px var(--focus-ring-style) var(--accent);
+  outline-offset: var(--focus-ring-offset);
 }
 
 .shell {
@@ -65,7 +71,7 @@ body {
 .wordmark {
   font-size: 28px;
   font-weight: 800;
-  letter-spacing: -0.03em;
+  letter-spacing: var(--letter-spacing-title);
   margin: 0;
 }
 
@@ -81,6 +87,89 @@ body {
   margin: 0;
 }
 
+/*
+ * Three columns so the wordmark stays centred on the window and not on the
+ * space left over beside the button. An absolutely positioned button did keep
+ * it centred, but it also sat *on top* of it — and how wide that button is
+ * depends on the skin, so there is no padding that would be right for both.
+ * The empty first column is what buys the symmetry back.
+ */
+.masthead {
+  align-items: start;
+  display: grid;
+  grid-template-columns: 1fr auto 1fr;
+}
+
+.masthead > .wordmark,
+.masthead > .tagline {
+  grid-column: 2;
+  justify-self: center;
+}
+
+.appearance-open {
+  align-self: start;
+  box-shadow: none;
+  font-size: 10px;
+  grid-column: 3;
+  grid-row: 1;
+  justify-self: end;
+  padding: 4px 7px;
+}
+
+/* --- appearance ---------------------------------------------------------- */
+
+.swatches {
+  display: grid;
+  grid-template-columns: repeat(2, 1fr);
+  gap: 8px;
+}
+
+/*
+ * A palette previewing itself. The three custom properties come from the
+ * catalog (ui/appearance.ts) and point at the same `--palette-*` variables the
+ * theme is built from, so the preview cannot drift from what it previews.
+ */
+.swatch {
+  align-items: center;
+  background: var(--swatch-bg);
+  border: var(--frame-border) solid var(--border);
+  border-radius: var(--radius-field);
+  color: var(--swatch-fg);
+  cursor: pointer;
+  display: flex;
+  font-family: inherit;
+  font-size: 11px;
+  gap: 7px;
+  padding: 8px 9px;
+  text-align: left;
+  transition: border-color 140ms ease-out;
+}
+
+.swatch:hover {
+  border-color: var(--swatch-acc);
+}
+
+/* The chosen one is ringed in its own accent, not the current theme's: the
+   ring has to read against the swatch it is drawn on. */
+.swatch-picked {
+  border-color: var(--swatch-acc);
+  box-shadow: var(--frame-shadow-sm);
+}
+
+.swatch-acc {
+  background: var(--swatch-acc);
+  border-radius: var(--radius-chip);
+  flex: 0 0 auto;
+  height: 12px;
+  width: 12px;
+}
+
+.swatch-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 /* --- panels -------------------------------------------------------------- */
 
 .panel {
@@ -88,8 +177,9 @@ body {
   flex-direction: column;
   gap: 14px;
   background: var(--surface);
-  border: 1px solid var(--border);
-  border-radius: 10px;
+  border: var(--frame-border) solid var(--border);
+  border-radius: var(--radius-box);
+  box-shadow: var(--frame-shadow);
   padding: 18px 16px;
 }
 
@@ -110,8 +200,8 @@ body {
 
 .field-input {
   background: var(--bg);
-  border: 1px solid var(--border);
-  border-radius: 6px;
+  border: var(--frame-border) solid var(--border);
+  border-radius: var(--radius-field);
   color: var(--fg);
   font-family: inherit;
   font-size: 14px;
@@ -138,8 +228,9 @@ body {
 
 .action {
   background: var(--bg);
-  border: 1px solid var(--border);
-  border-radius: 6px;
+  border: var(--frame-border) solid var(--border);
+  border-radius: var(--radius-field);
+  box-shadow: var(--frame-shadow-sm);
   color: var(--fg);
   cursor: pointer;
   font-family: inherit;
@@ -171,7 +262,7 @@ body {
 .action-primary {
   background: var(--accent);
   border-color: var(--accent);
-  color: var(--bg);
+  color: var(--accent-content);
   font-weight: 700;
 }
 
@@ -180,16 +271,21 @@ body {
   filter: brightness(1.08);
 }
 
+/*
+ * Mixed from the page rather than set to `--border`, which under these themes
+ * is the strong frame colour: a disabled button painted in it reads as the
+ * loudest thing on the panel, which is the opposite of disabled.
+ */
 .action-primary:disabled {
-  background: var(--border);
-  border-color: var(--border);
+  background: color-mix(in srgb, var(--fg-muted) 25%, var(--bg));
+  border-color: color-mix(in srgb, var(--fg-muted) 40%, var(--bg));
   color: var(--fg-muted);
 }
 
 /* Toggled on: mute and deafen are states, so they read as states. */
 .action-on {
-  border-color: var(--palette-warn);
-  color: var(--palette-warn);
+  border-color: var(--warn);
+  color: var(--warn);
 }
 
 /*
@@ -203,11 +299,11 @@ body {
 }
 
 .action-leave {
-  color: var(--palette-error);
+  color: var(--error);
 }
 
 .action-leave:hover:not(:disabled) {
-  border-color: var(--palette-error);
+  border-color: var(--error);
 }
 
 .controls {
@@ -248,8 +344,8 @@ body {
 }
 
 .roster-tag {
-  border: 1px solid var(--border);
-  border-radius: 4px;
+  border: var(--frame-border) solid var(--border);
+  border-radius: var(--radius-chip);
   color: var(--fg-muted);
   font-size: 10px;
   letter-spacing: 0.08em;
@@ -298,12 +394,12 @@ body {
 }
 
 .notice-error {
-  color: var(--palette-error);
+  color: var(--error);
 }
 
 /* A call that dropped is trying, not dead — the colour says "wait", not "gone". */
 .notice-warn {
-  color: var(--palette-warn);
+  color: var(--warn);
 }
 
 /* Entrance: fade + short slide, ease-out, zero overshoot (styleguide.md §2.4). */

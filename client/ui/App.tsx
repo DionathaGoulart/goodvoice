@@ -9,6 +9,15 @@ import {
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 
+import {
+  DARK_PALETTES,
+  LIGHT_PALETTES,
+  SKINS,
+  type ModePreference,
+  type PaletteOption,
+} from "./appearance";
+import { currentMode, currentTheme, pickPalette, prefs, update } from "./theme";
+
 /** Mirrors `ClientInfo` in `src-tauri/src/lib.rs`. */
 interface ClientInfo {
   name: string;
@@ -117,6 +126,17 @@ const MODES: { id: TransmitMode; label: string; hint: string }[] = [
 ];
 
 /**
+ * The three answers to "which palette", in the order they give up control:
+ * two that pin it and one that hands it to the operating system. `null` is a
+ * real choice, not a missing one — see theme.ts.
+ */
+const MODE_CHOICES: { id: ModePreference; label: string }[] = [
+  { id: "light", label: "light" },
+  { id: "dark", label: "dark" },
+  { id: null, label: "system" },
+];
+
+/**
  * Where the transmit settings live between runs.
  *
  * The webview's own storage, because this window is the only thing that reads
@@ -170,6 +190,9 @@ const App: Component = () => {
     localStorage.getItem(TALK_KEY_STORE) ?? DEFAULT_TALK_KEY,
   );
   const [rebinding, setRebinding] = createSignal(false);
+  // Which screen is showing. Not part of the call's state: it survives joining
+  // and leaving, and a call carries on underneath it.
+  const [appearance, setAppearance] = createSignal(false);
   // Whether the key is heard from anywhere or only in this window. The two
   // look identical until somebody is inside a game, which is the one place it
   // matters, so the window says which one it has.
@@ -423,6 +446,101 @@ const App: Component = () => {
   };
 
   /**
+   * Palette, skin and mode. Its own screen rather than a section on the other
+   * two: it is opened rarely and read carefully, which is the opposite of
+   * everything else in this window, and the roster has no room to spare.
+   *
+   * Only the current mode's palettes are offered, so a click means "this one,
+   * for this mode" and can never silently rewrite the other mode's choice.
+   */
+  const Appearance = () => (
+    <section class="panel animate-enter">
+      <div class="field">
+        <span class="field-label appearance-label">mode</span>
+        <div class="modes">
+          <For each={MODE_CHOICES}>
+            {(choice) => (
+              <button
+                class="action"
+                classList={{ "action-picked": prefs().mode === choice.id }}
+                type="button"
+                aria-pressed={prefs().mode === choice.id}
+                onClick={() => update({ mode: choice.id })}
+              >
+                {choice.label}
+              </button>
+            )}
+          </For>
+        </div>
+      </div>
+
+      <div class="field">
+        <span class="field-label appearance-label">palette</span>
+        <div class="swatches">
+          <For each={currentMode() === "dark" ? DARK_PALETTES : LIGHT_PALETTES}>
+            {(palette) => <Swatch palette={palette} />}
+          </For>
+        </div>
+      </div>
+
+      <div class="field">
+        <span class="field-label appearance-label">skin</span>
+        <div class="controls">
+          <For each={SKINS}>
+            {(skin) => (
+              <button
+                class="action"
+                classList={{ "action-picked": prefs().skin === skin.id }}
+                type="button"
+                aria-pressed={prefs().skin === skin.id}
+                onClick={() => update({ skin: skin.id })}
+              >
+                {skin.label}
+              </button>
+            )}
+          </For>
+        </div>
+        <p class="notice">
+          {SKINS.find((skin) => skin.id === prefs().skin)?.hint}
+        </p>
+      </div>
+
+      <button
+        class="action action-primary"
+        type="button"
+        onClick={() => setAppearance(false)}
+      >
+        done
+      </button>
+    </section>
+  );
+
+  /**
+   * One palette, previewed in its own colours. The swatch reads the same
+   * `--palette-*` variables the theme is built from, so a preview cannot drift
+   * from the thing it previews (styleguide.md §2.1).
+   */
+  const Swatch = (props: { palette: PaletteOption }) => (
+    <button
+      class="swatch"
+      classList={{ "swatch-picked": currentTheme() === props.palette.id }}
+      type="button"
+      title={props.palette.label}
+      aria-label={props.palette.label}
+      aria-pressed={currentTheme() === props.palette.id}
+      style={{
+        "--swatch-bg": props.palette.bg,
+        "--swatch-acc": props.palette.acc,
+        "--swatch-fg": props.palette.fg,
+      }}
+      onClick={() => pickPalette(props.palette.id)}
+    >
+      <span class="swatch-acc" aria-hidden="true" />
+      <span class="swatch-name">{props.palette.label}</span>
+    </button>
+  );
+
+  /**
    * How the microphone is gated. On both panels: someone who wants push to
    * talk wants it *before* they join, and someone who guessed wrong wants it
    * without leaving.
@@ -470,6 +588,11 @@ const App: Component = () => {
 
   return (
     <main class="shell">
+      {/* The CRT bezel of the terminal skin. Always in the markup and drawn
+          only by that skin's stylesheet — no component branches on a skin
+          (styleguide.md §3.3). */}
+      <div class="crt" aria-hidden="true" />
+
       <header class="masthead animate-enter">
         <h1 class="wordmark">
           good<span class="wordmark-accent">voice</span>
@@ -477,138 +600,151 @@ const App: Component = () => {
         <Show when={info()} fallback={<p class="tagline">starting…</p>}>
           {(loaded) => <p class="tagline">v{loaded().version}</p>}
         </Show>
+        <button
+          class="action appearance-open"
+          type="button"
+          aria-pressed={appearance()}
+          onClick={() => setAppearance(!appearance())}
+        >
+          {appearance() ? "back" : "appearance"}
+        </button>
       </header>
 
-      <Show
-        when={call()}
-        fallback={
-          <form class="panel animate-enter" onSubmit={join}>
-            <label class="field">
-              <span class="field-label">room</span>
-              <input
-                class="field-input"
-                value={room()}
-                onInput={(event) => setRoom(event.currentTarget.value)}
-                placeholder="squad-night"
-                autocapitalize="none"
-                autocomplete="off"
-                spellcheck={false}
-                disabled={joining()}
-              />
-            </label>
+      <Show when={!appearance()} fallback={<Appearance />}>
+        <Show
+          when={call()}
+          fallback={
+            <form class="panel animate-enter" onSubmit={join}>
+              <label class="field">
+                <span class="field-label">room</span>
+                <input
+                  class="field-input"
+                  value={room()}
+                  onInput={(event) => setRoom(event.currentTarget.value)}
+                  placeholder="squad-night"
+                  autocapitalize="none"
+                  autocomplete="off"
+                  spellcheck={false}
+                  disabled={joining()}
+                />
+              </label>
 
-            <label class="field">
-              <span class="field-label">name</span>
-              <input
-                class="field-input"
-                value={name()}
-                onInput={(event) => setName(event.currentTarget.value)}
-                placeholder="anon"
-                autocomplete="off"
-                maxlength={32}
-                disabled={joining()}
-              />
-            </label>
+              <label class="field">
+                <span class="field-label">name</span>
+                <input
+                  class="field-input"
+                  value={name()}
+                  onInput={(event) => setName(event.currentTarget.value)}
+                  placeholder="anon"
+                  autocomplete="off"
+                  maxlength={32}
+                  disabled={joining()}
+                />
+              </label>
 
-            <TransmitSettings />
+              <TransmitSettings />
 
-            <button
-              class="action action-primary"
-              type="submit"
-              disabled={!canJoin()}
-            >
-              {joining() ? "joining…" : "join"}
-            </button>
-
-            <Show when={error()}>
-              {(reason) => <p class="notice notice-error">{reason()}</p>}
-            </Show>
-            <Show
-              when={!error() && room() !== "" && !ROOM_CODE.test(room().trim())}
-            >
-              <p class="notice">
-                4–24 characters, letters, numbers and hyphens only
-              </p>
-            </Show>
-          </form>
-        }
-      >
-        {(joined) => (
-          <section class="panel animate-enter">
-            <p class="tagline">{joined().room}</p>
-
-            <Show when={reconnecting()}>
-              {(attempt) => (
-                <p class="notice notice-warn" role="status">
-                  reconnecting… (attempt {attempt()})
-                </p>
-              )}
-            </Show>
-
-            <ul class="roster">
-              <For
-                each={roster()}
-                fallback={<li class="roster-empty">just you</li>}
+              <button
+                class="action action-primary"
+                type="submit"
+                disabled={!canJoin()}
               >
-                {(peer) => (
-                  <li class="roster-row">
-                    {/* Muted wins over talking: their last few buffered
+                {joining() ? "joining…" : "join"}
+              </button>
+
+              <Show when={error()}>
+                {(reason) => <p class="notice notice-error">{reason()}</p>}
+              </Show>
+              <Show
+                when={
+                  !error() && room() !== "" && !ROOM_CODE.test(room().trim())
+                }
+              >
+                <p class="notice">
+                  4–24 characters, letters, numbers and hyphens only
+                </p>
+              </Show>
+            </form>
+          }
+        >
+          {(joined) => (
+            <section class="panel animate-enter">
+              <p class="tagline">{joined().room}</p>
+
+              <Show when={reconnecting()}>
+                {(attempt) => (
+                  <p class="notice notice-warn" role="status">
+                    reconnecting… (attempt {attempt()})
+                  </p>
+                )}
+              </Show>
+
+              <ul class="roster">
+                <For
+                  each={roster()}
+                  fallback={<li class="roster-empty">just you</li>}
+                >
+                  {(peer) => (
+                    <li class="roster-row">
+                      {/* Muted wins over talking: their last few buffered
                         frames can still be playing when the flag arrives, and
                         a dot that says both at once says neither. */}
-                    <span
-                      class="presence"
-                      classList={{
-                        "presence-quiet": peer.muted,
-                        "presence-live": !peer.muted && speaking().has(peer.id),
-                      }}
-                      aria-hidden="true"
-                    />
-                    <span class="roster-name">{peer.name}</span>
-                    <Show when={peer.id === joined().self_id}>
-                      <span class="roster-tag">you</span>
-                    </Show>
-                    <Show when={peer.muted}>
-                      <span class="roster-tag">muted</span>
-                    </Show>
-                    {/* Two different facts: muted is "cannot be heard",
+                      <span
+                        class="presence"
+                        classList={{
+                          "presence-quiet": peer.muted,
+                          "presence-live":
+                            !peer.muted && speaking().has(peer.id),
+                        }}
+                        aria-hidden="true"
+                      />
+                      <span class="roster-name">{peer.name}</span>
+                      <Show when={peer.id === joined().self_id}>
+                        <span class="roster-tag">you</span>
+                      </Show>
+                      <Show when={peer.muted}>
+                        <span class="roster-tag">muted</span>
+                      </Show>
+                      {/* Two different facts: muted is "cannot be heard",
                         deafened is "cannot hear you". Someone deafened is
                         still able to talk, so the roster says both. */}
-                    <Show when={peer.deafened}>
-                      <span class="roster-tag">deafened</span>
-                    </Show>
-                  </li>
-                )}
-              </For>
-            </ul>
+                      <Show when={peer.deafened}>
+                        <span class="roster-tag">deafened</span>
+                      </Show>
+                    </li>
+                  )}
+                </For>
+              </ul>
 
-            <div class="controls">
-              <button
-                class="action"
-                classList={{ "action-on": muted() }}
-                type="button"
-                onClick={toggleMute}
-                aria-pressed={muted()}
-              >
-                {muted() ? "unmute" : "mute"}
+              <div class="controls">
+                <button
+                  class="action"
+                  classList={{ "action-on": muted() }}
+                  type="button"
+                  onClick={toggleMute}
+                  aria-pressed={muted()}
+                >
+                  {muted() ? "unmute" : "mute"}
+                </button>
+                <button
+                  class="action"
+                  classList={{ "action-on": deafened() }}
+                  type="button"
+                  onClick={toggleDeafen}
+                  aria-pressed={deafened()}
+                >
+                  {deafened() ? "undeafen" : "deafen"}
+                </button>
+              </div>
+
+              <TransmitSettings />
+
+              <button class="action action-leave" type="button" onClick={leave}>
+                leave
               </button>
-              <button
-                class="action"
-                classList={{ "action-on": deafened() }}
-                type="button"
-                onClick={toggleDeafen}
-                aria-pressed={deafened()}
-              >
-                {deafened() ? "undeafen" : "deafen"}
-              </button>
-            </div>
-
-            <TransmitSettings />
-
-            <button class="action action-leave" type="button" onClick={leave}>
-              leave
-            </button>
-          </section>
-        )}
+            </section>
+          )}
+        </Show>
       </Show>
     </main>
   );

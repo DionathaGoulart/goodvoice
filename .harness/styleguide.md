@@ -218,6 +218,30 @@ adopts the *rules* (single-source color tokens, no bounce/overshoot entrances,
 `prefers-reduced-motion`, visible `:focus-visible`, no hardcoded hex outside the
 palette file), not GoodChat's file layout. Everything below is GoodVoice law.
 
+### Where the shared base lives here (DR-25)
+
+The whole of §2 and §3 is implemented, with the same cascade and the same
+contract. Only the mechanism differs — there is no Tailwind and no daisyUI in
+this client, so §2.2's `@plugin "daisyui/theme"` blocks and §4's recipe do not
+apply. A theme is plain custom properties; the ten palettes are the same ten.
+
+| §  | GoodChat | GoodVoice |
+|---|---|---|
+| 2.1 | `app/src/styles/palettes.css` | `client/ui/styles/palettes.css` — copied verbatim, so a colour cannot drift between the apps |
+| 2.2 | daisyUI themes, `goodchat-*` | `client/ui/styles/themes.css`, `goodvoice-*`; each declares `--bg --surface --border --fg --accent --accent-content --warn --error` plus §2.2's three skin hooks |
+| 3.1 | `app/src/styles/skins.css` | `client/ui/styles/skins.css`, same three frame tokens, plus `--radius-box/-field/-chip` and the focus-ring pair |
+| 3.2 | GoodChat's hook classes | this app's own: `crt` · `shell` · `masthead` / `wordmark` / `wordmark-accent` / `tagline` · `panel` · `field` / `field-label` / `field-input` · `action` (+ `-primary` `-leave` `-on` `-picked`) · `controls` / `modes` · `roster` / `roster-row` / `roster-name` / `roster-tag` / `roster-empty` · `presence` (+ `-quiet` `-live`) · `notice` (+ `-error` `-warn`) · `swatch` / `swatch-acc` / `swatch-name` · `appearance-open` / `appearance-label` |
+| — | `hooks/useTheme.ts` | `client/ui/theme.ts` (Solid signal) and `client/ui/appearance.ts` (the catalogs) |
+
+Two rules §3.3 states are law here too, and one addition:
+
+3. **Decorative `content` carries its own alternative text.** Every
+   `content: "…"` in a skin is written `content: "…" / ""`. Generated content
+   is part of an element's accessible name, so a skin that brackets its buttons
+   renames them for anyone using a screen reader — `[LIGHT]` instead of
+   `light`. The empty string after the slash is what keeps the decoration
+   drawn and unannounced. See DR-25 for how this was found.
+
 ### Rust conventions (client, `client/src-tauri`)
 
 - **Toolchain:** stable Rust. `rustfmt` with default config — CI fails on

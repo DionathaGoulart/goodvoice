@@ -2311,3 +2311,72 @@ reader does not have to re-derive it.
 - Not verified: the echo test is synthetic and perfect, which is the hard case
   for cancellation but not the real one. A person on speakers, in a room, is
   what the task's DoD asks for and what is still owed.
+
+### DR-25: the same appearance system, without the framework it was written for (2026-08-22)
+
+**Context.** goodvoice's style guide has always described GoodChat's appearance
+system — ten palettes on `data-theme`, two skins on `data-skin`, the three
+frame tokens, the hook classes. It described something the client did not have:
+one hard-coded dark palette and no skin at all. This implements it.
+
+**Ported, not copied.** The two apps do not share a stack. GoodChat is React
+with Tailwind 4 and daisyUI 5, and its palettes *are* daisyUI themes
+(`@plugin "daisyui/theme"`); its skins target daisyUI's component classes.
+goodvoice is SolidJS with 329 lines of hand-written CSS over 23 class names.
+So:
+
+| Layer | What happened |
+|---|---|
+| `palettes.css` | Copied verbatim. It is the shared catalog, and §2.1 exists so a colour cannot drift between the two apps |
+| `themes.css` | Rewritten. Ten blocks of plain custom properties, landing on goodvoice's six semantic tokens instead of daisyUI's twenty |
+| `skins.css` | Rewritten. Same three frame tokens, same cascade rule, goodvoice's geometry |
+| `skin-terminal.css` | Rewritten against goodvoice's own class names — 200 lines where GoodChat needs 745, because there is no thread, composer or tile here |
+| `useTheme.ts` | Rewritten as `theme.ts`: a Solid signal, and one source of truth instead of two, because goodvoice has no account to sync against |
+
+**The one deliberate deviation: no daisyUI.** §2.2 and §4 of the style guide
+name it. Adding Tailwind and daisyUI to theme 23 class names would be
+disproportionate on its own; it is worse than that here, because task 4.6 spent
+a whole task getting the idle client's webview down to 35.9 MB, and this window
+is destroyed and rebuilt on every trip back from the tray. The contract §3 sets
+out — palettes → themes → skins by source order, three frame tokens, hook
+classes, no component branching on a skin — is what actually matters, and none
+of it needs a framework. Measured cost of the whole feature: the CSS bundle
+goes from about 5 kB to 13.9 kB, 2.98 kB gzipped.
+
+**A real accessibility bug, found by the tooling rather than by reading.**
+Driving the appearance screen through UI Automation to screenshot it, the
+buttons came back named `[LIGHT]`, `[DARK]`, `[SYSTEM]`. The terminal skin
+draws its bracket motif with `::before` / `::after`, and generated content is
+part of an element's accessible name — so a screen reader would have read the
+decoration out loud. The style guide asserts the opposite in as many words
+("on the ::before, so the text a screen reader announces is still just the
+label"), and it was not true.
+
+CSS has the answer and it is one token per rule: `content: "[" / ""` — the
+half after the slash is the alternative text. Every `content` in
+`skin-terminal.css` carries it now, and the names come back clean. **Worth
+knowing for GoodChat, which has the same motif and, going by the same style
+guide sentence, most likely the same bug.**
+
+Two layout defects the screenshots caught, both only under the terminal skin,
+because it is the skin that makes text wider: the appearance button sat on top
+of the wordmark (absolute positioning, and no padding is right for both skins —
+the masthead is a three-column grid now, with an empty first column buying the
+symmetry back), and `[ PUSH TO TALK ]` wrapped with its closing bracket
+stranded on the second line.
+
+**Consequences.**
+
+- Ten palettes × two skins, and a mode that can follow the operating system.
+  The catalogs are `ui/appearance.ts`; the state is `ui/theme.ts`, which paints
+  before the app mounts, from `main.tsx`, so a rebuilt window never flashes the
+  default first.
+- The default is `goodvoice-crimson` / `goodvoice-rose` — GoodChat's, because
+  the ask was to look like it. goodvoice's old void-and-green is closest to
+  `neon matrix`; changing the default back is one constant in `appearance.ts`.
+- The client's identity is no longer a colour. Anything that hard-codes one —
+  the tray icon, the installer artwork (task 6.3), the README's screenshots
+  (6.4) — now has ten backgrounds to look right on.
+- Not verified: the nine palette-and-skin combinations nobody looked at. Four
+  were checked by eye — retro and terminal, each on a light and a dark palette
+  — plus the room panel under terminal. The rest share every rule with those.

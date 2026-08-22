@@ -2,15 +2,87 @@
  * The only file in the repository allowed to contain a raw colour value.
  * Everything else references var(--palette-*) or a theme token derived from it.
  * (styleguide.md §2.1)
+ *
+ * The catalog is GoodChat's, copied verbatim rather than re-picked, so a
+ * palette named the same thing means the same thing in both apps and cannot
+ * drift between them. Both trace back to the Portfolio terminal skin.
  */
 
 :root {
-  --palette-void: #0a0c10;
-  --palette-shell: #12151c;
-  --palette-line: #232833;
-  --palette-ink: #e6e9ef;
-  --palette-muted: #8b94a7;
-  --palette-signal: #4ade80;
-  --palette-warn: #fbbf24;
-  --palette-error: #f87171;
+  /* Neutrals */
+  --palette-cream: #f2efe7; /* light page background */
+  --palette-white: #ffffff; /* light raised surface / content over accent */
+  --palette-black: #000000; /* matrix page background */
+  --palette-ink: #1a0a0a; /* light text + borders */
+  --palette-noir: #121212; /* dark page background */
+  --palette-noir-raised: #1a1a1a; /* dark raised surface */
+  --palette-graphite: #111111; /* gold page background */
+  --palette-silver: #e0e0e0; /* gold text */
+
+  /* Accents */
+  --palette-crimson: #dc143c; /* light default */
+  --palette-rose: #e8729a; /* dark default */
+  --palette-ember: #ff6b45;
+  --palette-gold: #c8a96e;
+
+  /* Frost / abyss family */
+  --palette-frost-bg: #e4f0f6;
+  --palette-frost-ink: #0f172a;
+  --palette-abyss: #0a0f1e;
+
+  /* Forest family */
+  --palette-forest-bg: #eef4ee;
+  --palette-forest-bg-raised: #f5faf5;
+  --palette-forest-ink: #1a2e1a;
+  --palette-forest-green: #2d6a2d;
+
+  /* Sand family */
+  --palette-sand-bg: #f5f0e8;
+  --palette-sand-bg-raised: #fffcf5;
+  --palette-sand-ink: #2a1a0a;
+  --palette-copper: #b56a30;
+
+  /* Midnight / mint family (ember) */
+  --palette-midnight: #0d1117;
+  --palette-midnight-raised: #121a12;
+  --palette-mint: #e0ffe0;
+
+  /* Cyan family */
+  --palette-cyan-bg: #0a0f14;
+  --palette-cyan-bg-raised: #0f1820;
+  --palette-cyan: #00e5ff;
+  --palette-cyan-mist: #e0f4ff;
+
+  /* Violet family */
+  --palette-violet-bg: #0e0a14;
+  --palette-violet-bg-raised: #160f20;
+  --palette-violet: #b47aff;
+  --palette-violet-mist: #ede0ff;
+
+  /* Matrix family */
+  --palette-matrix-bg-raised: #0a140a;
+  --palette-matrix-green: #00ff66;
+  --palette-matrix-mist: #d7ffd7;
+  --palette-matrix-ink: #001a08;
+
+  /* Status — full strength (light themes) */
+  --palette-warning: #d97706;
+  --palette-error: #dc2626;
+
+  /* Status — softened (dark themes) */
+  --palette-warning-soft: #fbbf24;
+  --palette-error-soft: #f87171;
+
+  /* Overlays */
+  --palette-scanline-light: rgba(0, 0, 0, 0.05);
+  --palette-scanline-dark: rgba(0, 0, 0, 0.2);
+
+  /*
+   * CRT vignette of the terminal skin — the darkening at the edges of the
+   * glass. Always black, never the theme's ink: on a dark palette the ink is
+   * the *light* colour, so deriving it from a token would brighten the corners
+   * of exactly the themes the effect exists for.
+   */
+  --palette-crt-edge-light: rgba(0, 0, 0, 0.16);
+  --palette-crt-edge-dark: rgba(0, 0, 0, 0.55);
 }

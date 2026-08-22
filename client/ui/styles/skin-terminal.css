@@ -1,0 +1,231 @@
+/*
+ * Skin `terminal`, beyond the frame tokens — the rules that turn the window
+ * into a CRT. Everything here is CSS: no component knows this skin exists
+ * (styleguide.md §3.3, law 1). The markup carries `.crt` and the hook classes
+ * under every skin; retro simply has nothing to say about them.
+ *
+ * Imported after skins.css, which is imported after themes.css. That order is
+ * what lets a skin win over a theme block that also matches <html>.
+ */
+
+/* --- the glass ----------------------------------------------------------- */
+
+/*
+ * The bezel. Always in the markup, drawn only here — under retro it is not a
+ * hidden element with styles waiting to apply, it is nothing at all.
+ */
+.crt {
+  display: none;
+}
+
+[data-skin="terminal"] .crt {
+  display: block;
+  position: fixed;
+  inset: 4px;
+  z-index: 90;
+  border: 1px solid color-mix(in srgb, var(--accent) 16%, transparent);
+  pointer-events: none;
+}
+
+/*
+ * Vignette and phosphor dot grid, pulled out past the bezel so the darkening
+ * reaches the true edge of the window rather than stopping at the frame.
+ *
+ * The vignette is `--crt-edge` and not a value mixed from the theme's own
+ * colours — see the note in palettes.css for why a derived one would brighten
+ * the corners of exactly the palettes this effect is for.
+ */
+[data-skin="terminal"] .crt::before {
+  content: "";
+  position: absolute;
+  inset: -4px;
+  background-image:
+    radial-gradient(
+      ellipse 130% 110% at 50% 50%,
+      transparent 45%,
+      var(--crt-edge) 100%
+    ),
+    radial-gradient(
+      color-mix(in srgb, var(--accent) 9%, transparent) 1px,
+      transparent 1px
+    );
+  background-size:
+    100% 100%,
+    26px 26px;
+}
+
+/*
+ * The roll: the soft band a CRT's refresh drags down the tube. Ambient motion,
+ * which §2.4 allows — it never announces an element, it is just the screen
+ * being a screen. Killed outright under reduced motion rather than frozen: the
+ * global rule only stops animations, and a stopped band would park a bright
+ * stripe across the window.
+ */
+[data-skin="terminal"] .crt::after {
+  content: "";
+  position: absolute;
+  inset-inline: 0;
+  top: 0;
+  height: 30%;
+  background-image: linear-gradient(
+    to bottom,
+    transparent 0%,
+    color-mix(in srgb, var(--accent) 5%, transparent) 50%,
+    transparent 100%
+  );
+  animation: crt-roll 7s linear infinite;
+}
+
+@keyframes crt-roll {
+  from {
+    transform: translateY(-100%);
+  }
+  to {
+    transform: translateY(400%);
+  }
+}
+
+/* Scanlines, on the page itself so they sit under the panels' own surfaces. */
+[data-skin="terminal"] body {
+  background-image: repeating-linear-gradient(
+    to bottom,
+    transparent 0 2px,
+    var(--scanline-color) 2px 3px
+  );
+}
+
+@media (prefers-reduced-motion: reduce) {
+  [data-skin="terminal"] .crt::after {
+    display: none;
+  }
+  [data-skin="terminal"] body {
+    background-image: none;
+  }
+}
+
+/* --- type ---------------------------------------------------------------- */
+
+/*
+ * Phosphor glow on the accent micro-type. Applied through the colour rather
+ * than an opt-in class, which is what keeps the components from knowing which
+ * skin is on. `currentColor` and not the accent token, so it survives the
+ * states that recolour the text under it.
+ */
+[data-skin="terminal"] .wordmark-accent,
+[data-skin="terminal"] .action-picked,
+[data-skin="terminal"] .action-primary {
+  text-shadow: 0 0 10px currentColor;
+}
+
+[data-skin="terminal"] .wordmark {
+  font-weight: 500;
+  text-transform: uppercase;
+}
+
+/*
+ * Prompt lines. A label in a terminal is something that was typed, so it gets
+ * the sigil that means "this is a command".
+ *
+ * Every `content` in this file carries `/ ""` — the alternative-text half of
+ * the property. Without it the decoration is part of the element's accessible
+ * name, and the bracket motif below turns a button called "light" into one
+ * called "[LIGHT]", which is what a screen reader then reads out. Drawn, not
+ * announced.
+ */
+[data-skin="terminal"] .field-label::before,
+[data-skin="terminal"] .appearance-label::before {
+  content: "> " / "";
+  color: var(--accent);
+}
+
+[data-skin="terminal"] .tagline::before {
+  content: "[ " / "";
+}
+
+[data-skin="terminal"] .tagline::after {
+  content: " ]" / "";
+}
+
+/* --- controls ------------------------------------------------------------ */
+
+/*
+ * A button in a tty is a word you could type, so it reads as one: bracketed
+ * rather than raised, and never bold.
+ */
+[data-skin="terminal"] .action {
+  font-weight: 400;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  font-size: 10px;
+}
+
+/*
+ * The brackets are part of the word, not decoration beside it: given room to
+ * breathe they end up on the line the wrap left them on, which reads as a
+ * broken frame rather than as a prompt. Tight, and the pair travels with the
+ * label.
+ */
+[data-skin="terminal"] .action::before {
+  content: "[" / "";
+  opacity: 0.5;
+  margin-right: 3px;
+}
+
+[data-skin="terminal"] .action::after {
+  content: "]" / "";
+  opacity: 0.5;
+  margin-left: 3px;
+}
+
+/*
+ * The three transmit modes share one row, so the longest of them decides
+ * whether any of them fits. Bracketed and letterspaced it does not, and a
+ * button that wraps leaves its closing bracket stranded on the second line —
+ * which reads as a broken frame rather than as a prompt. Narrower here and
+ * only here: everywhere else a button has the whole panel to itself.
+ */
+[data-skin="terminal"] .modes .action {
+  font-size: 9px;
+  padding-inline: 4px;
+  white-space: nowrap;
+}
+
+/* The caret a terminal input always has. */
+[data-skin="terminal"] .field-input {
+  caret-color: var(--accent);
+}
+
+/* --- the roster as a directory listing ----------------------------------- */
+
+[data-skin="terminal"] .roster-row::before {
+  content: "·" / "";
+  color: var(--fg-muted);
+}
+
+[data-skin="terminal"] .roster-tag {
+  border: none;
+  padding: 0;
+}
+
+[data-skin="terminal"] .roster-tag::before {
+  content: "[" / "";
+}
+
+[data-skin="terminal"] .roster-tag::after {
+  content: "]" / "";
+}
+
+[data-skin="terminal"] .roster-empty::before {
+  content: "$ " / "";
+  color: var(--accent);
+}
+
+/*
+ * The talking halo is a phosphor bloom here rather than retro's flat ring:
+ * a dot on a tube does not gain an outline, it gets brighter.
+ */
+[data-skin="terminal"] .presence-live {
+  box-shadow:
+    0 0 4px 1px var(--accent),
+    0 0 10px 2px color-mix(in srgb, var(--accent) 55%, transparent);
+}
