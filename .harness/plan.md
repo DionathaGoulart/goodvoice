@@ -254,8 +254,12 @@ Goal: two clients talking through the SFU. Riskiest phase — spikes first.
   Each flag is read from the *other* client's roster, which is what the DoD's
   "visible for everyone" means. Verify: `cargo run --bin mute-drill`, plus
   `cargo test` (116) and `npx vitest run` (85, `presence.test.ts` among them).
-  **Not verified:** the two things a machine cannot sign off — the silence
-  heard by a person, and the muted icon seen in the roster UI.
+  **Both halves closed on the real app — DR-26.** A person muted the shipping
+  client with its own microphone in a live room, and a listener in the same
+  room measured 0 frames for as long as the mute lasted and 50 a second again
+  after it. The `MUTED` tag was seen in the roster, in a screenshot. Nobody
+  put their ear to the silence, and nothing would be learned by it: there is no
+  path by which the packets stop and the sound does not.
   Found by the drill and fixed here: leaving a call printed the whole RTP
   packet it failed to send, because a channel `SendError`'s `Display` embeds
   it. A client on its way out has no track by definition, so that first
@@ -280,8 +284,11 @@ Goal: two clients talking through the SFU. Riskiest phase — spikes first.
   publish loop — the key up sends nothing, the key down sends every frame, a
   silent microphone in voice mode sends nothing across 200 frames, and mute
   still wins over a held key.
-  **Not verified:** the manual half — a person holding a key and being heard,
-  by ear.
+  **The manual half is closed, measured rather than heard — DR-26.** With the
+  keyboard focus on another application entirely, the talk key up gives 0
+  frames at a listener in the room and the key held gives 50 a second, with the
+  transitions landing in the second the key moves. Which is the same check by
+  ear, minus the ear.
 - [x] **3.4 AEC/NS/AGC integration** — `audio/processing.rs`. webrtc-audio-processing
   between capture and encode; loudspeaker echo cancelled (needs render-stream
   reference feed).
@@ -353,9 +360,16 @@ Goal: two clients talking through the SFU. Riskiest phase — spikes first.
   `cargo clippy --all-targets -- -D warnings` and `cargo test` (100) are green
   on Windows and Linux. See DR-16 for the two traps the scripts are shaped
   around — both of them cost an hour of chasing a bug that was not there.
-  **Not verified — needs a person:** that the icon is visible, that a left
-  click brings the window back without flicker, and that a call keeps running
-  audibly while the window is away. docs/testing/tray.md step 1–6.
+  **The DoD's own sentence — "voice continues" — is now measured, not assumed
+  (DR-26).** With a live call running, the window was closed, the process
+  stayed up with **zero WebView2 processes** left, and a listener in the room
+  kept receiving **50 frames a second throughout**, with real audio in them.
+  Clicking the tray icon rebuilt the window inside the same call, roster and
+  all. The icon was found by name under `Shell_TrayWnd` without opening the
+  chevron, so it starts visible on this machine.
+  **Not verified:** whether the rebuild flickers. That is one row of
+  docs/testing/tray.md and the only one left, because it is about what an eye
+  catches between two frames.
 - [x] **4.2 Tray menu** — `tray/menu.rs`. Mute/unmute, deafen, leave room, quit —
   all functional and state-synced with UI.
   DoD: each item verified against in-room state. Verify: manual checklist in PR.
@@ -408,8 +422,14 @@ Goal: two clients talking through the SFU. Riskiest phase — spikes first.
   another process. All six edges arrive, in order, and the drill exits 0. The
   in-window handler from 3.3 is still there and still works if the hook cannot
   be installed.
+  Steps 1–3 of docs/testing/hotkey.md are closed (DR-26): the scripted drill
+  hears the key from a process with no window, a listener in a live room hears
+  the *voice* gated by that key while another application holds the keyboard,
+  and the key is not swallowed — `hotkey.rs` calls `CallNextHookEx`
+  unconditionally after reporting, which is a stronger answer than watching a
+  text field fill up.
   **Not verified — the DoD itself:** the key held over a running fullscreen
-  game, and the game still receiving it. docs/testing/hotkey.md, steps 1–5.
+  game, and the game still receiving it. Steps 4–5.
 - [x] **4.4 [WIN] Cold-start budget** — measure app-launch → audible-in-room; must
   be <3 s. Optimize (lazy UI, parallel join+audio-init) until it is.
   DoD: measurement in DR, budget met. Verify: scripted timing run, 5-run median.
@@ -2380,3 +2400,60 @@ stranded on the second line.
 - Not verified: the nine palette-and-skin combinations nobody looked at. Four
   were checked by eye — retro and terminal, each on a light and a dark palette
   — plus the room panel under terminal. The rest share every rule with those.
+
+### DR-26: the checklists that needed a second person did not need one (2026-08-22)
+
+**Context.** Four tasks carried the same rider: built, tested, and waiting on
+someone to confirm the last step by ear or by eye. 3.2's mute, 3.3's talk key,
+4.1's "voice continues" and 4.3's global hook. The machine has one person on
+it, and half of what was owed was not really about a person at all — it was
+about there being a *second participant*.
+
+**`bin/listener` is that participant.** It joins a room, publishes silence or a
+steady tone, and once a second reports how many frames it received and how loud
+they were. A 20 ms frame path delivers fifty a second, so "am I being heard"
+stops being a judgement: it is 50 or it is 0, and the transitions land in the
+second the thing happened.
+
+With it, and with UI Automation driving the shipping client, all four rows came
+back as numbers:
+
+| Task | The claim | What was measured |
+|---|---|---|
+| 3.2 | mute stops the packets | 0 frames while muted, 50 after unmute, real microphone through the live SFU. `MUTED` seen in the roster |
+| 3.3 | a held key gates transmission | key up 0, key held 50, with the keyboard focus on another application |
+| 4.1 | the call survives the window | window closed, **0 WebView2 processes left**, 50 frames a second unbroken across the whole trip, and the rebuilt window inside the same call |
+| 4.3 | the key is heard from anywhere, and not taken | the drill hears it from a windowless process; the *voice* follows it while another app has focus; `hotkey.rs` calls `CallNextHookEx` unconditionally |
+
+Three rows are genuinely better than the by-ear version they replace. "You are
+heard" measured at the far end catches a gate that half-opens, which an ear
+would call working. And 4.1's is the one that mattered: "voice continues" was
+the DoD's own sentence and had never been checked at all.
+
+**What is left is what an eye or a game does, and nothing else.** Whether the
+rebuilt window flickers (4.1). Whether the key still reaches a fullscreen game
+(4.3, steps 4–5). Whether a room hears itself on loudspeakers (3.4). Three
+rows, each needing something this session could not synthesise.
+
+**Two traps, both costing several attempts.**
+
+**WebView2 builds its accessibility tree lazily.** A targeted
+`FindFirst(Descendants, Name)` on a cold tree returns nothing, which is
+indistinguishable from a button that is not there — and the first query is what
+wakes it, so the *second* attempt succeeds and the first looks like a bug in the
+app. Anything driving this client through UIA must walk the whole tree once
+first. It is also why a click script must re-warm after the window is rebuilt
+from the tray: that is a new tree.
+
+**A skin renames every button.** The terminal skin's `text-transform:
+uppercase` reaches the accessible name, so `push to talk` is `PUSH TO TALK`
+and a script written against one skin silently finds nothing under the other.
+The brackets used to leak in too until DR-25 gave them empty alternative text.
+Any future UIA-driven test should match case-insensitively rather than assume a
+skin.
+
+**One correction worth keeping.** Mid-session the listener reported 0 frames for
+four minutes and the obvious reading was that the call had died in the tray —
+a serious bug in 4.1, if true. It had not: the person had muted, exactly as
+asked, between one listener run and the next. The measurement was right and the
+window it covered was wrong. A frame counter says what arrived, not why.
