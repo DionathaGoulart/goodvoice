@@ -70,8 +70,9 @@ const OVER_NOISE: u16 = 4;
 /// A threshold below this is measuring dither, not audio.
 const FLOOR: u16 = 600;
 
-/// From DR-12: 10 ms of shared-mode device period each way, which is what the
-/// round trip should be able to account for before the analog stack is blamed.
+/// From DR-12: 10 ms of shared-mode engine period each way. DR-23 measured the
+/// whole round trip at four times that, so this is the part of the number the
+/// device's own cadence explains, and the rest is what the report is for.
 const DEVICE_MS: f64 = 20.0;
 
 /// prd.md §4, and what DR-14 measured of it on the wire. What is left is what
@@ -169,8 +170,8 @@ fn meter(loudest: u16) -> String {
 // --- round trip ------------------------------------------------------------
 
 async fn roundtrip(
-    microphone: &mut impl AudioSource,
-    speakers: &impl AudioSink,
+    microphone: &mut hardware::Microphone,
+    speakers: &hardware::Speakers,
     bursts: usize,
 ) -> Result<()> {
     println!("round trip: hold the earcup against the microphone.");
@@ -183,6 +184,8 @@ async fn roundtrip(
     let flight = Flight::default();
     let edge = Edge::new(threshold);
     let mut times = Vec::with_capacity(bursts);
+    let mut backlog = Vec::with_capacity(bursts);
+    let mut waiting = Vec::with_capacity(bursts);
     let mut produced = 0_usize;
 
     // Twice as long as the bursts should take, plus a little: a run that is
@@ -197,6 +200,10 @@ async fn roundtrip(
         if let Some(index) = edge.crossed(&frame) {
             if let Some(elapsed) = flight.arrive() {
                 times.push(elapsed.saturating_sub(tail_of(index)));
+                // Read after the frame was taken, so it is what was queued
+                // *behind* this one: the burst is that much older than the
+                // moment it was noticed.
+                waiting.push(microphone.queued());
             }
         }
         flight.expire(LOST_AFTER);
@@ -207,7 +214,11 @@ async fn roundtrip(
         produced += 1;
         if produced % BURST_INTERVAL_FRAMES == 0 {
             // Handed over and timed in that order, so the clock starts as
-            // close to the speakers as this side can get.
+            // close to the speakers as this side can get. Close is not the
+            // same as at: whatever the ring is already holding is time the
+            // burst waits before the device sees it, and it is inside every
+            // number below. Read it first, or it cannot be taken back out.
+            backlog.push(speakers.queued(0));
             speakers.play(0, &burst_frame());
             flight.depart();
         } else {
@@ -215,7 +226,7 @@ async fn roundtrip(
         }
     }
 
-    report(&times, &flight, threshold)
+    report(&times, &flight, threshold, &backlog, &waiting)
 }
 
 /// What the room is doing when nothing is being played into it.
@@ -243,7 +254,19 @@ fn tail_of(onset: usize) -> Duration {
     Duration::from_nanos((samples * 1_000_000_000) / u64::from(SAMPLE_RATE_HZ))
 }
 
-fn report(times: &[Duration], flight: &Flight, threshold: u16) -> Result<()> {
+/// A count of 48 kHz samples as the time they take to play.
+fn played_in(samples: usize) -> Duration {
+    let samples = u64::try_from(samples).unwrap_or(0);
+    Duration::from_nanos((samples * 1_000_000_000) / u64::from(SAMPLE_RATE_HZ))
+}
+
+fn report(
+    times: &[Duration],
+    flight: &Flight,
+    threshold: u16,
+    backlog: &[usize],
+    waiting: &[usize],
+) -> Result<()> {
     let heard = times.len();
     let sent = heard + flight.lost();
 
@@ -279,8 +302,33 @@ fn report(times: &[Duration], flight: &Flight, threshold: u16) -> Result<()> {
     println!("    p95     {:6.1} ms", spread.p95);
     println!("    max     {:6.1} ms", spread.max);
 
+    // How much of that was this process rather than the platform. The burst
+    // is timed from the moment it is queued, so a ring holding 40 ms of audio
+    // puts 40 ms into the round trip that no device charged for.
+    let queued: Vec<Duration> = backlog.iter().copied().map(played_in).collect();
+    let behind: Vec<Duration> = waiting.iter().copied().map(played_in).collect();
+    let ours = match (Spread::of(&queued), Spread::of(&behind)) {
+        (Some(render), Some(capture)) => {
+            println!("\n  of which our own rings were holding");
+            println!(
+                "    render  median {:6.1} ms, max {:6.1} ms",
+                render.median, render.max
+            );
+            println!(
+                "    capture median {:6.1} ms, max {:6.1} ms",
+                capture.median, capture.max
+            );
+            render.median + capture.median
+        }
+        _ => 0.0,
+    };
+    println!(
+        "\n  so below cpal the platform costs about {:.1} ms.",
+        spread.median - ours
+    );
+
     let devices = BUDGET_MS - WIRE_MS;
-    println!("\n  of which DR-12's shared-mode periods account for {DEVICE_MS:.1} ms;");
+    println!("\n  of which DR-12's shared-mode engine periods explain {DEVICE_MS:.1} ms;");
     println!("  the rest is the driver stack, the converters and the air.");
     println!(
         "\n  a call spends {WIRE_MS:.1} ms on the wire (DR-14), so the devices\n  \
@@ -294,9 +342,11 @@ fn report(times: &[Duration], flight: &Flight, threshold: u16) -> Result<()> {
         );
     } else {
         println!(
-            "\nOVER BUDGET by {:.1} ms. That is the case for the `wasapi` crate: what to\n\
-             check first is whether the render buffer is deeper than the device period,\n\
-             which is the one thing cpal does not let this client choose.",
+            "\nOVER BUDGET by {:.1} ms — and the rings above say it is not this process.\n\
+             That is not yet a case for the `wasapi` crate: what it would buy is a\n\
+             shorter engine period, and DR-12's device reports minimum = default here.\n\
+             What separates the stack from the hardware is the same run on an endpoint\n\
+             that is not USB; until that exists this number belongs to these devices.",
             spread.median - devices
         );
     }

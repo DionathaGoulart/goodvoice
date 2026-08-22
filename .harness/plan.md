@@ -100,7 +100,7 @@ No Rust in this phase — Worker + DO only, integration-tested with vitest.
 
 Goal: two clients talking through the SFU. Riskiest phase — spikes first.
 
-- [ ] **2.1 [WIN] WASAPI capture/playback spike** — `client/src-tauri/src/audio/`.
+- [x] **2.1 [WIN] WASAPI capture/playback spike** — `client/src-tauri/src/audio/`.
   Event-driven shared-mode capture → ring buffer → playback (loopback monitor).
   Decides `cpal` vs `wasapi` crate (PRD open question 4) — write the Decision Record.
   DoD: mic loopback audible; round-trip device latency measured and recorded in DR.
@@ -126,12 +126,21 @@ Goal: two clients talking through the SFU. Riskiest phase — spikes first.
   Also new: `audio/burst.rs`, the burst and its bookkeeping, shared with
   `bin/latency` and tested (nine tests) where it used to be untested private
   code in a binary.
-  **Not verified — both halves need a person at the machine:**
-  1. `cargo run --bin audio-spike` and confirm the loopback is *audible*.
-  2. `cargo run --bin audio-spike -- --roundtrip` **with the earcup held
-     against the microphone**, and put the number in DR-15.
-  Without the coupling the first attempt heard 1 burst of 33 and the harness
-  refused it, which is the correct answer and not a measurement.
+  **Both halves are now done, on the DR-12 machine, and the answer is worse
+  than DR-15 expected — see DR-23.** The loopback is audible, confirmed by a
+  person wearing the headset while the meter peaked at 14 837. The round trip
+  measured **84.7–86.1 ms** across four runs, of which our own rings hold
+  0.0 ms at the median: it is all below cpal. A control run moved the render
+  device off the USB DAC onto the motherboard's analog codec and the number did
+  not move, so the render leg is not where it goes.
+  That makes a call's mouth-to-ear about **106 ms against the 80 ms budget**
+  (21.4 ms of measured wire plus 84.7 ms of measured devices), and it retires
+  DR-14's 41.4 ms, which had added DR-12's engine period as a stand-in for the
+  device cost. `wasapi` still loses — the control run cleared the leg it would
+  have helped — so what DR-23 sends back is the budget, not the backend.
+  **The one experiment still owed:** the same round trip with a capture device
+  that is not the fifine, which separates the microphone from the stack. This
+  machine has no second microphone.
 - [x] **2.2 Opus encode/decode pipeline** — `client/src-tauri/src/audio/opus.rs`.
   20 ms frames, 48 kHz, 32 kbps start; encode→decode round-trip preserves audio.
   DoD: unit tests with synthetic tones; no allocation on the frame path (assert
@@ -994,6 +1003,12 @@ there. The peer connection and the pinned address were both innocent.
 
 ### DR-12: what the target machine actually offers (2026-08-20)
 
+> **Superseded in part by DR-23.** The audio half of this record reads
+> `IAudioClient3`'s engine period as "what the devices cost" and puts 20 ms
+> of the budget against it. Measured, the two device legs cost 85 ms. The
+> engine period is the callback cadence and one term of the latency, not the
+> sum of it. The encoder half is unaffected.
+
 **Context.** Task 0.5 front-loads two hardware unknowns: how small a buffer
 WASAPI will run in shared mode (most of the ≤80 ms budget, prd.md §4, and the
 crux of task 2.1) and whether H.264 encoding can happen in silicon (task 5.2).
@@ -1241,6 +1256,12 @@ host.
 
 ### DR-14: one unreachable STUN URL hangs the whole join (2026-08-21)
 
+> **The 41.4 ms mouth-to-ear in this record is retired by DR-23.** The
+> 21.4 ms of wire was measured and stands; the 20 ms added to it for the
+> devices was DR-12's engine period, and the devices actually cost 85 ms.
+> The real figure is about 106 ms, against an 80 ms budget. Nothing about
+> the ICE finding below is affected.
+
 **Context.** DR-13 left every live proof blocked: `Call::join` failed all three
 attempts with "ICE gathering never completed", on Windows and under WSL alike,
 and the gathering-state callback appeared never to fire.
@@ -1346,6 +1367,14 @@ Three things the number does not say:
   worth silencing when a task next touches that path.
 
 ### DR-15: cpal stays; the case for the `wasapi` crate has to be made elsewhere (2026-08-21)
+
+> **DR-23 measured what this record left owed, and the verdict holds for a
+> different reason.** cpal still stays — but not because there is headroom.
+> There is none: the devices cost 85 ms of an 80 ms budget. The parking
+> condition below is half met, since the onboard endpoints do report a
+> 128-frame minimum; the other half fails, because a control run showed the
+> render leg — the one a `wasapi` backend would shorten — is not where the
+> time goes. Read the last paragraph's "38 ms of headroom" as withdrawn.
 
 **Context.** Task 2.1 and prd.md open question 4: `cpal` or the `wasapi` crate
 on Windows. The seam (`audio::device`) has always meant this decision costs
@@ -2051,3 +2080,113 @@ them.
   `npm run tauri build` in CI for the installer; that is the job that would
   have caught the first of these, and the second still needs the app to be
   *run*. `tray-roundtrip.ps1` is the closest thing to that in the repo.
+
+### DR-23: the devices cost four times what the plan assumed (2026-08-22)
+
+**Context.** Task 2.1's crate question was settled in DR-15 from the driver's
+own numbers; what it still owed was the half that needs a person — whether the
+loopback is audible, and the round trip itself. Both were run on the DR-12
+machine, by hand, with the earcup held against the microphone.
+
+**The loopback is audible.** `cargo run --bin audio-spike -- --seconds 15`,
+speaking into the microphone: the meter peaked at 14 837 of 32 767 and every
+run kept the device's clock exactly (749–750 frames in 15 s). A person wearing
+the headset confirmed hearing their own voice. That is the first half of the
+DoD, and it is the half no log can settle.
+
+**The round trip is 85 ms.** Four runs, all with 20 bursts timed:
+
+| Render endpoint | Bus | Bursts | Median |
+|---|---|---|---|
+| Headset Earphone (HyperX Virtual Surround Sound) | USB | 20 of 30 | 86.1 ms |
+| Headset Earphone (HyperX Virtual Surround Sound) | USB | 20 of 30 | 85.1 ms |
+| Headset Earphone (HyperX Virtual Surround Sound) | USB | 20 of 20 | 85.2 ms |
+| Speakers (High Definition Audio Device) | onboard analog | 20 of 20 | 84.7 ms |
+
+The spread inside a run is tiny — min 74.2, p95 85.7, max 85.9 on the last —
+so this is a stable property of the path and not a sampling accident.
+
+**It is not our buffering.** The obvious suspect was the render ring: the burst
+is timed from the moment it is handed over, so anything already queued is
+inside the number. `Speakers::queued` and `Microphone::queued` were added to
+read both rings at the instant each burst departs and arrives, and the answer
+is that they hold **0.0 ms at the median**, 10.0 ms at worst. All 85 ms is
+below cpal.
+
+**It is not the USB sound card either.** The fourth run is the control: same
+headphone, same microphone, the P2 plug moved off the HyperX USB DAC and into
+the motherboard's analog jack. The number did not move — 84.7 against 85.2.
+Swapping the entire render device changed nothing, which means the render leg
+is not where the time is going.
+
+**What that leaves.** Two candidates, and this run cannot separate them: the
+capture leg (the fifine USB microphone, the one constant across all four runs)
+and the WASAPI shared-mode stack itself. **The experiment that settles it is
+the same round trip with a capture device that is not the fifine**, and it did
+not happen because the machine has no second microphone. Until it does, the
+85 ms belongs to "the platform and this microphone", jointly.
+
+**DR-14's 41.4 ms is wrong, and so is DR-12's 20 ms.** DR-14 measured 21.4 ms
+of wire honestly and then *added DR-12's 20 ms as an assumption* about what the
+devices cost. The devices cost 85 ms. A call's mouth-to-ear contains one
+capture and one render, which is exactly what this round trip contains, so:
+
+```
+  21.4 ms wire (DR-14, measured)  +  84.7 ms devices (measured)  ≈  106 ms
+```
+
+against prd.md §4's **80 ms**. The budget is blown by about 26 ms, and it has
+been blown since the first call — DR-14 simply never measured this half. The
+38 ms of headroom DR-15 spends in its last paragraph does not exist.
+
+Reading DR-12 again shows where the assumption came from: it quoted
+`IAudioClient3`'s **engine period**, which is what the callback cadence is, and
+called it "what the devices cost". The engine period is one term of the device
+latency and not the sum of it — converters, the USB or codec transport and the
+endpoint's own processing are the rest, and here they are four times larger.
+
+**DR-15's parking condition is now half met.** It parked the `wasapi` crate
+until a device reported a shared-mode period below the default *and* the budget
+needed it. Both onboard endpoints do report one:
+
+```
+- Speakers (High Definition Audio Device) — IAudioClient3
+  default 480 frames (10.0 ms), minimum 128 (2.7 ms), maximum 480 (10.0 ms)
+```
+
+and the budget now needs something. But this does **not** make the case for a
+second backend, and the control run is why: `wasapi` would buy a shorter
+*render* period, and moving the whole render device changed the total by
+0.5 ms. Spending a backend to save 7 ms of a 26 ms overrun, on the leg already
+shown to be innocent, is the wrong trade. **cpal stays.**
+
+**Decision: the budget is the thing to revisit, not the backend.** What is
+owed before anyone writes code against this:
+
+1. The capture-leg experiment above, on any machine with a second microphone.
+   It is one run and it decides whether this is a hardware property or ours.
+2. If the stack is the floor, prd.md §4's 80 ms is not reachable on Windows
+   shared mode with consumer USB audio, and the number in the PRD should say
+   what it is measuring. 106 ms mouth-to-ear is still inside what a voice call
+   tolerates; it is the *claim* that is wrong, not the product.
+3. Task 2.5's harness should stop adding DR-12's 20 ms and report the measured
+   device cost instead, or it will keep publishing 41.4 ms.
+
+**Consequences.**
+
+- `bin/audio-spike --roundtrip` now prints what each ring was holding, so the
+  next reader does not have to trust that the number is not self-inflicted.
+- Its over-budget message used to blame the `wasapi` crate outright. It names
+  the control run instead: the render buffer is the one thing it accused, and
+  the rings had already cleared it.
+- `Speakers::queued` / `Microphone::queued` are measurement apparatus on the
+  concrete types, deliberately not on the `AudioSink`/`AudioSource` seam — a
+  synthetic source has no ring and should not have to pretend to.
+- The single mid-run underrun DR-15 observed still happens, once per run, on
+  both endpoints. Still unchased, still belonging to whoever builds the jitter
+  buffer.
+- One measurement hazard worth writing down: the HyperX's virtual surround was
+  on for the first attempts and the burst detector heard 35–43 % of its bursts,
+  just under the harness's half rule. Turning it off took the same run to 20 of
+  20. A DSP that smears a 5 ms burst does not only add latency — it hides the
+  burst from the thing timing it.

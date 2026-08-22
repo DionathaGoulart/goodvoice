@@ -22,7 +22,7 @@ use std::sync::{
 };
 
 use ringbuf::{
-    traits::{Consumer, Producer, Split},
+    traits::{Consumer, Observer, Producer, Split},
     HeapCons, HeapProd, HeapRb,
 };
 
@@ -220,6 +220,20 @@ impl Playback {
             return;
         };
         producer.push_slice(frame);
+    }
+
+    /// How many samples `slot` has queued but not yet played.
+    ///
+    /// Measurement apparatus, not voice path. Task 2.1 times a burst from the
+    /// moment it is handed over, so anything the ring was already holding is
+    /// inside that number; this is what makes it separable from what the
+    /// device below cpal costs.
+    #[must_use]
+    pub fn queued(&self, slot: usize) -> usize {
+        self.slots
+            .get(slot)
+            .and_then(|producer| producer.lock().ok())
+            .map_or(0, |producer| producer.occupied_len())
     }
 
     /// Throws away whatever `slot` still has queued, so a speaker who left

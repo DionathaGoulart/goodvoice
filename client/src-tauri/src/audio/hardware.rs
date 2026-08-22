@@ -407,6 +407,18 @@ pub struct Microphone {
     _guard: Arc<DeviceGuard>,
 }
 
+impl Microphone {
+    /// How many samples the device has captured that no frame has taken yet.
+    ///
+    /// The mirror of [`Speakers::queued`], and there for the same reason: a
+    /// harness timing an arrival at the moment a frame appears is late by
+    /// whatever was already waiting behind it.
+    #[must_use]
+    pub fn queued(&self) -> usize {
+        self.samples.occupied_len()
+    }
+}
+
 #[async_trait::async_trait]
 impl AudioSource for Microphone {
     async fn next_frame(&mut self) -> Option<Frame> {
@@ -476,6 +488,17 @@ where
 pub struct Speakers {
     playback: Playback,
     _guard: Arc<DeviceGuard>,
+}
+
+impl Speakers {
+    /// How many samples `slot` has handed over but the device has not played.
+    ///
+    /// See [`Playback::queued`]: this exists so task 2.1's round trip can say
+    /// how much of what it measured was our own buffering.
+    #[must_use]
+    pub fn queued(&self, slot: usize) -> usize {
+        self.playback.queued(slot)
+    }
 }
 
 impl AudioSink for Speakers {

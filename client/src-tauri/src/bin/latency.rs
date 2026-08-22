@@ -63,10 +63,15 @@ const WARMUP_FRAMES: usize = 50;
 /// A burst still unheard after this is lost, not slow.
 const LOST_AFTER: Duration = Duration::from_secs(2);
 
-/// The PRD's budget, and what is left of it once DR-12's device periods are
-/// taken out.
+/// The PRD's budget, and what the devices take out of it before a packet moves.
+///
+/// This used to be DR-12's 20 ms of shared-mode engine period, which is the
+/// callback cadence and not the latency. DR-23 measured the two legs acoustically
+/// on the same machine — speakers to air to microphone, with the rings shown to
+/// be holding nothing — and got 84.7 ms. An engine period is one term of that
+/// sum, and on this hardware a small one.
 const BUDGET_MS: f64 = 80.0;
-const DEVICE_MS: f64 = 20.0;
+const DEVICE_MS: f64 = 84.7;
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -340,8 +345,9 @@ fn report(heard: &Listener, flight: &Flight, wanted: usize) -> Result<()> {
     println!("    median  {:6.1} ms", spread.median);
     println!("    p95     {:6.1} ms", spread.p95);
     println!("    max     {:6.1} ms", spread.max);
-    println!("\n  devices, from DR-12 (10 ms of shared-mode period each way)");
+    println!("\n  devices, measured in DR-23 (one capture and one render)");
     println!("    fixed   {DEVICE_MS:6.1} ms");
+    println!("    note    that figure is this machine's, not a constant");
     println!("\n  mouth to ear, median");
     println!("    total   {total:6.1} ms  against a {BUDGET_MS:.0} ms budget");
 
