@@ -6,16 +6,17 @@
 //! [`device`] is the seam the rest of the client codes against; [`hardware`] is
 //! the `cpal` implementation behind it, and [`mixer`] is what that
 //! implementation does between the decode tasks and the speakers. [`vad`]
-//! decides whether the microphone goes on the wire at all. [`burst`] is not
-//! part of the voice path at all: it is the measurement apparatus the latency
-//! harnesses share. Echo cancellation,
-//! noise suppression and gain control are filled in by plan.md task 3.4.
+//! decides whether the microphone goes on the wire at all, and [`processing`]
+//! cleans up what does go — echo, noise and level. [`burst`] is not part of the
+//! voice path at all: it is the measurement apparatus the latency harnesses
+//! share.
 
 pub mod burst;
 pub mod device;
 pub mod hardware;
 pub mod mixer;
 pub mod opus;
+pub mod processing;
 pub mod vad;
 
 use thiserror::Error;
@@ -44,4 +45,8 @@ pub enum AudioError {
     /// goodvoice does not resample — see [`opus::SAMPLE_RATE_HZ`].
     #[error("no audio device supports 48 kHz in a usable sample format")]
     UnsupportedFormat,
+    /// WebRTC's processing module would not start. The call goes on without
+    /// it: an echo is worse than no echo and better than no call.
+    #[error("audio processing: {0}")]
+    Processing(String),
 }

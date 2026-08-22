@@ -282,23 +282,29 @@ Goal: two clients talking through the SFU. Riskiest phase — spikes first.
   still wins over a held key.
   **Not verified:** the manual half — a person holding a key and being heard,
   by ear.
-- [ ] **3.4 AEC/NS/AGC integration** — `audio/processing.rs`. webrtc-audio-processing
+- [x] **3.4 AEC/NS/AGC integration** — `audio/processing.rs`. webrtc-audio-processing
   between capture and encode; loudspeaker echo cancelled (needs render-stream
   reference feed).
   DoD: speaker-echo test call shows no self-echo; DR records config chosen.
   Verify: manual echo test + `cargo test`.
-  **Built once, then parked — read DR-11 before starting.** The whole task was
-  written and working in commit `e50e674`: `audio/processing.rs` (AEC3 + noise
-  suppression + AGC2 over the 20 ms frame in two 10 ms passes), the render tap
-  that gives the canceller its far end, and an automated echo test measuring
-  **32 dB** of cancellation. It was reverted, not abandoned — the dependency
-  will not build on Windows, for five shallow reasons DR-11 lists one by one.
-  `git show e50e674` is the implementation; DR-11 is why it is not here.
-  Whoever picks this up decides one thing first: vendor a patched
-  `webrtc-audio-processing-sys` into the repo, or wait for an upstream fix. The
-  design above does not change either way, and neither does the reference tap.
-  Until then a call has no echo cancellation, which costs nothing to anyone on
-  a headset and makes speakers unusable.
+  **Unparked: vendored, and it builds on Windows — DR-24.** The implementation
+  is `e50e674` restored unchanged — `audio/processing.rs` (AEC3 + noise
+  suppression + AGC2 over the 20 ms frame in two 10 ms passes) and the render
+  tap that gives the canceller its far end. What was missing was a build, and
+  `vendor/webrtc-audio-processing-sys` is 2.1.0 with the fixes: DR-11's five,
+  plus a sixth it could not have seen. The sixth is the interesting one — the
+  vendored `meson.build` marks every `RTC_EXPORT` symbol `dllexport` even in a
+  static library, so each object carries `/EXPORT:` directives that `objcopy`'s
+  symbol prefixing then leaves pointing at names it has just renamed. 156
+  unresolved externals, all of them in the export table.
+  Measured on both hosts, and the test now prints it rather than only asserting
+  it: **echo cancelled by 31.8 dB** (residual 125 of 4872 played). `cargo test`
+  is 122 green on Windows and on Linux; `cargo fmt --check` and
+  `cargo clippy --all-targets --all-features -- -D warnings` are clean.
+  Windows builds now need meson, ninja and LLVM; CI installs them.
+  **Not verified:** the DoD's own words — a speaker-echo *test call*. The echo
+  test is synthetic and perfect, which is the hard case for a canceller but not
+  the real one. A person on loudspeakers in a room is what is still owed.
 - [x] **3.5 Auto-reconnect** — `rtc/reconnect.rs`. Exponential backoff, rejoin same
   room, resubscribe all tracks; UI shows reconnecting state.
   DoD: kill network 10 s mid-call → call resumes without restart.
@@ -2212,3 +2218,96 @@ owed before anyone writes code against this:
   just under the harness's half rule. Turning it off took the same run to 20 of
   20. A DSP that smears a 5 ms burst does not only add latency — it hides the
   burst from the thing timing it.
+
+### DR-24: the echo canceller builds on Windows; it needed six patches, not five (2026-08-22)
+
+**Context.** DR-11 wrote task 3.4 off with a working implementation and a build
+that could not reach Windows, and left two ways back: vendor the `-sys` crate
+with the five fixes, or wait for upstream. Vendoring was chosen. This is what
+that actually took.
+
+**The five DR-11 named, all confirmed exactly where it said.**
+
+| # | Fix | How |
+|---|---|---|
+| 1 | `Command::new("cp")` | `fs_extra::dir::copy` with `content_only` — the crate already depends on it, and `content_only` is the trailing-dot trick spelled properly |
+| 2 | `Command::new("nm")` | A candidate list, tried in order: rustup's `rust-nm`, then `llvm-nm` under `LIBCLANG_PATH`, then `llvm-nm` on `PATH`, then `nm`. Each is *run* rather than stat'd, because a bare name has to resolve through `PATH` and a Windows path may or may not want `.exe` |
+| 3 | meson's `cpp_std=c++17` | `-Dcpp_std=c++20` passed at `meson setup` when the target is MSVC, rather than editing the C++ |
+| 4 | `.flag("-std=c++17")` on the wrapper | `/std:c++20` on MSVC, GNU flags elsewhere |
+| 5 | `libwebrtc_audio_processing_wrapper.a` | `.lib` on MSVC |
+
+Two of these are better than the workaround DR-11 described. Fix 2 needs no
+`nm.exe` copied by hand: **`llvm-tools` turned out not to be installed** on the
+target machine — `lib/rustlib/<triple>/bin` holds only `rust-lld` and
+`rust-objcopy` — so `rust-nm` was never there to find. What is always there on
+a Windows build is LLVM itself, because bindgen cannot run without libclang.
+Fix 3 goes through `meson setup` instead of `CXXFLAGS`, so the vendored C++
+tree is untouched by four of the five.
+
+**The sixth, which DR-11 could not have seen.** With all five in, 440 objects
+compiled, abseil built, `rust-objcopy` prefixed 60 037 symbols, and the link
+failed with **156 unresolved externals — every one of them attributed to
+`goodvoice_client_lib.dll.exp`**, the export table.
+
+`webrtc/rtc_base/system/rtc_export.h` turns `RTC_EXPORT` into
+`__declspec(dllexport)` when `WEBRTC_ENABLE_SYMBOL_EXPORT` and
+`WEBRTC_LIBRARY_IMPL` are both set with `WEBRTC_WIN`, and `meson.build` sets
+all three unconditionally — in a build configured `default_library=static`.
+Every object therefore carries `/EXPORT:` directives in its `.drectve` section,
+and `link.exe` obeys them when the archive is absorbed into any DLL.
+
+That alone would only be untidy. What makes it fatal is the interaction with
+the crate's own symbol prefixing: `objcopy --redefine-sym` rewrites the symbol
+*table* and does not touch `.drectve`, which is text. So the directives are
+left asking to export `?ssrc@RtpPacketInfo@webrtc@@QEBAIXZ` while the symbol
+itself is now `v2_?ssrc@…`. 156 requests to export things that no longer exist.
+
+The check that found it: `llvm-nm` on the wrapper showed the prefixing had
+renamed compiler-local labels (`v2_$LN3`) and nothing the linker was asking
+for, and the wrapper turned out not to reference `RtpPacketInfo` at all — which
+ruled out the wrapper and pointed at the archive.
+
+The fix is one conditional in the vendored `meson.build`: a static library on
+Windows does not ask for symbol exports. Nothing outside the archive wanted
+them.
+
+**A seventh thing, not a patch but a trap.** The first attempt at fix 6 changed
+nothing, because `build.rs` states its `rerun-if-changed` explicitly — for
+`src/wrapper.hpp` and `src/wrapper.cpp` — and that switches off cargo's default
+of watching every file in the package. The bundled tree is copied into `OUT_DIR`
+and built there, so editing it is invisible. It is now declared too.
+
+**Measured.** `cargo test --lib processing -- --nocapture`, on both hosts:
+
+```
+echo cancelled by 31.8 dB (residual 125 of 4872 played)
+```
+
+A perfect echo — deterministic noise into the reference ring, handed straight
+back as the capture frame, no near-end speech to hide behind — held 31.8 dB
+down after the first second. That is DR-11's Linux figure, unchanged, now also
+on Windows. The test asserts 20 dB and prints the real number, so the next
+reader does not have to re-derive it.
+
+**Consequences.**
+
+- `vendor/webrtc-audio-processing-sys` is 2.1.0 plus six patches, each marked
+  `goodvoice vendor patch N of 6` in place. `[patch.crates-io]` in the
+  workspace manifest points at it, and `exclude = ["vendor"]` keeps it out of
+  the workspace's own builds. 5.2 MB, 675 files.
+- All six are obviously-correct against
+  `tonarino/webrtc-audio-processing`, and DR-11's second way back is still
+  open: a release carrying them turns this into a version bump and a deleted
+  directory.
+- Windows builds now need meson, ninja and LLVM. CI installs the first two and
+  points at the runner's LLVM; the 440-object build happens once and lives in
+  the rust-cache after that. `docs/self-hosting.md` (task 6.1) still owes a
+  contributor section covering all of it.
+- A call has echo cancellation, noise suppression and gain control. DR-11's
+  "makes speakers unusable" is retired.
+- `audio/vad.rs`'s detector now sees a denoised signal rather than the raw
+  microphone, which is a change to its input that DR-10's `Aggressive` setting
+  was chosen without.
+- Not verified: the echo test is synthetic and perfect, which is the hard case
+  for cancellation but not the real one. A person on speakers, in a room, is
+  what the task's DoD asks for and what is still owed.

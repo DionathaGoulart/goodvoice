@@ -35,6 +35,7 @@ use super::{
     device::{AudioSink, AudioSource, MAX_REMOTE_SLOTS},
     mixer::{self, Mixer, Playback, MAX_BLOCK},
     opus::{silent_frame, Frame, FRAME_SAMPLES, SAMPLE_RATE_HZ},
+    processing::{Processing, REFERENCE_SAMPLES},
     AudioError,
 };
 
@@ -75,6 +76,20 @@ pub fn open() -> Result<(Microphone, Speakers), AudioError> {
     let (capture_tx, capture_rx) = capture.split();
     let (mixer, playback) = mixer::open(MAX_REMOTE_SLOTS, RING_SAMPLES);
 
+    // The echo canceller's far end: exactly what the render callback sends to
+    // the device, on its way back to the capture path (task 3.4).
+    let reference = HeapRb::<i16>::new(REFERENCE_SAMPLES);
+    let (reference_tx, reference_rx) = reference.split();
+    // A call with an echo beats no call: if the module will not start, the
+    // reason goes to the terminal and the microphone is used raw.
+    let processing = match Processing::new(reference_rx) {
+        Ok(processing) => Some(processing),
+        Err(error) => {
+            eprintln!("{error}; the call will have no echo cancellation");
+            None
+        }
+    };
+
     let captured = Arc::new(Notify::new());
     let running = Arc::new(AtomicBool::new(true));
     let started = Arc::new((Mutex::new(None::<Result<(), AudioError>>), Condvar::new()));
@@ -86,7 +101,14 @@ pub fn open() -> Result<(Microphone, Speakers), AudioError> {
         thread::Builder::new()
             .name("goodvoice-audio".to_owned())
             .spawn(move || {
-                run_devices(capture_tx, mixer, &captured, &running, &started);
+                run_devices(
+                    capture_tx,
+                    mixer,
+                    reference_tx,
+                    &captured,
+                    &running,
+                    &started,
+                );
             })
             .map_err(|_| AudioError::NoDevice)?
     };
@@ -104,6 +126,7 @@ pub fn open() -> Result<(Microphone, Speakers), AudioError> {
     Ok((
         Microphone {
             samples: capture_rx,
+            processing,
             captured,
             _guard: Arc::clone(&guard),
         },
@@ -211,11 +234,12 @@ impl Drop for DeviceGuard {
 fn run_devices(
     capture_tx: HeapProd<i16>,
     mixer: Mixer,
+    reference_tx: HeapProd<i16>,
     captured: &Arc<Notify>,
     running: &Arc<AtomicBool>,
     started: &StartSignal,
 ) {
-    let outcome = build_and_play(capture_tx, mixer, captured);
+    let outcome = build_and_play(capture_tx, mixer, reference_tx, captured);
 
     let streams = match outcome {
         Ok(streams) => {
@@ -254,6 +278,7 @@ struct Streams {
 fn build_and_play(
     capture_tx: HeapProd<i16>,
     mixer: Mixer,
+    reference_tx: HeapProd<i16>,
     captured: &Arc<Notify>,
 ) -> Result<Streams, AudioError> {
     let host = cpal::default_host();
@@ -278,7 +303,13 @@ fn build_and_play(
         capture_tx,
         Arc::clone(captured),
     )?;
-    let output = build_output(&output_device, &output_config, output_format, mixer)?;
+    let output = build_output(
+        &output_device,
+        &output_config,
+        output_format,
+        mixer,
+        reference_tx,
+    )?;
 
     input.play().map_err(|_| AudioError::NoDevice)?;
     output.play().map_err(|_| AudioError::NoDevice)?;
@@ -403,6 +434,9 @@ where
 /// The microphone, as the encode loop sees it.
 pub struct Microphone {
     samples: HeapCons<i16>,
+    /// Echo cancellation, noise suppression and gain, applied on the way out.
+    /// `None` only when the module refused to start.
+    processing: Option<Processing>,
     captured: Arc<Notify>,
     _guard: Arc<DeviceGuard>,
 }
@@ -427,6 +461,13 @@ impl AudioSource for Microphone {
                 let mut frame = silent_frame();
                 let taken = self.samples.pop_slice(&mut frame);
                 debug_assert_eq!(taken, FRAME_SAMPLES);
+                // Here rather than further up the call: every frame has to go
+                // through, including the ones mute or the gate will throw away,
+                // or the echo canceller loses its place in the stream. It is
+                // also why the voice detector downstream sees clean audio.
+                if let Some(processing) = self.processing.as_mut() {
+                    processing.run(&mut frame);
+                }
                 return Some(frame);
             }
             // Woken by the capture callback, so the encode loop runs on the
@@ -443,13 +484,22 @@ fn build_output(
     config: &StreamConfig,
     format: SampleFormat,
     mixer: Mixer,
+    reference: HeapProd<i16>,
 ) -> Result<cpal::Stream, AudioError> {
     let channels = config.channels as usize;
     match format {
-        SampleFormat::I16 => {
-            device.build_output_stream(*config, render::<i16>(mixer, channels), report, None)
-        }
-        _ => device.build_output_stream(*config, render::<f32>(mixer, channels), report, None),
+        SampleFormat::I16 => device.build_output_stream(
+            *config,
+            render::<i16>(mixer, channels, reference),
+            report,
+            None,
+        ),
+        _ => device.build_output_stream(
+            *config,
+            render::<f32>(mixer, channels, reference),
+            report,
+            None,
+        ),
     }
     .map_err(|_| AudioError::NoDevice)
 }
@@ -464,6 +514,7 @@ fn build_output(
 fn render<T>(
     mut mixer: Mixer,
     channels: usize,
+    mut reference: HeapProd<i16>,
 ) -> impl FnMut(&mut [T], &cpal::OutputCallbackInfo) + Send + 'static
 where
     T: cpal::SizedSample + FromSample<i16>,
@@ -475,6 +526,11 @@ where
         for block in data.chunks_mut(MAX_BLOCK * channels) {
             let frames = block.len() / channels;
             mixer.render(&mut block_out[..frames]);
+
+            // Copied to the echo canceller before it is fanned out: mono, and
+            // exactly what the device is about to play. A ring push, so this
+            // stays a callback that does not allocate or lock.
+            reference.push_slice(&block_out[..frames]);
 
             for (index, out) in block.chunks_mut(channels).enumerate() {
                 let sample = T::from_sample_(block_out[index]);

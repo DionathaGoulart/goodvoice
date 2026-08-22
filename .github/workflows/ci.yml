@@ -21,6 +21,19 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
+      # webrtc-audio-processing builds its bundled C++ with meson and ninja
+      # (DR-11); neither is on the runner's PATH. Both ship as wheels, and the
+      # image already has Python.
+      - run: pip install meson ninja
+      # bindgen wants libclang, and the vendored build script's symbol
+      # prefixing wants llvm-nm (DR-24). The runner ships LLVM and does not
+      # say where.
+      - name: Point the build at the runner's LLVM
+        run: |
+          echo "LIBCLANG_PATH=C:\Program Files\LLVM\bin" >> $env:GITHUB_ENV
+          echo "C:\Program Files\LLVM\bin" >> $env:GITHUB_PATH
+      # The C++ tree is 440 objects and builds once; the cache is what keeps
+      # every later run from paying for it again.
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: client/src-tauri

@@ -1,5 +1,8 @@
 [workspace]
 members = ["."]
+# The vendored `-sys` crate is a package, not a member: it is built through
+# [patch.crates-io] below and has nothing to do with this workspace's builds.
+exclude = ["vendor"]
 resolver = "2"
 
 [package]
@@ -78,6 +81,10 @@ cpal = "0.18"
 # the standalone WebRTC VAD (libfvad), vendored C built with `cc`: no libclang,
 # no meson, same profile as the vendored libopus DR-3 settled on.
 webrtc-vad = "0.4"
+# Echo cancellation, noise suppression and gain control (task 3.4). `bundled`
+# builds the C++ from the vendored source rather than linking whatever the host
+# packages, which is the only shape that ships in an installer. See DR-11.
+webrtc-audio-processing = { version = "~2.1", features = ["bundled"] }
 anyhow = "1"
 
 # Tests only. `#[tokio::test(start_paused = true)]` runs the clock instead of
@@ -112,3 +119,10 @@ lto = true
 opt-level = "s"
 panic = "abort"
 strip = true
+
+# DR-11: upstream's build.rs has no Windows branch and fails in five places,
+# none of them a real incompatibility. `vendor/webrtc-audio-processing-sys`
+# is 2.1.0 with those five fixed; DR-24 lists them one by one. Drop this
+# table, and the directory with it, once a release carries them.
+[patch.crates-io]
+webrtc-audio-processing-sys = { path = "vendor/webrtc-audio-processing-sys" }
