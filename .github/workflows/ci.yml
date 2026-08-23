@@ -16,6 +16,19 @@ jobs:
     defaults:
       run:
         working-directory: client/src-tauri
+    env:
+      # MAX_PATH, and the only reason this is not obvious is how cl reports it:
+      # `C1083: Cannot open compiler generated file: ''`, with the name blank.
+      # The vendored C++ nests abseil inside meson's build tree, and by the time
+      # you reach
+      # `...\build\webrtc-audio-processing-sys-<hash>\out\webrtc-audio-processing-build\subprojects\abseil-cpp-20240722.0\libabsl_synchronization.a.p\absl_synchronization_internal_create_thread_identity.cc.obj`
+      # the default target directory has already spent 44 characters on
+      # `D:\a\goodvoice\goodvoice\client\src-tauri\target`.
+      #
+      # The development machine writes to `C:\Users\<you>\gv\target` for an
+      # unrelated reason — OneDrive syncing 13 GB of build output — and has been
+      # quietly short enough ever since.
+      CARGO_TARGET_DIR: D:\gv
     steps:
       - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
