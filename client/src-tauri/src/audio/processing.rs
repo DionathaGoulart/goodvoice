@@ -33,6 +33,7 @@ use webrtc_audio_processing::{
 
 use super::{
     opus::{Frame, FRAME_SAMPLES, SAMPLE_RATE_HZ},
+    prefs::AudioSettings,
     AudioError,
 };
 
@@ -67,8 +68,16 @@ const _: () = {
 };
 
 /// The configuration goodvoice runs the module with. See DR-11 for why each of
-/// these and not its neighbours.
-fn settings() -> Config {
+/// these and not its neighbours, and `prefs` for which of them the user is
+/// allowed to switch off.
+///
+/// Two stages are not negotiable. The high-pass filter is what keeps desk
+/// knocks out from under a voice and costs nothing, and the gain controller is
+/// what stops a quiet talker having to lean into the microphone — neither is a
+/// setting anyone would want to find. The other two are: a headset makes the
+/// echo canceller pointless, and a good microphone in a quiet room makes the
+/// noise suppressor a way to lose consonants.
+fn settings(prefs: AudioSettings) -> Config {
     Config {
         pipeline: Pipeline::default(),
         // Nothing before the pipeline: the gain that matters is applied after
@@ -82,10 +91,10 @@ fn settings() -> Config {
         // AEC3, with the delay left to its own estimator. The real figure is
         // whatever WASAPI's render and capture buffers add up to on a machine
         // nobody here can see, and a confident wrong number is worse than none.
-        echo_canceller: Some(EchoCanceller::Full {
+        echo_canceller: prefs.echo_cancellation.then_some(EchoCanceller::Full {
             stream_delay_ms: None,
         }),
-        noise_suppression: Some(NoiseSuppression {
+        noise_suppression: prefs.noise_suppression.then_some(NoiseSuppression {
             // Moderate: the stronger levels buy a quieter fan at the cost of
             // chewing into consonants, and a room full of people asking "what?"
             // is worse than a room with a fan in it.
@@ -123,10 +132,10 @@ impl Processing {
     /// [`AudioError::Processing`] if WebRTC refuses the sample rate or the
     /// configuration. The caller is expected to carry on without it: a call
     /// with an echo is worse than one without, and far better than none.
-    pub fn new(reference: HeapCons<i16>) -> Result<Self, AudioError> {
+    pub fn new(reference: HeapCons<i16>, prefs: AudioSettings) -> Result<Self, AudioError> {
         let module = Processor::new(SAMPLE_RATE_HZ)
             .map_err(|error| AudioError::Processing(format!("{error:?}")))?;
-        module.set_config(settings());
+        module.set_config(settings(prefs));
 
         Ok(Self {
             module,
@@ -135,6 +144,18 @@ impl Processing {
             far: [0.0; CHUNK],
             taken: [0; CHUNK],
         })
+    }
+
+    /// Switches stages on or off mid-call.
+    ///
+    /// `set_config` builds WebRTC's own configuration objects, so this is the
+    /// one thing in this module that allocates — which is why the capture path
+    /// calls it on a generation change rather than per frame. AEC3 loses its
+    /// delay estimate when it is switched back on and spends a second or two
+    /// finding it again; that is the cost of the switch existing, and it is
+    /// paid by the person who flipped it.
+    pub fn reconfigure(&mut self, prefs: AudioSettings) {
+        self.module.set_config(settings(prefs));
     }
 
     /// Cleans one captured frame in place.
@@ -217,7 +238,10 @@ fn to_i16(sample: f32) -> i16 {
 #[cfg(test)]
 mod tests {
     use super::{Processing, CHUNK, REFERENCE_SAMPLES};
-    use crate::audio::opus::{silent_frame, Frame, FRAME_SAMPLES};
+    use crate::audio::{
+        opus::{silent_frame, Frame, FRAME_SAMPLES},
+        prefs::AudioSettings,
+    };
     use ringbuf::{
         traits::{Observer, Producer, Split},
         HeapProd, HeapRb,
@@ -227,7 +251,7 @@ mod tests {
     fn rigged() -> (Processing, HeapProd<i16>) {
         let (producer, consumer) = HeapRb::<i16>::new(REFERENCE_SAMPLES).split();
         (
-            Processing::new(consumer).expect("the module should start"),
+            Processing::new(consumer, AudioSettings::default()).expect("the module should start"),
             producer,
         )
     }
@@ -351,6 +375,47 @@ mod tests {
         assert!(
             loudest_late < loudest_input / 10.0,
             "echo survived at {loudest_late} against {loudest_input} played"
+        );
+    }
+
+    /// The switch is the whole point of the setting: with the canceller off,
+    /// what the speakers played comes back. Without this, "echo cancellation:
+    /// off" could be a checkbox wired to nothing and every other test would
+    /// still pass.
+    #[test]
+    fn switching_the_canceller_off_lets_the_echo_through() {
+        let (mut processing, mut speakers) = rigged();
+        processing.reconfigure(AudioSettings {
+            echo_cancellation: false,
+            // Off as well: the suppressor would attack the same broadband
+            // noise and this test would not know which stage removed it.
+            noise_suppression: false,
+            ..AudioSettings::default()
+        });
+        let mut noise = Noise(0x9e37_79b9);
+
+        let mut loudest_late = 0.0_f32;
+        let mut loudest_input = 0.0_f32;
+        for index in 0..100 {
+            let played = noise.frame();
+            speakers.push_slice(&played);
+
+            let mut heard = played;
+            processing.run(&mut heard);
+
+            if index >= 50 {
+                loudest_late = loudest_late.max(rms(&heard));
+                loudest_input = loudest_input.max(rms(&played));
+            }
+        }
+
+        // Half of what was played, against the tenth the canceller gets it
+        // under. The gap is wide enough that this fails on a stage that is
+        // merely weaker and passes on one that is genuinely not running.
+        assert!(
+            loudest_late > loudest_input / 2.0,
+            "the echo was cancelled at {loudest_late} against {loudest_input} \
+             played, with the canceller switched off"
         );
     }
 

@@ -315,6 +315,9 @@ mod platform {
                 room: room.clone(),
                 name: "soak-ears".to_owned(),
                 mode: goodvoice_client_lib::audio::vad::TransmitMode::Open,
+                prefs: std::sync::Arc::new(
+                    goodvoice_client_lib::audio::prefs::AudioPrefs::default(),
+                ),
             },
             Box::new(Silence),
             Arc::clone(&ears) as Arc<dyn AudioSink>,

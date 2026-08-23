@@ -42,6 +42,7 @@ use goodvoice_client_lib::{
         burst::{self, burst_frame, Edge, Spread, SILENT_PATH_THRESHOLD},
         device::{AudioSink, AudioSource, NullSink},
         opus::{silent_frame, Frame, FRAME_MS},
+        prefs::AudioPrefs,
         vad::TransmitMode,
     },
     rtc::session::{Call, CallOptions},
@@ -124,6 +125,7 @@ fn options(base: &str, room: &str, name: &str) -> CallOptions {
         // The gate would have opinions about a burst of silence-then-tone, and
         // this is measuring the path, not the gate.
         mode: TransmitMode::Open,
+        prefs: Arc::new(AudioPrefs::default()),
     }
 }
 

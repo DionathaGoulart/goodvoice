@@ -14,7 +14,15 @@
 use serde::{Deserialize, Serialize};
 use webrtc_vad::{SampleRate, Vad, VadMode};
 
-use super::opus::{Frame, FRAME_MS};
+use super::{
+    mixer::peak,
+    opus::{Frame, FRAME_MS},
+    prefs::Sensitivity,
+};
+
+/// Full scale, as a float divisor — the same convention as the meters, so a
+/// manual threshold means the same thing on the slider as it does here.
+const FULL_SCALE: f32 = i16::MAX as f32;
 
 /// How long transmission stays open after the last frame the detector called
 /// voice.
@@ -103,14 +111,20 @@ impl Gate {
     }
 
     /// Whether this frame goes on the wire.
-    pub fn admits(&mut self, mode: TransmitMode, key_down: bool, frame: &Frame) -> bool {
+    pub fn admits(
+        &mut self,
+        mode: TransmitMode,
+        key_down: bool,
+        frame: &Frame,
+        sensitivity: Sensitivity,
+    ) -> bool {
         match mode {
             TransmitMode::Open => true,
             // No hangover on release. The key coming up is the user saying
             // stop, and the mode people choose in order *not* to be heard has
             // to obey immediately.
             TransmitMode::PushToTalk => key_down,
-            TransmitMode::VoiceActivity => self.hears_voice(frame),
+            TransmitMode::VoiceActivity => self.hears_voice(frame, sensitivity),
         }
     }
 
@@ -122,12 +136,8 @@ impl Gate {
         self.hangover
     }
 
-    fn hears_voice(&mut self, frame: &Frame) -> bool {
-        // A frame the detector refuses counts as voice. It can only happen on a
-        // frame length libfvad does not support, which a fixed 20 ms frame
-        // never is — and if that ever changed, transmitting is a far smaller
-        // bug than a client that goes mute for the rest of the call.
-        if self.detector.is_voice_segment(frame).unwrap_or(true) {
+    fn hears_voice(&mut self, frame: &Frame, sensitivity: Sensitivity) -> bool {
+        if self.is_voice(frame, sensitivity) {
             self.hangover = HANGOVER_FRAMES;
             return true;
         }
@@ -136,6 +146,26 @@ impl Gate {
             return true;
         }
         false
+    }
+
+    /// This frame alone, before the hangover has its say.
+    ///
+    /// The two answers are not interchangeable and the setting exists because
+    /// of it. libfvad asks whether the sound is *shaped* like speech, which is
+    /// what makes it ignore a fan and a keyboard at any volume — and what
+    /// makes it occasionally ignore a quiet talker too. A threshold asks only
+    /// whether the sound is loud enough, which is blunt, and blunt is exactly
+    /// what someone wants after watching a meter move while nobody could hear
+    /// them.
+    fn is_voice(&mut self, frame: &Frame, sensitivity: Sensitivity) -> bool {
+        match sensitivity {
+            // A frame the detector refuses counts as voice. It can only happen
+            // on a frame length libfvad does not support, which a fixed 20 ms
+            // frame never is — and if that ever changed, transmitting is a far
+            // smaller bug than a client that goes mute for the rest of the call.
+            Sensitivity::Automatic => self.detector.is_voice_segment(frame).unwrap_or(true),
+            Sensitivity::Manual(threshold) => f32::from(peak(frame)) / FULL_SCALE >= threshold,
+        }
     }
 }
 
@@ -148,7 +178,10 @@ impl Default for Gate {
 #[cfg(test)]
 mod tests {
     use super::{Gate, TransmitMode, HANGOVER_FRAMES};
-    use crate::audio::opus::{silent_frame, Frame, FRAME_SAMPLES, SAMPLE_RATE_HZ};
+    use crate::audio::{
+        opus::{silent_frame, Frame, FRAME_SAMPLES, SAMPLE_RATE_HZ},
+        prefs::Sensitivity,
+    };
     use std::f32::consts::TAU;
 
     /// Something the detector will call voice: a 220 Hz tone with a little
@@ -179,46 +212,86 @@ mod tests {
         let mut gate = Gate::new();
 
         // Silence, key up: still on the wire. Open means open.
-        assert!(gate.admits(TransmitMode::Open, false, &silent_frame()));
+        assert!(gate.admits(
+            TransmitMode::Open,
+            false,
+            &silent_frame(),
+            Sensitivity::Automatic
+        ));
     }
 
     #[test]
     fn push_to_talk_follows_the_key_and_nothing_else() {
         let mut gate = Gate::new();
 
-        assert!(gate.admits(TransmitMode::PushToTalk, true, &silent_frame()));
-        assert!(!gate.admits(TransmitMode::PushToTalk, false, &speech()));
+        assert!(gate.admits(
+            TransmitMode::PushToTalk,
+            true,
+            &silent_frame(),
+            Sensitivity::Automatic
+        ));
+        assert!(!gate.admits(
+            TransmitMode::PushToTalk,
+            false,
+            &speech(),
+            Sensitivity::Automatic
+        ));
     }
 
     #[test]
     fn push_to_talk_closes_on_the_same_frame_the_key_comes_up() {
         let mut gate = Gate::new();
         // Talking, so voice activity would still be holding the gate open.
-        assert!(gate.admits(TransmitMode::PushToTalk, true, &speech()));
+        assert!(gate.admits(
+            TransmitMode::PushToTalk,
+            true,
+            &speech(),
+            Sensitivity::Automatic
+        ));
 
         // No tail: a mode chosen to not be overheard cannot have one.
-        assert!(!gate.admits(TransmitMode::PushToTalk, false, &speech()));
+        assert!(!gate.admits(
+            TransmitMode::PushToTalk,
+            false,
+            &speech(),
+            Sensitivity::Automatic
+        ));
     }
 
     #[test]
     fn voice_activity_opens_on_speech() {
         let mut gate = Gate::new();
 
-        assert!(gate.admits(TransmitMode::VoiceActivity, false, &speech()));
+        assert!(gate.admits(
+            TransmitMode::VoiceActivity,
+            false,
+            &speech(),
+            Sensitivity::Automatic
+        ));
         assert_eq!(gate.hangover_frames(), HANGOVER_FRAMES);
     }
 
     #[test]
     fn voice_activity_closes_on_silence_but_not_at_once() {
         let mut gate = Gate::new();
-        assert!(gate.admits(TransmitMode::VoiceActivity, false, &speech()));
+        assert!(gate.admits(
+            TransmitMode::VoiceActivity,
+            false,
+            &speech(),
+            Sensitivity::Automatic
+        ));
 
         // The hangover is what stops the gap between two words sounding like a
         // dropped connection, so the gate owes at least that many frames.
         let quiet = silent_frame();
         for frame in 0..HANGOVER_FRAMES {
             assert!(
-                gate.admits(TransmitMode::VoiceActivity, false, &quiet),
+                gate.admits(
+                    TransmitMode::VoiceActivity,
+                    false,
+                    &quiet,
+                    Sensitivity::Automatic
+                ),
                 "closed {frame} frames into a {HANGOVER_FRAMES}-frame hangover"
             );
         }
@@ -228,7 +301,12 @@ mod tests {
         // hangover before it starts counting down, so the tail is the two added
         // together rather than either alone.
         let mut overhang = 0;
-        while gate.admits(TransmitMode::VoiceActivity, false, &quiet) {
+        while gate.admits(
+            TransmitMode::VoiceActivity,
+            false,
+            &quiet,
+            Sensitivity::Automatic,
+        ) {
             overhang += 1;
             assert!(
                 overhang <= HANGOVER_FRAMES,
@@ -243,13 +321,28 @@ mod tests {
         let mut gate = Gate::new();
         let quiet = silent_frame();
 
-        gate.admits(TransmitMode::VoiceActivity, false, &speech());
+        gate.admits(
+            TransmitMode::VoiceActivity,
+            false,
+            &speech(),
+            Sensitivity::Automatic,
+        );
         for _ in 0..HANGOVER_FRAMES / 2 {
-            gate.admits(TransmitMode::VoiceActivity, false, &quiet);
+            gate.admits(
+                TransmitMode::VoiceActivity,
+                false,
+                &quiet,
+                Sensitivity::Automatic,
+            );
         }
         assert!(gate.hangover_frames() < HANGOVER_FRAMES);
 
-        gate.admits(TransmitMode::VoiceActivity, false, &speech());
+        gate.admits(
+            TransmitMode::VoiceActivity,
+            false,
+            &speech(),
+            Sensitivity::Automatic,
+        );
         assert_eq!(
             gate.hangover_frames(),
             HANGOVER_FRAMES,
@@ -264,8 +357,124 @@ mod tests {
 
         // Nothing has spoken yet, so there is no hangover to spend either.
         for _ in 0..100 {
-            assert!(!gate.admits(TransmitMode::VoiceActivity, false, &quiet));
+            assert!(!gate.admits(
+                TransmitMode::VoiceActivity,
+                false,
+                &quiet,
+                Sensitivity::Automatic
+            ));
         }
+    }
+
+    /// A frame at a known level, so a threshold test is about the threshold
+    /// and not about how loud `speech()` happens to be.
+    fn tone_at(peak: f32) -> Frame {
+        let mut frame = silent_frame();
+        #[allow(
+            clippy::cast_possible_truncation,
+            clippy::cast_precision_loss,
+            reason = "peak is a fraction of full scale by construction"
+        )]
+        for (index, sample) in frame.iter_mut().enumerate() {
+            let phase = TAU * 220.0 * index as f32 / SAMPLE_RATE_HZ as f32;
+            *sample = (phase.sin() * peak * 32_767.0) as i16;
+        }
+        frame
+    }
+
+    #[test]
+    fn a_manual_threshold_opens_on_loud_and_stays_shut_on_quiet() {
+        let mut gate = Gate::new();
+        let sensitivity = Sensitivity::Manual(0.10);
+
+        assert!(
+            !gate.admits(
+                TransmitMode::VoiceActivity,
+                false,
+                &tone_at(0.05),
+                sensitivity
+            ),
+            "half the threshold opened the gate"
+        );
+        assert!(gate.admits(
+            TransmitMode::VoiceActivity,
+            false,
+            &tone_at(0.20),
+            sensitivity
+        ));
+    }
+
+    /// The reason the setting exists, measured rather than assumed.
+    ///
+    /// libfvad in `Aggressive` mode at 48 kHz admits a 220 Hz tone at one
+    /// percent of full scale — it asks whether the sound is *shaped* like
+    /// speech, and a room's hum, a fan and a mechanical keyboard all pass that
+    /// question at any volume. A threshold asks the other question, and it is
+    /// the one somebody reaches for after watching the light come on while
+    /// they sit still.
+    #[test]
+    fn a_threshold_refuses_the_quiet_things_the_detector_lets_through() {
+        let background = tone_at(0.01);
+
+        let mut automatic = Gate::new();
+        let mut manual = Gate::new();
+
+        assert!(
+            automatic.admits(
+                TransmitMode::VoiceActivity,
+                false,
+                &background,
+                Sensitivity::Automatic
+            ),
+            "libfvad turned fussy; the premise of the manual threshold is that it is not"
+        );
+        assert!(!manual.admits(
+            TransmitMode::VoiceActivity,
+            false,
+            &background,
+            Sensitivity::Manual(0.10)
+        ));
+    }
+
+    #[test]
+    fn a_manual_gate_has_the_same_tail_as_the_detector() {
+        let mut gate = Gate::new();
+        let sensitivity = Sensitivity::Manual(0.10);
+        assert!(gate.admits(
+            TransmitMode::VoiceActivity,
+            false,
+            &tone_at(0.20),
+            sensitivity
+        ));
+
+        // The gap between two words is a gap in level too, so the hangover
+        // matters at least as much here as it does for the detector.
+        let quiet = silent_frame();
+        for frame in 0..HANGOVER_FRAMES {
+            assert!(
+                gate.admits(TransmitMode::VoiceActivity, false, &quiet, sensitivity),
+                "closed {frame} frames into a {HANGOVER_FRAMES}-frame hangover"
+            );
+        }
+        // And unlike the detector, nothing holds its own verdict on past the
+        // hangover: a level is over or it is not.
+        assert!(!gate.admits(TransmitMode::VoiceActivity, false, &quiet, sensitivity));
+    }
+
+    #[test]
+    fn the_sensitivity_setting_does_not_reach_the_other_two_modes() {
+        let mut gate = Gate::new();
+        // Nothing an unreachable threshold could admit.
+        let deaf = Sensitivity::Manual(1.0);
+
+        assert!(
+            gate.admits(TransmitMode::Open, false, &tone_at(0.001), deaf),
+            "open mode consulted a threshold"
+        );
+        assert!(
+            gate.admits(TransmitMode::PushToTalk, true, &silent_frame(), deaf),
+            "a held key was overruled by a threshold"
+        );
     }
 
     #[test]
@@ -291,6 +500,11 @@ mod tests {
         // this is the test that says so rather than a call that never opens.
         assert_eq!(FRAME_SAMPLES, 960);
         let mut gate = Gate::new();
-        assert!(gate.admits(TransmitMode::VoiceActivity, false, &speech()));
+        assert!(gate.admits(
+            TransmitMode::VoiceActivity,
+            false,
+            &speech(),
+            Sensitivity::Automatic
+        ));
     }
 }

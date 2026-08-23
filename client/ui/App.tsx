@@ -61,12 +61,35 @@ interface Controls {
   deafened: boolean;
 }
 
+/** Mirrors `Talker` in `src-tauri/src/rtc/session.rs`. */
+interface Talker {
+  id: string;
+  /** 0–1, quantised to 1/255 by the client. */
+  level: number;
+}
+
+/** Mirrors `Levels` in `src-tauri/src/rtc/session.rs`. */
+interface Levels {
+  talking: Talker[];
+  /** The microphone before mute and before the gate. */
+  input: number;
+}
+
+/** Mirrors `AudioSettings` in `src-tauri/src/audio/prefs.rs`. */
+interface AudioSettings {
+  automaticSensitivity: boolean;
+  threshold: number;
+  noiseSuppression: boolean;
+  echoCancellation: boolean;
+}
+
 /** Mirrors `Snapshot` in `src-tauri/src/lib.rs`. */
 interface Snapshot {
   call: CallStatus | null;
   controls: Controls;
   health: CallHealth | null;
-  speaking: string[];
+  speaking: Levels;
+  audio: AudioSettings;
 }
 
 /** The event `push_roster` emits. Kept in step with `ROSTER_EVENT`. */
@@ -146,6 +169,79 @@ const MODE_CHOICES: { id: ModePreference; label: string }[] = [
  */
 const MODE_STORE = "goodvoice.transmit-mode";
 const TALK_KEY_STORE = "goodvoice.talk-key";
+const AUDIO_STORE = "goodvoice.audio";
+
+/**
+ * The quietest and loudest a manual threshold can be. Mirrors
+ * `MIN_THRESHOLD` and `MAX_THRESHOLD` in `src-tauri/src/audio/prefs.rs`,
+ * which clamps whatever this sends anyway.
+ */
+const MIN_THRESHOLD = 0.002;
+const MAX_THRESHOLD = 0.25;
+
+/**
+ * The bottom of every meter in this window, in decibels below full scale.
+ *
+ * Levels arrive linear, and speech spends nearly all of its time in the bottom
+ * tenth of that range — drawn linearly, a conversation is a bar that never
+ * leaves the left edge. Decibels are the scale the ear uses and the scale the
+ * numbers were chosen on: `SPEAKING_LEVEL` is 0.02, which is −34 dB, and reads
+ * as a sensible two fifths of the way up rather than as 2%.
+ */
+const METER_FLOOR_DB = -60;
+
+/** A level as decibels below full scale. Silence is the floor, not −∞. */
+const decibels = (level: number) =>
+  level <= 0
+    ? METER_FLOOR_DB
+    : Math.max(METER_FLOOR_DB, 20 * Math.log10(level));
+
+/** A level as a 0–1 position on the meters. */
+const meterFraction = (level: number) =>
+  Math.min(
+    1,
+    Math.max(0, (decibels(level) - METER_FLOOR_DB) / -METER_FLOOR_DB),
+  );
+
+/** A decibel reading back to the linear level the client wants. */
+const levelFromDecibels = (db: number) =>
+  Math.min(MAX_THRESHOLD, Math.max(MIN_THRESHOLD, 10 ** (db / 20)));
+
+const DEFAULT_AUDIO: AudioSettings = {
+  automaticSensitivity: true,
+  threshold: 0.02,
+  noiseSuppression: true,
+  echoCancellation: true,
+};
+
+/** What was stored last run, if any of it still looks like settings. */
+const storedAudio = (): AudioSettings | null => {
+  const raw = localStorage.getItem(AUDIO_STORE);
+  if (!raw) {
+    return null;
+  }
+  try {
+    const parsed: unknown = JSON.parse(raw);
+    if (typeof parsed !== "object" || parsed === null) {
+      return null;
+    }
+    const held = parsed as Partial<AudioSettings>;
+    return {
+      automaticSensitivity:
+        held.automaticSensitivity ?? DEFAULT_AUDIO.automaticSensitivity,
+      threshold:
+        typeof held.threshold === "number" && Number.isFinite(held.threshold)
+          ? held.threshold
+          : DEFAULT_AUDIO.threshold,
+      noiseSuppression: held.noiseSuppression ?? DEFAULT_AUDIO.noiseSuppression,
+      echoCancellation: held.echoCancellation ?? DEFAULT_AUDIO.echoCancellation,
+    };
+  } catch {
+    // Storage somebody else wrote, or a half-written entry. The defaults are
+    // a working call; a thrown exception here would be a blank window.
+    return null;
+  }
+};
 
 /**
  * What a fresh install holds down. Space is reachable without a chord and is
@@ -176,10 +272,17 @@ const App: Component = () => {
   const [muted, setMuted] = createSignal(false);
   const [deafened, setDeafened] = createSignal(false);
   const [health, setHealth] = createSignal<CallState>({ state: "live" });
-  // Ids, not names: two people in a room may share a name, and the id is what
-  // the roster rows are keyed on anyway.
-  const [speaking, setSpeaking] = createSignal<ReadonlySet<string>>(
-    new Set<string>(),
+  // Keyed by id, not by name: two people in a room may share a name, and the
+  // id is what the roster rows are keyed on anyway. A level rather than
+  // membership — the dot fades now, and a set cannot say how bright.
+  const [speaking, setSpeaking] = createSignal<ReadonlyMap<string, number>>(
+    new Map<string, number>(),
+  );
+  /** The microphone before the gate, for the sensitivity meter. */
+  const [inputLevel, setInputLevel] = createSignal(0);
+
+  const [audio, setAudio] = createSignal<AudioSettings>(
+    storedAudio() ?? DEFAULT_AUDIO,
   );
 
   const savedMode = localStorage.getItem(MODE_STORE);
@@ -192,7 +295,7 @@ const App: Component = () => {
   const [rebinding, setRebinding] = createSignal(false);
   // Which screen is showing. Not part of the call's state: it survives joining
   // and leaving, and a call carries on underneath it.
-  const [appearance, setAppearance] = createSignal(false);
+  const [settings, setSettings] = createSignal(false);
   // Whether the key is heard from anywhere or only in this window. The two
   // look identical until somebody is inside a game, which is the one place it
   // matters, so the window says which one it has.
@@ -214,6 +317,22 @@ const App: Component = () => {
     }
   };
 
+  /**
+   * Hands the client the audio settings this window remembers.
+   *
+   * Unconditional and immediate, because they are not call state: the capture
+   * path reads them whether or not anyone has joined anything, and a client
+   * that autojoined before this window existed (task 4.6, `GOODVOICE_AUTOJOIN`)
+   * is running on defaults until it is told otherwise. When there is nothing
+   * stored, the snapshot below adopts whatever the client already has instead.
+   */
+  const held = storedAudio();
+  if (held) {
+    void invoke<AudioSettings>("set_audio_settings", { settings: held })
+      .then(setAudio)
+      .catch(() => {});
+  }
+
   // Subscribed once for the life of the window: the room the events belong to
   // is whichever call is open, and there is only ever one.
   const stopping = [
@@ -224,9 +343,12 @@ const App: Component = () => {
       setHealth({ state: "live" });
       setError(null);
     }),
-    listen<string[]>(SPEAKING_EVENT, (event) =>
-      setSpeaking(new Set(event.payload)),
-    ),
+    listen<Levels>(SPEAKING_EVENT, (event) => {
+      setSpeaking(
+        new Map(event.payload.talking.map((who) => [who.id, who.level])),
+      );
+      setInputLevel(event.payload.input);
+    }),
     listen<Controls>(CONTROLS_EVENT, (event) => {
       setMuted(event.payload.muted);
       setDeafened(event.payload.deafened);
@@ -240,7 +362,8 @@ const App: Component = () => {
       if (state.state === "ended") {
         setCall(null);
         setRoster([]);
-        setSpeaking(new Set<string>());
+        setSpeaking(new Map<string, number>());
+        setInputLevel(0);
         if (state.reason !== "left") {
           setError(state.detail);
         }
@@ -269,12 +392,18 @@ const App: Component = () => {
       }
       setMuted(status.controls.muted);
       setDeafened(status.controls.deafened);
+      if (!held) {
+        setAudio(status.audio);
+      }
       if (!status.call) {
         return;
       }
       setCall(status.call);
       setRoster(status.call.participants);
-      setSpeaking(new Set(status.speaking));
+      setSpeaking(
+        new Map(status.speaking.talking.map((who) => [who.id, who.level])),
+      );
+      setInputLevel(status.speaking.input);
       if (status.health) {
         const { self_id: _self, ...state } = status.health;
         setHealth(state);
@@ -390,7 +519,7 @@ const App: Component = () => {
       });
       setCall(status);
       setRoster(status.participants);
-      setSpeaking(new Set<string>());
+      setSpeaking(new Map<string, number>());
       setMuted(false);
       setDeafened(false);
       setHealth({ state: "live" });
@@ -406,7 +535,29 @@ const App: Component = () => {
     await invoke("leave_room");
     setCall(null);
     setRoster([]);
-    setSpeaking(new Set<string>());
+    setSpeaking(new Map<string, number>());
+    setInputLevel(0);
+  };
+
+  /**
+   * Stores the audio settings and sends them to the client.
+   *
+   * Both, every time, and in that order. Storage is what survives a restart —
+   * Rust holds these in memory only — and the client is what the microphone
+   * actually reads. What comes back is what was stored after clamping, which
+   * is not always what was sent, so the slider ends up where the value landed
+   * rather than where it aimed.
+   */
+  const changeAudio = (change: Partial<AudioSettings>) => {
+    const next = { ...audio(), ...change };
+    setAudio(next);
+    localStorage.setItem(AUDIO_STORE, JSON.stringify(next));
+    void invoke<AudioSettings>("set_audio_settings", { settings: next })
+      .then(setAudio)
+      .catch(() => {
+        // Nothing to recover: the settings are already stored, and the next
+        // change sends the whole set again.
+      });
   };
 
   /**
@@ -446,15 +597,155 @@ const App: Component = () => {
   };
 
   /**
-   * Palette, skin and mode. Its own screen rather than a section on the other
-   * two: it is opened rarely and read carefully, which is the opposite of
-   * everything else in this window, and the roster has no room to spare.
+   * A meter, drawn in decibels. Used for the input level and, with a marker,
+   * for the threshold the input is being judged against.
+   */
+  const Meter = (props: { level: number; threshold?: number }) => (
+    <div
+      class="meter"
+      style={{ "--fill": String(meterFraction(props.level)) }}
+      aria-hidden="true"
+    >
+      <span class="meter-fill" />
+      <Show when={props.threshold !== undefined}>
+        <span
+          class="meter-mark"
+          style={{ "--at": String(meterFraction(props.threshold ?? 0)) }}
+        />
+      </Show>
+    </div>
+  );
+
+  /**
+   * A switch. Two of them, and both are the same shape: a thing WebRTC does to
+   * the microphone that somebody might not want done.
+   */
+  const Toggle = (props: {
+    label: string;
+    hint: string;
+    on: boolean;
+    onChange: (on: boolean) => void;
+  }) => (
+    <div class="field">
+      <button
+        class="action toggle"
+        classList={{ "action-picked": props.on }}
+        type="button"
+        role="switch"
+        aria-checked={props.on}
+        onClick={() => props.onChange(!props.on)}
+      >
+        <span class="toggle-box" aria-hidden="true">
+          {props.on ? "\u00d7" : "\u00a0"}
+        </span>
+        {props.label}
+      </button>
+      <p class="notice">{props.hint}</p>
+    </div>
+  );
+
+  /**
+   * How loud the microphone has to be before the room hears it.
+   *
+   * Only shown in voice mode, because it is the only mode that asks the
+   * question: open mode sends everything and push to talk asks a key instead.
+   * The meter is live only during a call — the microphone is opened by the
+   * join, so before one there is nothing to measure.
+   */
+  const Sensitivity = () => (
+    <div class="field">
+      <span class="field-label">sensitivity</span>
+      <div class="modes">
+        <button
+          class="action"
+          classList={{ "action-picked": audio().automaticSensitivity }}
+          type="button"
+          aria-pressed={audio().automaticSensitivity}
+          onClick={() => changeAudio({ automaticSensitivity: true })}
+        >
+          automatic
+        </button>
+        <button
+          class="action"
+          classList={{ "action-picked": !audio().automaticSensitivity }}
+          type="button"
+          aria-pressed={!audio().automaticSensitivity}
+          onClick={() => changeAudio({ automaticSensitivity: false })}
+        >
+          manual
+        </button>
+      </div>
+
+      <Show
+        when={!audio().automaticSensitivity}
+        fallback={
+          <p class="notice">
+            a detector decides what is a voice. it ignores a keyboard at any
+            volume, and lets a quiet room through at almost none
+          </p>
+        }
+      >
+        <Meter level={inputLevel()} threshold={audio().threshold} />
+        <input
+          class="slider"
+          type="range"
+          min={decibels(MIN_THRESHOLD)}
+          max={decibels(MAX_THRESHOLD)}
+          step={0.5}
+          value={decibels(audio().threshold)}
+          aria-label="input threshold in decibels"
+          onInput={(event) =>
+            changeAudio({
+              threshold: levelFromDecibels(event.currentTarget.valueAsNumber),
+            })
+          }
+        />
+        <p class="notice">
+          {Math.round(decibels(audio().threshold))} dB — the room hears you past
+          the mark.{" "}
+          {call()
+            ? "talk, and put the mark just under where the bar sits."
+            : "the meter is live once you are in a room."}
+        </p>
+      </Show>
+    </div>
+  );
+
+  /**
+   * Everything that is a setting rather than a call. Its own screen rather
+   * than a section on the other two: it is opened rarely and read carefully,
+   * which is the opposite of everything else in this window, and the roster
+   * has no room to spare.
    *
    * Only the current mode's palettes are offered, so a click means "this one,
    * for this mode" and can never silently rewrite the other mode's choice.
    */
-  const Appearance = () => (
+  const Settings = () => (
     <section class="panel animate-enter">
+      <h2 class="section">audio</h2>
+
+      <TransmitSettings />
+
+      <Show when={mode() === "voice-activity"}>
+        <Sensitivity />
+      </Show>
+
+      <Toggle
+        label="noise suppression"
+        hint="takes a fan and a room's hum out from under your voice, and a little of the consonants with them"
+        on={audio().noiseSuppression}
+        onChange={(on) => changeAudio({ noiseSuppression: on })}
+      />
+
+      <Toggle
+        label="echo cancellation"
+        hint="stops the room hearing itself back. pointless on a headset, and the difference between a call and a howl on speakers"
+        on={audio().echoCancellation}
+        onChange={(on) => changeAudio({ echoCancellation: on })}
+      />
+
+      <h2 class="section">appearance</h2>
+
       <div class="field">
         <span class="field-label appearance-label">mode</span>
         <div class="modes">
@@ -508,7 +799,7 @@ const App: Component = () => {
       <button
         class="action action-primary"
         type="button"
-        onClick={() => setAppearance(false)}
+        onClick={() => setSettings(false)}
       >
         done
       </button>
@@ -541,9 +832,13 @@ const App: Component = () => {
   );
 
   /**
-   * How the microphone is gated. On both panels: someone who wants push to
-   * talk wants it *before* they join, and someone who guessed wrong wants it
-   * without leaving.
+   * How the microphone is gated.
+   *
+   * It used to sit on both the join form and the call panel, because someone
+   * who wants push to talk wants it *before* they join and someone who guessed
+   * wrong wants it without leaving. The settings screen answers both — it is
+   * one click from either place, and a call goes on running underneath it —
+   * and it gives the roster its room back.
    */
   const TransmitSettings = () => (
     <div class="field">
@@ -603,14 +898,14 @@ const App: Component = () => {
         <button
           class="action appearance-open"
           type="button"
-          aria-pressed={appearance()}
-          onClick={() => setAppearance(!appearance())}
+          aria-pressed={settings()}
+          onClick={() => setSettings(!settings())}
         >
-          {appearance() ? "back" : "appearance"}
+          {settings() ? "back" : "settings"}
         </button>
       </header>
 
-      <Show when={!appearance()} fallback={<Appearance />}>
+      <Show when={!settings()} fallback={<Settings />}>
         <Show
           when={call()}
           fallback={
@@ -641,8 +936,6 @@ const App: Component = () => {
                   disabled={joining()}
                 />
               </label>
-
-              <TransmitSettings />
 
               <button
                 class="action action-primary"
@@ -688,13 +981,18 @@ const App: Component = () => {
                     <li class="roster-row">
                       {/* Muted wins over talking: their last few buffered
                         frames can still be playing when the flag arrives, and
-                        a dot that says both at once says neither. */}
+                        a dot that says both at once says neither. Otherwise
+                        the dot is a level — grey at silence, the theme's
+                        accent at full voice, and every shade between. */}
                       <span
                         class="presence"
-                        classList={{
-                          "presence-quiet": peer.muted,
-                          "presence-live":
-                            !peer.muted && speaking().has(peer.id),
+                        classList={{ "presence-quiet": peer.muted }}
+                        style={{
+                          "--level": peer.muted
+                            ? "0"
+                            : String(
+                                meterFraction(speaking().get(peer.id) ?? 0),
+                              ),
                         }}
                         aria-hidden="true"
                       />
@@ -736,8 +1034,6 @@ const App: Component = () => {
                   {deafened() ? "undeafen" : "deafen"}
                 </button>
               </div>
-
-              <TransmitSettings />
 
               <button class="action action-leave" type="button" onClick={leave}>
                 leave

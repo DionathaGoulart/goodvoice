@@ -35,6 +35,7 @@ use goodvoice_client_lib::{
     audio::{
         device::{AudioSink, RecordingSink, ToneSource},
         opus::{Frame, SAMPLE_RATE_HZ},
+        prefs::AudioPrefs,
         vad::TransmitMode,
     },
     rtc::{
@@ -241,6 +242,7 @@ async fn join(
             // right to decide that is not a voice. This drill is about mute,
             // and a gate closing underneath it would look exactly like one.
             mode: TransmitMode::Open,
+            prefs: std::sync::Arc::new(AudioPrefs::default()),
         },
         Box::new(ToneSource::new(tone_hz)),
         Arc::clone(ears) as Arc<dyn AudioSink>,

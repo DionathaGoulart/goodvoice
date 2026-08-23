@@ -359,28 +359,145 @@ body {
   padding: 6px 2px;
 }
 
+/*
+ * How loud somebody is, as one dot.
+ *
+ * `--level` is set per row, 0 at silence and 1 at full scale, on a decibel
+ * curve the component computes. Grey is the resting state and the accent is
+ * the loud one, so a quiet room is a column of grey dots and a talking one
+ * lights up in the theme's own colour.
+ *
+ * The halo grows with the level rather than arriving at a threshold. A ring
+ * that appears is a light switch, and a light switch cannot show somebody
+ * trailing off — which is the difference this replaced.
+ *
+ * The transition is 80 ms, just under the 50 ms the levels arrive at, so the
+ * dot is always sliding toward the next reading rather than stepping to it.
+ * There is nothing here for reduced-motion to freeze: the movement *is* the
+ * information, and holding still would be showing the wrong level
+ * (styleguide.md §2.4).
+ */
 .presence {
-  background: var(--accent);
+  --level: 0;
+  background: color-mix(
+    in srgb,
+    var(--accent) calc(var(--level) * 100%),
+    var(--fg-muted)
+  );
   border-radius: 50%;
+  box-shadow: 0 0 0 calc(var(--level) * 4px)
+    color-mix(in srgb, var(--accent) calc(var(--level) * 32%), transparent);
   flex: 0 0 auto;
   height: 7px;
+  transition:
+    background-color 80ms linear,
+    box-shadow 80ms linear;
   width: 7px;
-  transition: box-shadow 120ms ease-out;
-}
-
-.presence-quiet {
-  background: var(--fg-muted);
 }
 
 /*
- * Talking. A halo rather than another colour: the dot's colour already carries
- * "can be heard", and a second meaning on the same channel would make both
- * harder to read. It is a transition and not an animation on purpose — the ring
- * arriving *is* the signal, so there is nothing here for reduced-motion to
- * freeze (styleguide.md §2.4).
+ * Muted beats loud. Their last buffered frames can still be playing when the
+ * flag arrives, and a dot that says both at once says neither — so this drops
+ * the level's colour entirely rather than mixing with it.
  */
-.presence-live {
-  box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 30%, transparent);
+.presence-quiet {
+  background: var(--fg-muted);
+  box-shadow: none;
+}
+
+/* --- settings ------------------------------------------------------------ */
+
+/*
+ * A heading inside the settings panel. There are two, and their whole job is
+ * to say that the appearance controls and the audio controls are different
+ * kinds of thing — so it is a rule and a word, not a size.
+ */
+.section {
+  border-bottom: var(--frame-border) solid var(--border);
+  color: var(--fg-muted);
+  font-size: 11px;
+  font-weight: inherit;
+  letter-spacing: 0.1em;
+  margin: 6px 0 0;
+  padding-bottom: 6px;
+  text-transform: uppercase;
+}
+
+.section:first-of-type {
+  margin-top: 0;
+}
+
+/*
+ * The input meter. `--fill` is the level on the same decibel scale the dots
+ * use, `--at` is where the threshold sits on it.
+ *
+ * Linear, not eased: this is an instrument. Easing would make it look nicer
+ * and lie about when the sound arrived, and the whole point of the bar is to
+ * be lined up against the mark at the moment somebody speaks.
+ */
+.meter {
+  background: var(--bg);
+  border: var(--frame-border) solid var(--border);
+  border-radius: var(--radius-field);
+  height: 10px;
+  overflow: hidden;
+  position: relative;
+}
+
+.meter-fill {
+  background: var(--accent);
+  bottom: 0;
+  left: 0;
+  position: absolute;
+  top: 0;
+  transform-origin: left center;
+  transform: scaleX(var(--fill, 0));
+  transition: transform 60ms linear;
+  width: 100%;
+}
+
+/*
+ * Where the gate opens. Drawn over the fill rather than under it: the reading
+ * that matters is whether the bar has reached the mark, and a mark the bar
+ * paints over cannot answer that.
+ */
+.meter-mark {
+  background: var(--fg);
+  bottom: 0;
+  left: calc(var(--at, 0) * 100%);
+  position: absolute;
+  top: 0;
+  width: 2px;
+}
+
+.slider {
+  accent-color: var(--accent);
+  height: 18px;
+  width: 100%;
+}
+
+/*
+ * A switch, built out of the same button as everything else — one border
+ * language in the window (styleguide.md §3.3). The box carries the state as a
+ * shape as well as a colour, because "on" and "off" cannot rest on hue alone.
+ */
+.toggle {
+  align-items: center;
+  display: flex;
+  gap: 8px;
+  justify-content: flex-start;
+}
+
+.toggle-box {
+  border: var(--frame-border) solid currentcolor;
+  border-radius: 2px;
+  display: inline-block;
+  flex: 0 0 auto;
+  font-size: 11px;
+  height: 13px;
+  line-height: 11px;
+  text-align: center;
+  width: 13px;
 }
 
 /* --- notices ------------------------------------------------------------- */

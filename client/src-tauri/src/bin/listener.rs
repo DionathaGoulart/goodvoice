@@ -43,6 +43,7 @@ use goodvoice_client_lib::{
         device::{AudioSink, RecordingSink, ToneSource},
         mixer::peak,
         opus::{Frame, FRAME_SAMPLES, SAMPLE_RATE_HZ},
+        prefs::AudioPrefs,
         vad::TransmitMode,
     },
     rtc::session::{Call, CallOptions},
@@ -84,6 +85,7 @@ async fn main() -> Result<()> {
             // Open, always: a gate here would make the tone come and go and
             // the far end's echo column meaningless.
             mode: TransmitMode::Open,
+            prefs: std::sync::Arc::new(AudioPrefs::default()),
         },
         // 0 Hz is a sine of zero: a source that is genuinely silent rather
         // than one that is merely quiet.

@@ -31,6 +31,7 @@ use rtc::{
         PayloadType,
     },
 };
+use serde::Serialize;
 use serde_json::{json, Value};
 use tokio::{
     sync::{mpsc, watch, Notify},
@@ -61,10 +62,11 @@ use super::{
 };
 use crate::audio::{
     device::{AudioSink, AudioSource, MAX_REMOTE_SLOTS},
-    mixer::{peak, Meter, MAX_GAIN, SPEAKING_LEVEL},
+    mixer::{peak, Meter, MAX_GAIN},
     opus::{
         silent_frame, Frame, VoiceDecoder, VoiceEncoder, FRAME_MS, MAX_PACKET_BYTES, SAMPLE_RATE_HZ,
     },
+    prefs::AudioPrefs,
     vad::{Gate, TransmitMode},
 };
 
@@ -115,10 +117,25 @@ const SUBSCRIBE_BACKOFF: Duration = Duration::from_millis(500);
 /// silent until the roster happens to change again.
 const RESUBSCRIBE_INTERVAL: Duration = Duration::from_secs(2);
 
-/// How often the speaking indicator is recomputed. Fast enough that the roster
-/// lights up with the first syllable rather than after it, slow enough that a
-/// room full of listeners is doing nothing ten times a second.
-const METER_INTERVAL: Duration = Duration::from_millis(100);
+/// How often the speaking indicator is recomputed.
+///
+/// 50 ms rather than 100: the indicator draws a *level* now, not a yes or no,
+/// and at ten frames a second a level moves in visible steps. A quiet room
+/// still costs nothing — [`Shared::refresh_speaking`] pushes only when the
+/// numbers change, and in a room where nobody is talking they are all zero.
+const METER_INTERVAL: Duration = Duration::from_millis(50);
+
+/// Below this, a level is drawn as silence anyway, so it is left out of the
+/// push entirely. What makes a quiet room free: every level under this rounds
+/// to the same empty list, which compares equal to the last one.
+const AUDIBLE_LEVEL: f32 = 0.004;
+
+/// How finely a level is reported: 1/255 of full scale.
+///
+/// Quantised for one reason — a floating-point level jitters in its last bits
+/// even from a still microphone, and an unquantised comparison would call that
+/// "changed" and push it, fifty times a second, forever.
+const LEVEL_STEPS: f32 = 255.0;
 
 /// How many times to build a peer connection before giving up on the room, and
 /// the unit of backoff between tries (multiplied by the attempt number).
@@ -154,6 +171,10 @@ pub struct CallOptions {
     /// from disk and hands it over, so a client that joins in push-to-talk
     /// never has a hot microphone for the first frame.
     pub mode: TransmitMode,
+    /// The audio settings, shared with the capture path that was opened before
+    /// this call existed and will outlive it. The same `Arc` the app holds, so
+    /// a slider moved between two calls is still where the user left it.
+    pub prefs: Arc<AudioPrefs>,
 }
 
 /// One connected seat in the room, before any of the call's tasks are running.
@@ -238,6 +259,71 @@ async fn establish(
 /// connection. What the user thinks of as "the call" is this: the room they are
 /// in, whether they are muted, and what the UI is being told. Held in one place
 /// so a rejoin can restore it rather than reset it.
+/// One person and how loud they are right now, as the window draws them.
+///
+/// A level rather than a flag. The flag it replaces was true or false at
+/// `mixer::SPEAKING_LEVEL` and nowhere in between, which is a light switch —
+/// and a light switch cannot show the difference between someone talking and
+/// someone breathing near a sensitive microphone.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct Talker {
+    /// The participant id, as the roster spells it.
+    pub id: String,
+    /// `0.0`–`1.0`, quantised to [`LEVEL_STEPS`].
+    pub level: f32,
+}
+
+impl Talker {
+    /// A talker, or `None` for a level nobody would see.
+    fn new(id: &str, level: f32) -> Option<Self> {
+        let level = quantise(level);
+        if level == 0.0 {
+            return None;
+        }
+        Some(Self {
+            id: id.to_owned(),
+            level,
+        })
+    }
+}
+
+/// A level to 1/255, or exactly zero for anything under [`AUDIBLE_LEVEL`].
+///
+/// Both halves earn their place. Quantising stops a still microphone's last
+/// floating-point bits reading as a change fifty times a second; the floor
+/// stops a room where nobody is talking from pushing anything at all, because
+/// every level in it collapses to the same zero.
+fn quantise(level: f32) -> f32 {
+    // NaN spelled out rather than relying on a negated comparison: a level
+    // that is not a number must read as silence, not as a dot nobody can
+    // switch off.
+    if level.is_nan() || level < AUDIBLE_LEVEL {
+        return 0.0;
+    }
+    #[allow(
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        reason = "clamped into 0.0..=1.0 on the line below"
+    )]
+    let steps = (level.clamp(0.0, 1.0) * LEVEL_STEPS).round() as u8;
+    f32::from(steps) / LEVEL_STEPS
+}
+
+/// Everything the window's meters are drawn from, in one push.
+///
+/// Two numbers that move together and are read together. Splitting them into
+/// two channels would mean two wakeups and two events per tick for a window
+/// that redraws once.
+#[derive(Debug, Clone, Default, PartialEq, Serialize)]
+pub struct Levels {
+    /// Everyone audible right now, this client included.
+    pub talking: Vec<Talker>,
+    /// The microphone *before* mute and before the gate — the only meter that
+    /// still moves while a threshold is holding transmission shut, which is
+    /// exactly when somebody is looking at it.
+    pub input: f32,
+}
+
 struct Shared {
     muted: AtomicBool,
     deafened: AtomicBool,
@@ -264,7 +350,15 @@ struct Shared {
     roster: watch::Sender<Vec<Participant>>,
     /// Who is talking right now, this client included. Pushed only when the set
     /// changes, so a quiet room costs the UI nothing.
-    speaking: watch::Sender<Vec<String>>,
+    speaking: watch::Sender<Levels>,
+    /// How loud the microphone is *before* the gate has its say. The roster
+    /// meter follows what the room hears; this one follows what the machine
+    /// hears, which is the only thing worth showing to somebody setting a
+    /// threshold.
+    input: Meter,
+    /// The settings the user can move mid-call. Shared with the capture path,
+    /// which reconfigures WebRTC when the generation moves.
+    prefs: Arc<AudioPrefs>,
     /// Where remote audio goes, and where its levels come from.
     sink: Arc<dyn AudioSink>,
     /// Which playback slot each participant is being played in. Written by
@@ -286,6 +380,7 @@ impl Shared {
         participants: Vec<Participant>,
         sink: Arc<dyn AudioSink>,
         mode: TransmitMode,
+        prefs: Arc<AudioPrefs>,
     ) -> Arc<Self> {
         Arc::new(Self {
             muted: AtomicBool::new(false),
@@ -298,10 +393,12 @@ impl Shared {
             state: watch::Sender::new(CallState::Live),
             self_id: watch::Sender::new(self_id),
             roster: watch::Sender::new(participants),
-            speaking: watch::Sender::new(Vec::new()),
+            speaking: watch::Sender::new(Levels::default()),
             sink,
             slots: Mutex::new(HashMap::new()),
             microphone: Meter::new(),
+            input: Meter::new(),
+            prefs,
             lost: Notify::new(),
         })
     }
@@ -329,36 +426,41 @@ impl Shared {
         self.slots.lock().ok()?.get(participant).copied()
     }
 
-    /// Rebuilds the set of people who are talking, and pushes it only if it
-    /// moved.
+    /// Rebuilds how loud everybody is, and pushes it only if it moved.
     ///
-    /// Sorted so two identical sets compare equal: the point of the comparison
-    /// is to leave a quiet room pushing nothing at all.
+    /// Sorted so two identical readings compare equal: the point of the
+    /// comparison is to leave a quiet room pushing nothing at all.
     fn refresh_speaking(&self) {
-        let mut talking: Vec<String> = self
+        let mut talking: Vec<Talker> = self
             .slots
             .lock()
             .map(|slots| {
                 slots
                     .iter()
-                    .filter(|(_, &slot)| self.sink.level(slot) >= SPEAKING_LEVEL)
-                    .map(|(id, _)| id.clone())
+                    .filter_map(|(id, &slot)| Talker::new(id, self.sink.level(slot)))
                     .collect()
             })
             .unwrap_or_default();
 
-        // Muted is not talking, whatever the microphone says — and neither
-        // is a push-to-talk key that is up or a voice gate that never opened.
-        if self.microphone.is_speaking()
-            && self.is_transmitting()
-            && self.gate_open.load(Ordering::Relaxed)
-        {
-            talking.push(self.self_id.borrow().clone());
+        // Muted is not talking, whatever the microphone says — and neither is
+        // a push-to-talk key that is up or a voice gate that never opened. The
+        // meter behind this one already reads zero in all three cases; this is
+        // what makes it true on the very frame the key comes up, rather than
+        // as fast as a meter can fall.
+        if self.is_transmitting() && self.gate_open.load(Ordering::Relaxed) {
+            talking.extend(Talker::new(
+                self.self_id.borrow().as_str(),
+                self.microphone.level(),
+            ));
         }
-        talking.sort_unstable();
+        talking.sort_unstable_by(|left, right| left.id.cmp(&right.id));
 
-        if *self.speaking.borrow() != talking {
-            self.speaking.send_replace(talking);
+        let levels = Levels {
+            talking,
+            input: quantise(self.input.level()),
+        };
+        if *self.speaking.borrow() != levels {
+            self.speaking.send_replace(levels);
         }
     }
 
@@ -374,8 +476,8 @@ impl Shared {
             slots.clear();
         }
         self.microphone.reset();
-        if !self.speaking.borrow().is_empty() {
-            self.speaking.send_replace(Vec::new());
+        if *self.speaking.borrow() != Levels::default() {
+            self.speaking.send_replace(Levels::default());
         }
     }
 
@@ -454,7 +556,7 @@ pub struct Call {
     roster: watch::Receiver<Vec<Participant>>,
     state: watch::Receiver<CallState>,
     self_id: watch::Receiver<String>,
-    speaking: watch::Receiver<Vec<String>>,
+    speaking: watch::Receiver<Levels>,
     /// The supervisor, kept apart from the rest so [`Self::leave`] can wait for
     /// it to close the transport before the process moves on.
     supervisor: Option<JoinHandle<()>>,
@@ -515,6 +617,7 @@ impl Call {
             session.participants.clone(),
             sink,
             options.mode,
+            Arc::clone(&options.prefs),
         );
         let (roster, state, self_id, speaking) = (
             shared.roster.subscribe(),
@@ -595,8 +698,15 @@ impl Call {
     /// costs nothing at all — which is the point, given the client has to idle
     /// under 2% CPU (prd.md §4).
     #[must_use]
-    pub fn speaking(&self) -> watch::Receiver<Vec<String>> {
+    pub fn speaking(&self) -> watch::Receiver<Levels> {
         self.speaking.clone()
+    }
+
+    /// How loud the microphone is, before mute or the gate. What a threshold
+    /// is set against.
+    #[must_use]
+    pub fn input_level(&self) -> f32 {
+        self.shared.input.level()
     }
 
     /// How loud one participant is right now, `0.0`–`1.0`. Unknown ids and
@@ -1476,8 +1586,19 @@ async fn publish_loop(
         // answers the same question one frame at a time: push-to-talk and
         // voice activity both live there (task 3.3), and neither is consulted
         // while muted, so a muted client does not run a detector either.
+        // Before the gate, and unconditionally: this is the only meter that
+        // still moves while the gate is shut, which is the whole use of it —
+        // somebody setting a threshold is by definition below one.
+        let loudness = peak(&frame);
+        shared.input.observe(loudness);
+
         let open = shared.is_transmitting()
-            && gate.admits(shared.transmit_mode(), shared.talk_key_down(), &frame);
+            && gate.admits(
+                shared.transmit_mode(),
+                shared.talk_key_down(),
+                &frame,
+                shared.prefs.sensitivity(),
+            );
         shared.gate_open.store(open, Ordering::Relaxed);
         if !open {
             // The meter follows what the room hears, so a client whose audio
@@ -1487,7 +1608,7 @@ async fn publish_loop(
         }
         // This is the only place the outgoing signal exists as samples, so it
         // is the only place the "you are talking" indicator can come from.
-        shared.microphone.observe(peak(&frame));
+        shared.microphone.observe(loudness);
         // Cloned out of the watch immediately: the borrow it hands back is not
         // `Send` and this is about to await.
         let sink = sinks.borrow().clone();
@@ -1919,9 +2040,9 @@ fn ssrc_for_mid(sdp: &str, mid: &str) -> Option<u32> {
 mod tests {
     use super::{
         is_starting_up, play_packet, publish_loop, silent_frame, ssrc_for_mid, ssrc_of,
-        track_error, wait_for_gathering, Events, PacketSink, PeerConnectionEventHandler,
-        RTCIceCandidateType, RTCIceGatheringState, RTCPeerConnectionIceEvent, Shared, TransmitMode,
-        CONNECT_TIMEOUT, GATHER_QUIET,
+        track_error, wait_for_gathering, AudioPrefs, Events, PacketSink,
+        PeerConnectionEventHandler, RTCIceCandidateType, RTCIceGatheringState,
+        RTCPeerConnectionIceEvent, Shared, TransmitMode, CONNECT_TIMEOUT, GATHER_QUIET,
     };
     use crate::audio::{
         device::{AudioSink, AudioSource, NullSink, RecordingSink, ToneSource},
@@ -2055,6 +2176,7 @@ mod tests {
             vec![],
             Arc::new(NullSink),
             TransmitMode::Open,
+            Arc::new(AudioPrefs::default()),
         )
     }
 
@@ -2066,6 +2188,7 @@ mod tests {
             vec![],
             Arc::clone(&ears) as Arc<dyn AudioSink>,
             TransmitMode::Open,
+            Arc::new(AudioPrefs::default()),
         );
         (shared, ears)
     }
@@ -2182,6 +2305,7 @@ mod tests {
             vec![],
             Arc::clone(&levels) as Arc<dyn AudioSink>,
             TransmitMode::Open,
+            Arc::new(AudioPrefs::default()),
         );
         shared
             .slots
@@ -2191,17 +2315,71 @@ mod tests {
         (shared, levels)
     }
 
+    /// Who the last push named, in order.
+    fn talkers(shared: &Shared) -> Vec<String> {
+        shared
+            .speaking
+            .borrow()
+            .talking
+            .iter()
+            .map(|talker| talker.id.clone())
+            .collect()
+    }
+
     #[test]
     fn a_loud_slot_puts_its_participant_in_the_speaking_set() {
         let (shared, levels) = metered();
 
         levels.set(0, SPEAKING_LEVEL * 2.0);
         shared.refresh_speaking();
-        assert_eq!(*shared.speaking.borrow(), vec!["them".to_owned()]);
+        assert_eq!(talkers(&shared), vec!["them".to_owned()]);
 
+        // Still above the floor the push uses, so they are still listed — at a
+        // lower level. Half of "speaking" is a person trailing off, and the
+        // indicator's whole job now is to show that rather than to blink out.
         levels.set(0, SPEAKING_LEVEL / 2.0);
         shared.refresh_speaking();
-        assert!(shared.speaking.borrow().is_empty());
+        assert_eq!(talkers(&shared), vec!["them".to_owned()]);
+
+        levels.set(0, 0.0);
+        shared.refresh_speaking();
+        assert!(shared.speaking.borrow().talking.is_empty());
+    }
+
+    #[test]
+    fn a_louder_slot_reports_a_higher_level() {
+        let (shared, levels) = metered();
+
+        levels.set(0, 0.2);
+        shared.refresh_speaking();
+        let quiet = shared.speaking.borrow().talking[0].level;
+
+        levels.set(0, 0.8);
+        shared.refresh_speaking();
+        let loud = shared.speaking.borrow().talking[0].level;
+
+        assert!(
+            loud > quiet,
+            "the meter reported {loud} for a loud speaker and {quiet} for a quiet one"
+        );
+    }
+
+    #[test]
+    fn the_input_meter_moves_while_the_gate_holds_transmission_shut() {
+        // The reason it exists: somebody setting a threshold is, by
+        // definition, below one. A meter that only moved when the gate was
+        // open would be blank at exactly the moment it is being read.
+        let (shared, _levels) = metered();
+        shared.gate_open.store(false, Ordering::Relaxed);
+        shared.input.observe(20_000);
+
+        shared.refresh_speaking();
+
+        assert!(shared.speaking.borrow().talking.is_empty());
+        assert!(
+            shared.speaking.borrow().input > 0.0,
+            "the input meter read silent on a microphone that was not"
+        );
     }
 
     #[test]
@@ -2224,7 +2402,7 @@ mod tests {
 
         shared.microphone.observe(20_000);
         shared.refresh_speaking();
-        assert_eq!(*shared.speaking.borrow(), vec!["me".to_owned()]);
+        assert_eq!(talkers(&shared), vec!["me".to_owned()]);
     }
 
     #[test]
@@ -2236,7 +2414,7 @@ mod tests {
         shared.refresh_speaking();
 
         assert!(
-            shared.speaking.borrow().is_empty(),
+            shared.speaking.borrow().talking.is_empty(),
             "a muted client showed up as talking; nobody can hear them"
         );
     }
@@ -2250,11 +2428,11 @@ mod tests {
         levels.set(0, SPEAKING_LEVEL * 2.0);
         shared.microphone.observe(20_000);
         shared.refresh_speaking();
-        assert_eq!(shared.speaking.borrow().len(), 2);
+        assert_eq!(shared.speaking.borrow().talking.len(), 2);
 
         shared.silence();
 
-        assert!(shared.speaking.borrow().is_empty());
+        assert!(shared.speaking.borrow().talking.is_empty());
         assert!(
             shared.slot_of("them").is_none(),
             "a name still pointing at a slot the next seat will re-hand-out"
@@ -2262,7 +2440,7 @@ mod tests {
         // The levels the sink reports have not moved; it is this client that
         // has stopped believing them.
         shared.refresh_speaking();
-        assert!(shared.speaking.borrow().is_empty());
+        assert!(shared.speaking.borrow().talking.is_empty());
     }
 
     // --- the encode loop, without a network ------------------------------
@@ -2429,7 +2607,7 @@ mod tests {
         // has to go out with the key, not at the speed the meter decays.
         shared.microphone.observe(20_000);
         shared.refresh_speaking();
-        assert!(shared.speaking.borrow().is_empty());
+        assert!(shared.speaking.borrow().talking.is_empty());
     }
 
     #[tokio::test]

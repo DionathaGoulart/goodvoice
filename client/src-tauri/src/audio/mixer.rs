@@ -40,11 +40,22 @@ const UNITY: u16 = 256;
 /// weapon.
 pub const MAX_GAIN: f32 = 4.0;
 
-/// How fast a level falls when a speaker stops. One 64th per block: at a
-/// typical 10 ms callback that is a little under a second to fade from full
-/// scale, which is what stops a speaking indicator flickering between words
-/// without letting it lie about who is talking.
+/// How fast the *decision* level falls when a speaker stops. One 64th per
+/// block: at a typical 10 ms callback that is a couple of seconds to fade from
+/// full scale, which is what stops "who is talking" flickering between words.
 const LEVEL_DECAY: u16 = 64;
+
+/// How fast the *displayed* level falls. A quarter per block: from full scale
+/// down to the speaking threshold in about 14 blocks, which is 140 ms of a
+/// remote speaker's 10 ms render callbacks and 280 ms of this client's own
+/// 20 ms frames.
+///
+/// Two decays rather than one because the same meter answers two questions
+/// with opposite needs. "Is this person talking" wants to hold on through the
+/// gap between two words. "How loud are they right now" is a meter, and a
+/// meter that takes seconds to come down is not showing the voice anyone is
+/// looking at — it is showing the loudest thing that happened recently.
+const DISPLAY_DECAY: u16 = 4;
 
 /// Where a level crosses from "background" into "talking". Roughly -34 dBFS,
 /// low enough to catch a quiet talker and high enough to ignore the noise
@@ -58,41 +69,65 @@ const FULL_SCALE: f32 = i16::MAX as f32;
 /// How loud one stream has been lately, in a form a device callback can write
 /// and any thread can read.
 ///
-/// Attack is immediate and release is slow, which is what a speaking indicator
-/// wants: missing the first syllable of a sentence is worse than holding the
-/// light on for a moment after it, and a meter that tracked the signal exactly
-/// would flicker between every word.
+/// Attack is immediate on both halves. Release is not: [`Meter::is_speaking`]
+/// falls slowly, because missing the first syllable of a sentence is worse
+/// than holding a light on for a moment after it, while [`Meter::level`] falls
+/// quickly, because it is drawn as a level and a level that lags behind the
+/// voice is read as a bug in the app.
 #[derive(Debug, Default)]
-pub struct Meter(AtomicU16);
+pub struct Meter {
+    /// Slow release. What "is this person talking" is decided on.
+    held: AtomicU16,
+    /// Fast release. What gets drawn.
+    shown: AtomicU16,
+}
 
 impl Meter {
     #[must_use]
     pub const fn new() -> Self {
-        Self(AtomicU16::new(0))
+        Self {
+            held: AtomicU16::new(0),
+            shown: AtomicU16::new(0),
+        }
     }
 
     /// Feeds the meter the loudest sample of one block.
     pub fn observe(&self, peak: u16) {
-        let previous = self.0.load(Ordering::Relaxed);
-        let decayed = previous - previous / LEVEL_DECAY;
-        self.0.store(peak.max(decayed), Ordering::Relaxed);
+        Self::advance(&self.held, peak, LEVEL_DECAY);
+        Self::advance(&self.shown, peak, DISPLAY_DECAY);
     }
 
-    /// The level, `0.0`–`1.0`.
+    /// One peak into one decaying store: `peak.max` is the attack, the
+    /// subtraction is the release.
+    ///
+    /// At least one step, or the release stalls. `previous / decay` is integer
+    /// division, so below `decay` it is zero and the level stops falling —
+    /// which left the old meter resting at 63/32767 for the rest of the call.
+    /// That was invisible under a threshold and is not under a fading dot.
+    /// `saturating_sub` is what makes the floor case safe: at zero there is
+    /// nothing left to take.
+    fn advance(store: &AtomicU16, peak: u16, decay: u16) {
+        let previous = store.load(Ordering::Relaxed);
+        let decayed = previous.saturating_sub((previous / decay).max(1));
+        store.store(peak.max(decayed), Ordering::Relaxed);
+    }
+
+    /// The level to draw, `0.0`–`1.0`.
     #[must_use]
     pub fn level(&self) -> f32 {
-        f32::from(self.0.load(Ordering::Relaxed)) / FULL_SCALE
+        f32::from(self.shown.load(Ordering::Relaxed)) / FULL_SCALE
     }
 
     /// Whether this stream is loud enough to call talking.
     #[must_use]
     pub fn is_speaking(&self) -> bool {
-        self.level() >= SPEAKING_LEVEL
+        f32::from(self.held.load(Ordering::Relaxed)) / FULL_SCALE >= SPEAKING_LEVEL
     }
 
     /// Back to silence at once, for a stream that stopped rather than faded.
     pub fn reset(&self) {
-        self.0.store(0, Ordering::Relaxed);
+        self.held.store(0, Ordering::Relaxed);
+        self.shown.store(0, Ordering::Relaxed);
     }
 }
 
@@ -426,20 +461,32 @@ mod tests {
         );
         assert!(playback.is_speaking(0));
 
-        // Silence from here on: the level has to come down on its own, and not
-        // all at once — a hard reset would flicker between words.
+        // Silence from here on. The drawn level has to come down on its own
+        // and not all at once — a hard reset would be a dot that snaps to grey
+        // mid-word — but it comes down quickly, because it is a meter.
         mixer.render(&mut out);
         let straight_after = playback.level(0);
-        assert!(straight_after < talking);
+        assert!(straight_after < talking, "the meter did not move at all");
         assert!(
-            straight_after > talking * 0.9,
-            "the release is too fast to ride out a pause between words"
+            straight_after > talking * 0.5,
+            "the drawn level halved in one block; that is a jump, not a release"
+        );
+
+        // The *decision* behind it is the slow one, and still holding: this is
+        // the gap between two words, and nobody has stopped talking.
+        assert!(
+            playback.is_speaking(0),
+            "one silent block put the speaking indicator out"
         );
 
         for _ in 0..600 {
             mixer.render(&mut out);
         }
         assert!(!playback.is_speaking(0), "a silent speaker never stopped");
+        assert!(
+            playback.level(0) < f32::EPSILON,
+            "the drawn level never reached zero"
+        );
     }
 
     #[test]

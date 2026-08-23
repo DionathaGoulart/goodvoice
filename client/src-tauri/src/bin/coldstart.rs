@@ -130,6 +130,7 @@ async fn one_run(base: &str, exe: &PathBuf) -> Result<Run> {
             room: room.clone(),
             name: "coldstart-ears".to_owned(),
             mode: goodvoice_client_lib::audio::vad::TransmitMode::Open,
+            prefs: std::sync::Arc::new(goodvoice_client_lib::audio::prefs::AudioPrefs::default()),
         },
         Box::new(Silence),
         Arc::clone(&heard) as Arc<dyn AudioSink>,

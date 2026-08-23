@@ -11,12 +11,27 @@
 //!
 //! `m` toggles mute, `d` toggles deafen, `q` leaves. The roster is printed
 //! whenever it changes.
+//!
+//! `--mode` and `--threshold` reach the gate the settings panel drives, so the
+//! same thing a slider does can be measured from a script:
+//!
+//! ```text
+//! cargo run --bin call -- --room squad --mode voice --threshold 0.9
+//! ```
+//!
+//! A threshold of 0.9 is a gate nothing short of a shout opens; run
+//! `bin/listener` in the same room and it should count no frames at all.
 
 use std::{env, io::BufRead as _, sync::Arc, time::Duration};
 
 use anyhow::{Context as _, Result};
 use goodvoice_client_lib::{
-    audio::{device::AudioSink, hardware, vad::TransmitMode},
+    audio::{
+        device::AudioSink,
+        hardware,
+        prefs::{AudioPrefs, AudioSettings},
+        vad::TransmitMode,
+    },
     rtc::session::{Call, CallOptions},
 };
 
@@ -31,7 +46,9 @@ async fn main() -> Result<()> {
         options.room, options.name, options.base
     );
 
-    let (microphone, speakers) = hardware::open().context("no usable audio device")?;
+    let prefs = std::sync::Arc::new(AudioPrefs::default());
+    let (microphone, speakers) =
+        hardware::open(std::sync::Arc::clone(&prefs)).context("no usable audio device")?;
     println!("audio devices open at 48 kHz");
 
     let call = Call::join(
@@ -135,9 +152,12 @@ fn args() -> CallOptions {
         room: DEFAULT_ROOM.to_owned(),
         name: whoami(),
         // A windowless client has no key to hold and nobody watching a
-        // setting, so it talks whenever its microphone does.
+        // setting, so it talks whenever its microphone does — unless `--mode`
+        // says otherwise.
         mode: TransmitMode::Open,
+        prefs: Arc::new(AudioPrefs::default()),
     };
+    let mut settings = AudioSettings::default();
 
     let mut argv = env::args().skip(1);
     while let Some(flag) = argv.next() {
@@ -149,9 +169,46 @@ fn args() -> CallOptions {
             "--base" => options.base = value,
             "--room" => options.room = value,
             "--name" => options.name = value,
+            "--mode" => {
+                options.mode = match value.as_str() {
+                    "voice" => TransmitMode::VoiceActivity,
+                    "ptt" => TransmitMode::PushToTalk,
+                    _ => TransmitMode::Open,
+                };
+            }
+            // Setting one at all is what "manual" means, so this says so
+            // rather than asking for a second flag that could disagree.
+            "--threshold" => match value.parse::<f32>() {
+                Ok(threshold) => {
+                    settings.automatic_sensitivity = false;
+                    settings.threshold = threshold;
+                }
+                Err(_) => eprintln!("--threshold wants a number, got {value}"),
+            },
+            "--noise" => settings.noise_suppression = value != "off",
+            "--echo" => settings.echo_cancellation = value != "off",
             other => eprintln!("ignoring unknown argument {other}"),
         }
     }
+    let settings = options.prefs.set(settings);
+    println!(
+        "sensitivity {}, noise suppression {}, echo cancellation {}",
+        if settings.automatic_sensitivity {
+            "automatic".to_owned()
+        } else {
+            format!("manual at {:.3}", settings.threshold)
+        },
+        if settings.noise_suppression {
+            "on"
+        } else {
+            "off"
+        },
+        if settings.echo_cancellation {
+            "on"
+        } else {
+            "off"
+        },
+    );
 
     options
         .base

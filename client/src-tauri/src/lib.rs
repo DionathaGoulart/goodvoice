@@ -19,10 +19,15 @@ use serde::Serialize;
 use tauri::{AppHandle, Emitter as _, Manager as _, State};
 use tokio::sync::{watch, Mutex};
 
-use audio::{device::AudioSink, hardware, vad::TransmitMode};
+use audio::{
+    device::AudioSink,
+    hardware,
+    prefs::{AudioPrefs, AudioSettings},
+    vad::TransmitMode,
+};
 use rtc::{
     reconnect::CallState,
-    session::{Call, CallOptions},
+    session::{Call, CallOptions, Levels},
     signaling::Participant,
 };
 use tray::hotkey;
@@ -65,12 +70,12 @@ const STATE_EVENT: &str = "goodvoice://state";
 /// the source of truth for either — it is told, the same as the tray is.
 const CONTROLS_EVENT: &str = "goodvoice://controls";
 
-/// The event the UI listens on for who is talking, as participant ids.
+/// The event the UI listens on for how loud everyone is, this client included.
 ///
 /// Separate from the roster because the two move at completely different
 /// rates: a roster changes when somebody joins or leaves, this changes with
 /// every sentence. Sending them together would mean re-rendering the whole
-/// roster ten times a second.
+/// roster twenty times a second.
 const SPEAKING_EVENT: &str = "goodvoice://speaking";
 
 /// Identity of the running client, surfaced to the UI on boot.
@@ -130,7 +135,12 @@ pub struct Snapshot {
     pub call: Option<CallStatus>,
     pub controls: Controls,
     pub health: Option<CallHealth>,
-    pub speaking: Vec<String>,
+    pub speaking: Levels,
+    /// The audio settings. Not call state at all — they outlive any one call
+    /// and are set before the first one — but a window that has just been
+    /// built has to draw the switches somehow, and this is the one call it
+    /// already makes.
+    pub audio: AudioSettings,
 }
 
 /// What the window and the tray menu both show, and neither owns.
@@ -215,6 +225,13 @@ impl Hotkey {
 struct CurrentCall {
     call: Mutex<Option<Call>>,
     hotkey: Hotkey,
+    /// The audio settings, held by the app rather than by a call.
+    ///
+    /// They have to outlive calls: the capture path reads them, the window
+    /// sets them before anyone has joined anything, and a slider moved in one
+    /// call is still where it was left in the next. The same `Arc` goes into
+    /// `hardware::open` and into `CallOptions`.
+    prefs: Arc<AudioPrefs>,
     /// Watched rather than read: [`push_controls`] forwards every change to
     /// the window and the tray, so whoever made it does not have to know who
     /// else is showing it.
@@ -226,6 +243,7 @@ impl Default for CurrentCall {
         Self {
             call: Mutex::default(),
             hotkey: Hotkey::default(),
+            prefs: Arc::new(AudioPrefs::default()),
             controls: watch::Sender::new(Controls::default()),
         }
     }
@@ -245,6 +263,7 @@ async fn join_room(
     name: String,
     mode: TransmitMode,
 ) -> Result<CallStatus, String> {
+    let prefs = Arc::clone(&app.state::<CurrentCall>().prefs);
     join_call(
         &app,
         CallOptions {
@@ -252,6 +271,7 @@ async fn join_room(
             room,
             name,
             mode,
+            prefs,
         },
     )
     .await
@@ -268,7 +288,8 @@ async fn join_call(app: &AppHandle, options: CallOptions) -> Result<CallStatus, 
         return Err("already in a call".to_owned());
     }
 
-    let (microphone, speakers) = hardware::open().map_err(|error| error.to_string())?;
+    let (microphone, speakers) =
+        hardware::open(Arc::clone(&options.prefs)).map_err(|error| error.to_string())?;
 
     let call = Call::join(
         options,
@@ -451,6 +472,28 @@ async fn set_transmit_mode(
     Ok(())
 }
 
+/// Sets the audio settings: sensitivity, noise suppression, echo cancellation.
+///
+/// Takes effect on the next frame — 20 ms — whether or not there is a call.
+/// The capture path reads them straight from the shared prefs, and switching a
+/// WebRTC stage on or off happens on the generation change rather than per
+/// frame (see `audio::prefs`).
+///
+/// Returns what was actually stored, which is not always what was sent: a
+/// threshold outside the slider's range is pulled back onto it, and the window
+/// should draw where the value landed rather than where it aimed.
+///
+/// # Errors
+///
+/// Never. The `Result` is there so the UI can await it like the others.
+#[tauri::command]
+async fn set_audio_settings(
+    state: State<'_, CurrentCall>,
+    settings: AudioSettings,
+) -> Result<AudioSettings, String> {
+    Ok(state.prefs.set(settings))
+}
+
 /// Remembers which key the window means by "the talk key".
 ///
 /// Sent whenever the window's binding changes, and again on every join —
@@ -516,7 +559,8 @@ async fn current_status(state: State<'_, CurrentCall>) -> Result<Snapshot, Strin
             call: None,
             controls,
             health: None,
-            speaking: Vec::new(),
+            speaking: Levels::default(),
+            audio: state.prefs.settings(),
         });
     };
 
@@ -533,6 +577,7 @@ async fn current_status(state: State<'_, CurrentCall>) -> Result<Snapshot, Strin
             self_id,
         }),
         speaking: call.speaking().borrow().clone(),
+        audio: state.prefs.settings(),
     })
 }
 
@@ -551,6 +596,7 @@ async fn autojoin(app: AppHandle, room: String, since_start: Instant) {
         name: "coldstart".to_owned(),
         // Open, not push-to-talk: nobody is holding a key in a scripted run.
         mode: TransmitMode::Open,
+        prefs: Arc::clone(&app.state::<CurrentCall>().prefs),
     };
 
     match join_call(&app, options).await {
@@ -585,7 +631,7 @@ async fn push_roster(app: AppHandle, mut roster: watch::Receiver<Vec<Participant
 ///
 /// The call only sends when the set actually changes, so a room full of
 /// listeners costs this loop one wakeup and no events at all.
-async fn push_speaking(app: AppHandle, mut speaking: watch::Receiver<Vec<String>>) {
+async fn push_speaking(app: AppHandle, mut speaking: watch::Receiver<Levels>) {
     loop {
         let talking = speaking.borrow_and_update().clone();
         let _ = app.emit(SPEAKING_EVENT, talking);
@@ -700,6 +746,7 @@ pub fn run() {
             set_muted,
             set_deafened,
             set_transmit_mode,
+            set_audio_settings,
             set_talk_key,
             set_talk_binding,
             talk_key_is_global
@@ -732,8 +779,10 @@ pub fn run() {
 #[cfg(test)]
 mod tests {
     use super::{
-        CallHealth, CallState, CallStatus, ClientInfo, Controls, Snapshot, DEFAULT_SERVER,
+        AudioSettings, CallHealth, CallState, CallStatus, ClientInfo, Controls, Levels, Snapshot,
+        DEFAULT_SERVER,
     };
+    use crate::rtc::session::Talker;
 
     /// The window reads these names out of the event (`Controls` in App.tsx).
     /// Renaming a field here without renaming it there is a control that
@@ -768,7 +817,8 @@ mod tests {
                 deafened: false,
             },
             health: None,
-            speaking: Vec::new(),
+            speaking: Levels::default(),
+            audio: AudioSettings::default(),
         })
         .expect("snapshot serialize");
 
@@ -778,7 +828,13 @@ mod tests {
                 "call": null,
                 "controls": { "in_call": false, "muted": true, "deafened": false },
                 "health": null,
-                "speaking": [],
+                "speaking": { "talking": [], "input": 0.0 },
+                "audio": {
+                    "automaticSensitivity": true,
+                    "threshold": AudioSettings::default().threshold,
+                    "noiseSuppression": true,
+                    "echoCancellation": true,
+                },
             })
         );
     }
@@ -804,7 +860,14 @@ mod tests {
                 state: CallState::Live,
                 self_id: "seat-1".to_owned(),
             }),
-            speaking: vec!["seat-2".to_owned()],
+            speaking: Levels {
+                talking: vec![Talker {
+                    id: "seat-2".to_owned(),
+                    level: 0.5,
+                }],
+                input: 0.25,
+            },
+            audio: AudioSettings::default(),
         })
         .expect("snapshot serialize");
 
@@ -812,7 +875,43 @@ mod tests {
         assert_eq!(payload["call"]["self_id"], "seat-1");
         assert_eq!(payload["health"]["state"], "live");
         assert_eq!(payload["health"]["self_id"], "seat-1");
-        assert_eq!(payload["speaking"][0], "seat-2");
+        // A level, not a flag: App.tsx draws the dot from this number and a
+        // rename would leave every dot dark in a room full of people talking.
+        assert_eq!(payload["speaking"]["talking"][0]["id"], "seat-2");
+        assert_eq!(payload["speaking"]["talking"][0]["level"], 0.5);
+        assert_eq!(payload["speaking"]["input"], 0.25);
+    }
+
+    /// The other half of that contract: the settings panel reads these four
+    /// names and sends them straight back through `set_audio_settings`.
+    #[test]
+    fn the_audio_settings_the_panel_binds_to() {
+        let payload = serde_json::to_value(AudioSettings {
+            automatic_sensitivity: false,
+            threshold: 0.08,
+            noise_suppression: false,
+            echo_cancellation: true,
+        })
+        .expect("settings serialize");
+
+        assert_eq!(payload["automaticSensitivity"], false);
+        // Through `as_f64`: the field is an `f32` and serde widens it, so the
+        // JSON number is 0.08 as a double promoted from a narrower float.
+        assert!(
+            payload["threshold"]
+                .as_f64()
+                .is_some_and(|threshold| (threshold - 0.08).abs() < 1e-6),
+            "threshold serialized as {}",
+            payload["threshold"]
+        );
+        assert_eq!(payload["noiseSuppression"], false);
+        assert_eq!(payload["echoCancellation"], true);
+
+        // And back, because the window sends the same shape it was given.
+        let round_trip: AudioSettings =
+            serde_json::from_value(payload).expect("settings deserialize");
+        assert!((round_trip.threshold - 0.08).abs() < f32::EPSILON);
+        assert!(!round_trip.automatic_sensitivity);
     }
 
     #[test]

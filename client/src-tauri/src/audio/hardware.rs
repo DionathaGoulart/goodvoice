@@ -35,6 +35,7 @@ use super::{
     device::{AudioSink, AudioSource, MAX_REMOTE_SLOTS},
     mixer::{self, Mixer, Playback, MAX_BLOCK},
     opus::{silent_frame, Frame, FRAME_SAMPLES, SAMPLE_RATE_HZ},
+    prefs::AudioPrefs,
     processing::{Processing, REFERENCE_SAMPLES},
     AudioError,
 };
@@ -71,7 +72,7 @@ const _: () = {
 /// Returns [`AudioError::NoDevice`] when the host has no default endpoint, and
 /// [`AudioError::UnsupportedFormat`] when one cannot run at 48 kHz — goodvoice
 /// does not resample (see `opus::SAMPLE_RATE_HZ`).
-pub fn open() -> Result<(Microphone, Speakers), AudioError> {
+pub fn open(prefs: Arc<AudioPrefs>) -> Result<(Microphone, Speakers), AudioError> {
     let capture = HeapRb::<i16>::new(RING_SAMPLES);
     let (capture_tx, capture_rx) = capture.split();
     let (mixer, playback) = mixer::open(MAX_REMOTE_SLOTS, RING_SAMPLES);
@@ -82,7 +83,7 @@ pub fn open() -> Result<(Microphone, Speakers), AudioError> {
     let (reference_tx, reference_rx) = reference.split();
     // A call with an echo beats no call: if the module will not start, the
     // reason goes to the terminal and the microphone is used raw.
-    let processing = match Processing::new(reference_rx) {
+    let processing = match Processing::new(reference_rx, prefs.settings()) {
         Ok(processing) => Some(processing),
         Err(error) => {
             eprintln!("{error}; the call will have no echo cancellation");
@@ -127,6 +128,8 @@ pub fn open() -> Result<(Microphone, Speakers), AudioError> {
         Microphone {
             samples: capture_rx,
             processing,
+            applied: prefs.generation(),
+            prefs,
             captured,
             _guard: Arc::clone(&guard),
         },
@@ -437,6 +440,11 @@ pub struct Microphone {
     /// Echo cancellation, noise suppression and gain, applied on the way out.
     /// `None` only when the module refused to start.
     processing: Option<Processing>,
+    /// What the user has set. Read once per frame — an atomic load — and acted
+    /// on only when [`Self::applied`] disagrees with it.
+    prefs: Arc<AudioPrefs>,
+    /// The generation the module is currently configured for.
+    applied: u32,
     captured: Arc<Notify>,
     _guard: Arc<DeviceGuard>,
 }
@@ -466,6 +474,14 @@ impl AudioSource for Microphone {
                 // or the echo canceller loses its place in the stream. It is
                 // also why the voice detector downstream sees clean audio.
                 if let Some(processing) = self.processing.as_mut() {
+                    // A generation behind means somebody moved a switch since
+                    // the last frame. Reconfiguring allocates, so it happens
+                    // here — once per change — rather than per frame.
+                    let wanted = self.prefs.generation();
+                    if wanted != self.applied {
+                        processing.reconfigure(self.prefs.settings());
+                        self.applied = wanted;
+                    }
                     processing.run(&mut frame);
                 }
                 return Some(frame);
