@@ -13,6 +13,12 @@ edition = "2021"
 rust-version = "1.82"
 license = "MIT"
 publish = false
+# Eleven binaries live here (the app plus ten harnesses), and nothing in the
+# manifest said which one is the app. `tauri build` bundled the alphabetically
+# first — `audio-spike` — into a 1.4 MB installer that would have installed a
+# 386 KB spike under the app's name. This is the field that answers it, for
+# `cargo run` and for the bundler alike.
+default-run = "goodvoice-client"
 
 [lib]
 # `_lib` suffix keeps the lib from colliding with the binary on Windows.
