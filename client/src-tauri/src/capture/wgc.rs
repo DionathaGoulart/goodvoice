@@ -391,6 +391,22 @@ impl Capturer {
         })
     }
 
+    /// The `D3D11` device the captured frames live on.
+    ///
+    /// An encoder has to be built on this one: a texture cannot cross devices
+    /// without a copy, which is the copy the whole path exists to avoid
+    /// ([`crate::capture::encoder`]).
+    #[must_use]
+    pub fn device(&self) -> &ID3D11Device {
+        &self.device
+    }
+
+    /// The immediate context that device was created with.
+    #[must_use]
+    pub fn context(&self) -> &ID3D11DeviceContext {
+        &self.context
+    }
+
     /// What the capture item says it is, right now.
     ///
     /// A window's size follows the window. Task 5.3's encoder is fixed-size,

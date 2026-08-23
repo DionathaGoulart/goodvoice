@@ -1,10 +1,14 @@
 //! Screen capture (Windows.Graphics.Capture) and hardware H.264 encode.
 //!
 //! [`wgc`] is the capture half — what there is to share, and the frames from
-//! sharing it. It is Windows-only in the way the whole feature is: there is no
-//! cross-platform seam here because there is no second platform, and a stub
-//! that compiled elsewhere would only hide that.
+//! sharing it. [`encoder`] is the other half, and takes [`wgc::Frame`]'s
+//! texture where it already is rather than a copy of it. Both are
+//! Windows-only in the way the whole feature is: there is no cross-platform
+//! seam here because there is no second platform, and a stub that compiled
+//! elsewhere would only hide that.
 
+#[cfg(windows)]
+pub mod encoder;
 #[cfg(windows)]
 pub mod wgc;
 
@@ -34,4 +38,8 @@ pub enum CaptureError {
     /// away.
     #[error("the capture session has stopped")]
     Stopped,
+    /// Media Foundation, the H.264 transform, or the colour conversion in
+    /// front of it.
+    #[error("encoding: {0}")]
+    Encoder(String),
 }

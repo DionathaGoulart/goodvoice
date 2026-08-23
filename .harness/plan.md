@@ -612,12 +612,30 @@ Goal: two clients talking through the SFU. Riskiest phase — spikes first.
   **Not measured here:** what capture costs the machine. WGC's own overhead is
   part of task 5.5's FPS budget and only means anything with an encoder behind
   it.
-- [ ] **5.2 [WIN] Hardware encode paths** — `capture/encoder.rs`. Media Foundation
+- [x] **5.2 [WIN] Hardware encode paths** — `capture/encoder.rs`. Media Foundation
   H.264: NVENC, AMF, QuickSync; pick first available hw MFT; zero-copy
   (GPU texture → encoder) where possible; software fallback flagged to caller.
   DoD: encoded bitstream plays in a standard player from at least one hw path
   (per 0.5 probe results); fallback path warns.
   Verify: `cargo run -p goodvoice-harness --bin capture-spike -- --encode` + committed sample analysis.
+  Built: `capture/encoder.rs`. `encoders()` says what the machine has;
+  `H264Encoder` opens the first that takes the format, hardware first. The one
+  thing between the capture and the encoder is a `D3D11` video processor:
+  hardware encoders take NV12, WGC produces BGRA8 (DR-31), and a
+  `VideoProcessorBlt` on the capture's own device converts without the pixels
+  leaving the GPU. `is_hardware()` and `is_zero_copy()` are how a caller knows
+  which path it got, and `Selection::SoftwareOnly` is how the fallback gets
+  exercised on a machine that has three hardware encoders.
+  Verified on the DR-12 machine, analysis in `docs/perf/screenshare-encode.md`,
+  findings in DR-32. **NVENC at 0.42 ms a frame against the software MFT's
+  8.43 ms** — 20×, and the worst software frame (50.6 ms) is longer than a
+  frame period. One packet per frame from both. The bitstream is Main profile
+  level 4.0, 1920×1088 coded and cropped to 1080, with SPS and PPS repeated at
+  every keyframe — which is what task 5.4's mid-share viewer needs. Both the
+  elementary stream and the muxed mp4 **decode in VLC**, an unrelated decoder,
+  showing the desktop that was captured.
+  **Not measured here:** what capture and encode cost a game. That is 5.5, and
+  0.42 ms is an argument rather than a demonstration.
 - [ ] **5.3 720p/1080p selection + publish** — `capture/`, `rtc/`, `ui`. Picker UI
   (monitor/window + quality), scale in encoder, publish H.264 track to SFU;
   server enforces one-sharer-at-a-time (DO rejects second share).
@@ -2822,3 +2840,72 @@ comfortably above the 30 fps a share needs.
 window frame has no yellow capture border on it. It is still called
 best-effort in the code, because the call is documented as privileged and a
 border is a cosmetic complaint where a failed share is not.
+
+### DR-32: three ways to lose the zero-copy, and one to lose the frames (2026-08-23)
+
+**Context.** Task 5.2 wants H.264 in silicon, fed the texture the capture
+already produced. Media Foundation will do exactly that, and it will also do
+something that looks identical and is twenty times slower, without saying which
+it is doing.
+
+**1. `MF_SA_D3D11_AWARE` is not on the activate.** The natural place to read it
+is the `IMFActivate` you already have from `MFTEnumEx` — the same object that
+carries the friendly name and the hardware URL. Read there it is **absent for
+every encoder on this machine**, including NVENC:
+
+```
+- NVIDIA H.264 Encoder MFT — hardware, memory buffers only
+- Microsoft AVC DX12 Encoder — hardware, memory buffers only
+- H264 Encoder MFT — software, memory buffers only
+```
+
+The attribute lives on the **transform's** store, which means activating the
+MFT before you can ask. Read there, the same three encoders answer:
+
+```
+- NVIDIA H.264 Encoder MFT — hardware, takes D3D11 textures
+- Microsoft AVC DX12 Encoder — hardware, takes D3D11 textures
+- H264 Encoder MFT — software, memory buffers only
+```
+
+**What it cost, measured.** With the attribute read from the activate, the
+`MFT_MESSAGE_SET_D3D_MANAGER` was skipped — and everything still worked.
+`MFCreateDXGISurfaceBuffer` hands a texture to an encoder that has not been
+given the device, and Media Foundation quietly copies it out of GPU memory.
+**8.13 ms a frame. With the message sent: 0.42 ms.** Nothing failed, nothing
+warned, and the difference is the entire point of the task.
+
+That is why `is_zero_copy()` exists on the encoder rather than staying an
+implementation detail: it is the only thing that distinguishes the two.
+
+**2. A synchronous MFT will not allocate your output for you, and says so
+several calls later.** The software encoder has neither
+`MFT_OUTPUT_STREAM_PROVIDES_SAMPLES` nor `..._CAN_PROVIDE_SAMPLES`, so a
+`ProcessOutput` with a null sample fails. Swallow that — it looks exactly like
+the ordinary "nothing to give yet" — and the *next* `ProcessInput` returns
+`MF_E_NOTACCEPTING` (0xC00D36B5), "the callee is currently not accepting
+further input", from a call that has nothing wrong with it. The fix is to check
+`GetOutputStreamInfo` and supply a buffer of `cbSize`; the lesson is that
+`ProcessOutput`'s errors have to be told apart rather than treated as one.
+
+**3. An asynchronous MFT offers exactly one sample per event.** Having stopped
+swallowing errors for (2), the hardware path immediately broke:
+`E_UNEXPECTED` (0x8000FFFF). A synchronous transform is drained in a loop until
+`MF_E_TRANSFORM_NEED_MORE_INPUT`; an asynchronous one gives one sample per
+`METransformHaveOutput` and treats a second ask as a protocol error, not as an
+empty answer. `collect` branches on which kind it holds. The old code had both
+bugs and neither was visible, because bug (2)'s swallowed error was hiding bug
+(3)'s.
+
+**What the three have in common.** Every one of them is Media Foundation
+answering a question correctly and the *wrong question* having been asked. None
+of the three failed loudly at the point of the mistake: one was 20× slower, one
+surfaced as an error on an unrelated call, and one only appeared once another
+bug stopped covering for it.
+
+**Also settled here.** NV12 is not optional — no hardware encoder on this
+machine offers a BGRA input type — so the `D3D11` video processor between
+capture and encode is part of the path rather than an optimisation to
+reconsider. It runs on the capture's own device, which is why `Capturer`
+exposes `device()` and `context()` and why the encoder takes them rather than
+making its own.
