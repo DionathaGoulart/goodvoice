@@ -544,6 +544,44 @@ Goal: two clients talking through the SFU. Riskiest phase — spikes first.
   --all-targets -- -D warnings` (both feature sets), `cargo test` (121),
   `npm run typecheck` and `npm run format:check` green.
 
+- [x] **4.7 A settings screen, and an indicator that shows a level** —
+  `audio/prefs.rs`, `audio/processing.rs`, `audio/vad.rs`, `audio/mixer.rs`,
+  `rtc/session.rs`, `lib.rs`, `ui`. Everything WebRTC does to a microphone was
+  a compile-time constant until somebody sat in a real room with it. Four
+  things move now: input sensitivity (the detector, or a threshold the user
+  sets), noise suppression, echo cancellation, and where the transmit mode
+  lives.
+  DoD: each switch reaches the microphone mid-call and is measured doing it;
+  the roster indicator follows a level rather than a threshold.
+  Verify: `cargo test`, plus `bin/call --mode voice --threshold` against
+  `bin/listener` on the live deploy.
+  Built: `audio/prefs.rs` is the one shared thing — atomics, because every
+  field is read on the frame path fifty times a second and written when a human
+  moves a slider. `Processing::reconfigure` switches WebRTC's stages on the
+  generation change rather than per frame, since `set_config` allocates. The
+  gate takes a `Sensitivity` now: libfvad, or a level. The window grew a
+  `settings` screen holding both the audio controls and the appearance ones,
+  and the transmit picker moved into it from the two panels that each carried a
+  copy.
+  **The indicator is a level, not a flag.** `Meter` keeps two decays — a slow
+  one for "is this person talking", which has to ride out the gap between two
+  words, and a fast one for what gets drawn, because a meter that takes seconds
+  to fall is showing the loudest recent thing rather than the voice. The push
+  went from 10 Hz to 20 Hz and carries numbers; a quiet room still pushes
+  nothing at all, because every level in it quantises to zero. See DR-28,
+  including the integer-division floor that had left the old meter resting at
+  63/32767 for the rest of every call.
+  Verified: `cargo test` 136 (15 new), `cargo fmt --check` and `cargo clippy
+  --all-targets -- -D warnings` green on Windows and Linux; `npm run
+  typecheck` and `prettier --check` green. **Measured through the live SFU:**
+  the same client in voice mode reports **0 frames for 26 seconds** at a
+  threshold nothing in the room reaches, and **50 frames a second** at one the
+  room's hum crosses — the slider's own effect, at the far end. Screenshots of
+  the panel and of a lit roster dot in `docs/ui/`.
+  **Not verified:** whether the noise suppressor and the echo canceller sound
+  better switched on than off, which is 3.4's outstanding row and needs the
+  same person on loudspeakers.
+
 ## Phase 5 — Screen share
 
 - [ ] **5.1 [WIN] WGC capture spike** — `capture/wgc.rs`. Enumerate
@@ -585,6 +623,28 @@ Goal: two clients talking through the SFU. Riskiest phase — spikes first.
   registration included.
   DoD: `npm run tauri build` yields installer; clean-VM install → join a call.
   Verify: clean-VM install test.
+  **Both bundles build, and the installed app joins a real call.**
+  `goodvoice_0.1.0_x64-setup.exe` (3.1 MB, NSIS) and
+  `goodvoice_0.1.0_x64_en-US.msi` (5.1 MB) come out of `npm run tauri build`.
+  NSIS installs per-user into `%LOCALAPPDATA%\goodvoice` with no admin prompt
+  and carries Microsoft's WebView2 bootstrapper, so the only prerequisite left
+  on a target machine is the VC++ 2015-2022 x64 runtime — the exe imports
+  `VCRUNTIME140.dll`, `VCRUNTIME140_1.dll` and `MSVCP140.dll`.
+  Verified the way DR-26 verifies things: the *installed* binary, launched with
+  `GOODVOICE_AUTOJOIN`, was heard by `bin/listener` in the same room at
+  **50 frames a second with real microphone audio**, 8 seconds, against the
+  live deploy. That is the DoD's "join a call", from an install rather than
+  from `target/release`.
+  Found and fixed on the way — DR-27: the first installer packaged
+  `audio-spike.exe` **as the app**, because nothing in the manifest said which
+  of twelve binaries is the app. `default-run` says so now.
+  **Not done — the two the task also names.** Protocol registration belongs to
+  6.2 and 6.2 has not started, so nothing here registers `goodvoice://`. And
+  the install was done on this machine, not a clean VM: it proves the bundle
+  runs, not that it carries everything a machine without the toolchain needs.
+  **Known blemish (DR-27):** the bundle also drops a 1.1 MB `audio-spike.exe`
+  next to the app. It is inert, and removing it means moving the ten harness
+  binaries out of `src/bin/`.
 - [ ] **6.4 README final + first release** — README (features, budgets, measured
   numbers, self-host pointer, screenshots), tag `v0.1.0`, GitHub release with
   installer artifact via CI.
@@ -2457,3 +2517,101 @@ four minutes and the obvious reading was that the call had died in the tray —
 a serious bug in 4.1, if true. It had not: the person had muted, exactly as
 asked, between one listener run and the next. The measurement was right and the
 window it covered was wrong. A frame counter says what arrived, not why.
+
+### DR-27: nothing said which of twelve binaries was the app (2026-08-22)
+
+**Context.** Task 6.3's first `npm run tauri build` succeeded, printed two
+bundle paths, and produced a 1.4 MB MSI. The app on its own is 7.9 MB. What it
+had packaged, under the name `goodvoice`, was `audio-spike.exe` — a 386 KB
+capture spike. An installer that installs and runs and is the wrong program is
+exactly the shape of DR-22's release build, and it announced itself the same
+way: one line in a log nobody reads, `Built application at: ...audio-spike.exe`.
+
+**Cause.** The package has twelve `bin` targets — the app plus eleven harnesses
+— and no `default-run`. Cargo does not care, because every harness is reached
+by name. The bundler has to pick one, and picked the first alphabetically.
+
+**Decision: `default-run = "goodvoice-client"` in `[package]`.** It is Cargo's
+own field for this question, it fixes `cargo run` with no `--bin` at the same
+time, and it renames nothing — the harness scripts, `docs/perf/idle-soak.ps1`
+and `docs/testing/tray-roundtrip.ps1` all still look for `goodvoice-client.exe`.
+
+**Two things that looked like fixes and are not.** `mainBinaryName` in
+`tauri.conf.json` *renames* the output binary; it does not choose one, so it
+would have shipped the spike under a better name. And an explicit `[[bin]]`
+block does not reorder anything: `cargo metadata` sorts targets alphabetically
+regardless of what the manifest declares.
+
+**A second binary rides along, and `default-run` does not stop it.** The
+finished MSI still carries `audio-spike.exe` as an "external binary". It is not
+cargo's doing: passing `--bin goodvoice-client` through to cargo, so the ten
+harnesses are never compiled, changes nothing. **The bundler reads
+`src-tauri/src/bin/` off the filesystem** and takes the first entry it finds.
+Proven by moving the directory aside and re-running `tauri bundle` alone —
+`audio-spike.exe` disappears, and only the app and its cdylib remain.
+
+**Not fixed, and why.** The only way out is for `src/bin/` not to exist: the
+eleven harnesses move to `src/harness/` with eleven explicit `[[bin]]` paths.
+`cargo run --bin <name>` would be unchanged, which is what every document in
+this repo actually types, but the prose in this plan and in `docs/` points at
+`src/bin/*.rs` in about a dozen places. That is a refactor with a paper trail,
+not a build fix, and it is worth doing before 6.4 tags a release — 1.1 MB of a
+3.1 MB installer is the spike.
+
+**Measurements.** MSI 5.1 MB, NSIS 3.1 MB. Installed per-user into
+`%LOCALAPPDATA%\goodvoice`, no admin prompt. The installed binary joined the
+live deploy and was heard at 50 frames a second for 8 seconds by `bin/listener`.
+
+### DR-28: the indicator was a light switch, and the meter under it never reached zero (2026-08-23)
+
+**Context.** The roster's talking dot lagged and read wrong: a hard on at
+`SPEAKING_LEVEL` and a hard off, arriving up to 100 ms late. What was wanted
+was grey at silence and the theme's accent when the microphone hears something,
+with the shades in between.
+
+**Three separate causes, and only one of them was the obvious one.**
+
+**The push was a set of names.** `Vec<String>` cannot say *how loud*, so no
+amount of CSS was going to fade anything. It carries `{id, level}` now, plus
+the pre-gate input level the sensitivity meter needs, quantised to 1/255 —
+without which a still microphone's last floating-point bits read as a change
+and push twenty times a second forever. A room where nobody is talking still
+pushes nothing: every level in it falls under the floor and collapses to the
+same empty reading.
+
+**One meter was answering two questions.** `Meter`'s release is slow on
+purpose — the gap between two words must not put the light out. That is right
+for the decision and wrong for a drawn level, which then takes seconds to come
+down and shows the loudest recent thing rather than the voice. It keeps two
+decays now: `held` for `is_speaking`, `shown` for `level`.
+
+**And the release never finished.** `previous - previous / decay` is integer
+division: below `decay` the subtrahend is zero and the level stops falling. The
+old meter came to rest at 63/32767 and stayed there for the rest of the call.
+Invisible under a threshold, and not at all invisible under a dot whose
+brightness *is* the number. `saturating_sub((previous / decay).max(1))` — at
+least one step, and safe at zero.
+
+**Measured on the way, and worth keeping.** libfvad in `Aggressive` mode at
+48 kHz admits a 220 Hz tone at **one percent of full scale**. The detector asks
+whether a sound is *shaped* like speech, not whether it is loud, so a room's
+hum, a fan and a keyboard pass it at any volume. That is the whole case for a
+manual threshold, and it is now the premise of a test rather than an assumption
+— the test asserts the detector is permissive, and fails loudly if a future
+libfvad turns fussy and quietly makes the setting redundant.
+
+**A threshold has to sit downstream of the gain controller, and that was
+checked rather than assumed.** AGC2's adaptive digital gain ramps over seconds
+on a quiet input, and a fixed threshold behind it would drift open on its own.
+It does not: 26 seconds at a threshold nothing in the room reaches gave exactly
+zero frames at a listener in the same room. An earlier six-second run had shown
+a 39-frame burst in its last second, which looked exactly like that drift and
+was real room sound.
+
+**Two traps for the next script that drives this window through UI Automation.**
+DR-26 said to walk the tree once before querying it. That is not enough: the
+walk that wakes WebView2's accessibility tree *returns the cold one*, so the
+first `FindAll` has to be thrown away and a second one made. And a search by
+name alone is not safe here — the wordmark's accent span is a `Text` element
+literally named "voice", so a script looking for the voice-activity button
+clicks the logo. Match on `ControlType.Button` as well as on the name.
