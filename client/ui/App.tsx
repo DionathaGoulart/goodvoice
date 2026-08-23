@@ -695,6 +695,39 @@ const App: Component = () => {
     }
   };
 
+  /**
+   * Who, if anybody, is sharing a screen that this client could watch.
+   *
+   * Never yourself: the app already knows what your own screen looks like,
+   * and pulling your own track back through the SFU would be paying twice for
+   * a picture you are looking at.
+   */
+  const sharer = () => {
+    const joined = call();
+    if (!joined) {
+      return null;
+    }
+    return (
+      roster().find((peer) => peer.sharing && peer.id !== joined.self_id) ??
+      null
+    );
+  };
+
+  /**
+   * Opens the viewer window.
+   *
+   * Opening it is the whole of subscribing: the window asks the client for the
+   * video when it mounts and gives it up when it closes, so a client with no
+   * viewer open is never sent any (prd.md §3 F3).
+   */
+  const watchScreen = async () => {
+    try {
+      await invoke("open_screen_viewer");
+    } catch (failure) {
+      setShare({ state: "failed", detail: String(failure) });
+    }
+  };
+
   const stopShare = async () => {
     try {
       await invoke("stop_share");
@@ -1142,6 +1175,18 @@ const App: Component = () => {
                   {deafened() ? "undeafen" : "deafen"}
                 </button>
               </div>
+
+              <Show when={sharer()}>
+                {(who) => (
+                  <button
+                    class="action"
+                    type="button"
+                    onClick={() => void watchScreen()}
+                  >
+                    watch {who().name}&apos;s screen
+                  </button>
+                )}
+              </Show>
 
               <Show
                 when={(() => {

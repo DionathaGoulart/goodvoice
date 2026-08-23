@@ -413,6 +413,62 @@ body {
   font-size: 11px;
 }
 
+/* --- the viewer window ---------------------------------------------------- */
+
+/*
+ * The whole window is the picture. No panel, no masthead: this window has one
+ * job, and a frame around a screen share is a frame around somebody else's
+ * frame.
+ */
+.viewer {
+  align-items: center;
+  /* The theme's own background, not black. A hex here would be the one colour
+     in the app that does not come from `palettes.css` (styleguide.md §2.1),
+     and a light palette wants a light letterbox. */
+  background: var(--bg);
+  display: flex;
+  height: 100vh;
+  justify-content: center;
+  margin: 0;
+  overflow: hidden;
+  padding: 0;
+  position: relative;
+  width: 100vw;
+}
+
+/*
+ * Aspect-correct through any resize, and through a sharer who changes what
+ * they are sharing.
+ *
+ * The canvas's backing store is sized to the *frame* in `Viewer.tsx`; this is
+ * the other half — `object-fit: contain` on a canvas that is allowed to grow
+ * to the window and no further. The letterbox is the window's own background,
+ * so a 16:10 share in a 16:9 window has black bars rather than a stretched
+ * picture.
+ */
+.screen {
+  display: block;
+  height: 100%;
+  object-fit: contain;
+  width: 100%;
+}
+
+/*
+ * What the window says when it has no picture. Over the canvas rather than
+ * beside it: the two never coexist for long, and a layout that reflowed when
+ * the first frame arrived would jump.
+ */
+.screen-status {
+  color: var(--fg-muted);
+  font-size: 13px;
+  left: 50%;
+  margin: 0;
+  position: absolute;
+  text-align: center;
+  top: 50%;
+  transform: translate(-50%, -50%);
+}
+
 /* --- roster -------------------------------------------------------------- */
 
 .roster {

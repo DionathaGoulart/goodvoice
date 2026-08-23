@@ -2,6 +2,7 @@
 import { render } from "solid-js/web";
 
 import { App } from "./App";
+import { Viewer } from "./Viewer";
 import { boot } from "./theme";
 import "./styles/app.css";
 
@@ -18,4 +19,10 @@ if (!root) {
  */
 boot();
 
-render(() => <App />, root);
+/*
+ * One bundle, two windows. The viewer (plan.md task 5.4) is a second Tauri
+ * window pointed at the same `index.html` with `#screen` on it — a fragment
+ * rather than a query so the dev server and the embedded protocol resolve it
+ * the same way. `open_screen_viewer` in `lib.rs` is what builds it.
+ */
+render(() => (location.hash === "#screen" ? <Viewer /> : <App />), root);

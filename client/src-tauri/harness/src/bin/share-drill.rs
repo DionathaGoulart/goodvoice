@@ -20,6 +20,7 @@
 //! cargo run -p goodvoice-harness --bin share-drill
 //! cargo run -p goodvoice-harness --bin share-drill -- --seconds 20 --1080
 //! cargo run -p goodvoice-harness --bin share-drill -- --base http://localhost:8787
+//! cargo run -p goodvoice-harness --bin share-drill -- --room viewtest --seconds 90
 //! ```
 
 #[cfg(not(windows))]
@@ -69,7 +70,7 @@ mod windows_drill {
 
     pub async fn run() -> Result<()> {
         let args = Args::parse();
-        let room = fresh_room();
+        let room = args.room.clone().unwrap_or_else(fresh_room);
 
         println!("goodvoice screen-share drill (plan.md task 5.3)\n");
         println!("  server  {}", args.base);
@@ -322,6 +323,12 @@ mod windows_drill {
 
     struct Args {
         base: String,
+        /// A room to join instead of a fresh one.
+        ///
+        /// For the one case a fresh room cannot serve: task 5.4's viewer, where
+        /// a person has to be able to point the app at the same room this
+        /// drill is sharing into.
+        room: Option<String>,
         seconds: u64,
         quality: Quality,
         out: PathBuf,
@@ -331,6 +338,7 @@ mod windows_drill {
         fn parse() -> Self {
             let mut args = Self {
                 base: env::var("GOODVOICE_BASE").unwrap_or_else(|_| DEFAULT_BASE.to_owned()),
+                room: None,
                 seconds: DEFAULT_SECONDS,
                 quality: Quality::P720,
                 out: env::temp_dir().join("goodvoice-share"),
@@ -345,6 +353,7 @@ mod windows_drill {
                             args.base = value;
                         }
                     }
+                    "--room" => args.room = rest.next(),
                     "--seconds" => {
                         args.seconds = rest
                             .next()

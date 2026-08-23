@@ -256,6 +256,12 @@ fn quit(app: &AppHandle) {
 /// Nothing here fires when there is no tray: an app whose window closes into
 /// nothing is an app that cannot be reopened.
 pub fn window_event(window: &Window, event: &WindowEvent) {
+    // The main window only. The screen viewer (task 5.4) is a window in its own
+    // right, and one that destroyed itself when minimised would end a live
+    // share every time somebody put it out of the way.
+    if window.label() != "main" {
+        return;
+    }
     if !window.state::<Tray>().hides_the_window() {
         return;
     }

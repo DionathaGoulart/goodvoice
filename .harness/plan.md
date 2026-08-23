@@ -679,6 +679,40 @@ Goal: two clients talking through the SFU. Riskiest phase — spikes first.
   unsubscribe on close, resizable, aspect-correct; audio unaffected throughout.
   DoD: open/close viewer repeatedly during live share, voice never glitches.
   Verify: manual + `npx tsc --noEmit`.
+  **Written, not verified.** Everything below exists, compiles and passes the
+  gates; what has not happened is a person opening and closing the window
+  during a live share, which is the entire definition of done. Left unticked
+  for that reason.
+  Built: `ui/Viewer.tsx` is a second Tauri window (label `screen`) rendered
+  from the same bundle, routed on `location.hash` in `main.tsx`.
+  `open_screen_viewer`, `watch_screen` and `stop_watching_screen` in `lib.rs`
+  are the commands behind it, and the main window grows a *watch N's screen*
+  button whenever the roster shows somebody else sharing.
+  **The decode happens in the webview.** WebView2 ships WebCodecs, so
+  `VideoDecoder` decodes H.264 on the same silicon that encoded it, and what
+  crosses the IPC is what came off the wire — tens of kilobytes an access unit
+  — rather than 8 MB of pixels a frame. That is why there is no
+  `capture/decoder.rs`: the alternative was more code and slower.
+  The channel carries raw bytes (`tauri::ipc::Channel<Response>`), not JSON: a
+  `Vec<u8>` as a JSON array of numbers is four times the size. **The first byte
+  is the keyframe flag** — RTP does not carry one, a decoder cannot start on a
+  P-frame, and sending it as a second message would let it arrive out of order.
+  An empty message means the share ended.
+  **Opt-in is the window's lifetime, not a flag.** `Call::watch_screen` is the
+  only thing that pulls the video track, and only this window ever calls it —
+  so a client with no viewer open is one Cloudflare is not sending video to at
+  all (prd.md §3 F3).
+  `tray::window_event` now ignores every window but `main`: without that, task
+  4.6's minimise-into-the-tray would destroy the viewer and end a live share
+  every time somebody put it out of the way.
+  Verified so far: `npx tsc --noEmit`, `prettier --check` and `cargo clippy
+  --workspace --all-targets -- -D warnings` green; the client and the harness
+  build in release.
+  **Still to do:** the manual run — the sharer is `bin/share-drill --room
+  <code> --seconds <n>`, and the app joins the same room with
+  `GOODVOICE_AUTOJOIN`. Open and close the viewer repeatedly while that runs
+  and listen for the voice path glitching. Also unverified: the aspect-correct
+  claim through a resize, and the viewer under the `retro` skin.
 - [ ] **5.5 [WIN] FPS-impact benchmark** — `docs/perf/screenshare-bench.md`.
   Run a GPU-bound game (e.g. built-in benchmark), record FPS with/without 1080p
   share (hw encode). Target ~0 delta.

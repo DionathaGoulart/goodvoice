@@ -550,6 +550,115 @@ async fn talk_key_is_global(state: State<'_, CurrentCall>) -> Result<bool, Strin
     Ok(state.hotkey.bound.lock().is_ok_and(|bound| bound.is_some()))
 }
 
+/// The viewer window's label, and the one thing that says a window is the
+/// viewer rather than the app.
+///
+/// `tray::window_event` reads it: the main window destroys itself into the
+/// tray when it is minimised (task 4.6), and a viewer that did the same would
+/// close a live share every time somebody put it out of the way.
+pub const VIEWER_LABEL: &str = "screen";
+
+/// Opens the viewer window, or brings it back to the front.
+///
+/// Building the window is all this does. The subscription belongs to the
+/// window itself — it asks for [`watch_screen`] when it mounts and gives it up
+/// when it unmounts — because that is what makes "viewers opt in" (prd.md §3
+/// F3) true of a window that was destroyed rather than merely hidden.
+///
+/// # Errors
+///
+/// Returns an error when the window cannot be built.
+#[tauri::command]
+async fn open_screen_viewer(app: AppHandle) -> Result<(), String> {
+    if let Some(window) = app.get_webview_window(VIEWER_LABEL) {
+        let _ = window.unminimize();
+        let _ = window.show();
+        return window.set_focus().map_err(|error| error.to_string());
+    }
+
+    tauri::WebviewWindowBuilder::new(
+        &app,
+        VIEWER_LABEL,
+        // The same bundle as the main window, told which half to render. A
+        // fragment rather than a query so the dev server and the embedded
+        // protocol resolve it identically.
+        tauri::WebviewUrl::App("index.html#screen".into()),
+    )
+    .title("goodvoice — screen")
+    // 16:9 at a size that fits on a laptop, and resizable from there. Not
+    // aspect-locked: the picture is letterboxed inside whatever shape the
+    // window is, which is the only way to be aspect-correct for a source that
+    // can change shape mid-share.
+    .inner_size(960.0, 540.0)
+    .min_inner_size(320.0, 180.0)
+    .resizable(true)
+    .build()
+    .map(|_| ())
+    .map_err(|error| error.to_string())
+}
+
+/// Starts feeding this window the room's screen.
+///
+/// The channel carries raw bytes rather than JSON: an access unit is tens of
+/// kilobytes and a keyframe is hundreds, and a `Vec<u8>` serialised as a JSON
+/// array of numbers is four times the size and an allocation per byte.
+///
+/// **The first byte is the keyframe flag**, 1 or 0, and the rest is Annex B.
+/// A decoder has to be told which chunks it can start on and RTP does not
+/// carry that (`rtc::screen::starts_with_idr`), so it is prefixed here rather
+/// than sent as a second message that could arrive out of order.
+///
+/// # Errors
+///
+/// Returns an error when there is no call to watch.
+#[tauri::command]
+async fn watch_screen(
+    state: State<'_, CurrentCall>,
+    frames: tauri::ipc::Channel<tauri::ipc::Response>,
+) -> Result<(), String> {
+    let call = state.call.lock().await;
+    let call = call.as_ref().ok_or_else(|| "not in a call".to_owned())?;
+    call.watch_screen(Arc::new(ChannelSink { frames }));
+    Ok(())
+}
+
+/// Stops feeding this window the room's screen, and drops the subscription.
+///
+/// # Errors
+///
+/// Returns an error when there is no call.
+#[tauri::command]
+async fn stop_watching_screen(state: State<'_, CurrentCall>) -> Result<(), String> {
+    let call = state.call.lock().await;
+    let call = call.as_ref().ok_or_else(|| "not in a call".to_owned())?;
+    call.unwatch_screen();
+    Ok(())
+}
+
+/// A [`ScreenSink`] that forwards to one window.
+struct ChannelSink {
+    frames: tauri::ipc::Channel<tauri::ipc::Response>,
+}
+
+impl rtc::screen::ScreenSink for ChannelSink {
+    fn accept(&self, unit: &[u8], keyframe: bool) {
+        let mut payload = Vec::with_capacity(unit.len() + 1);
+        payload.push(u8::from(keyframe));
+        payload.extend_from_slice(unit);
+        // A window that has gone away is the ordinary end of a viewer, and the
+        // call unsubscribes on its own the moment `stop_watching_screen`
+        // arrives. Nothing to report and nothing to do.
+        let _ = self.frames.send(tauri::ipc::Response::new(payload));
+    }
+
+    fn ended(&self) {
+        // Zero bytes, which cannot be confused with a frame: every real
+        // payload carries at least the flag byte. The window draws its
+        // "nobody is sharing" state from it.
+        let _ = self.frames.send(tauri::ipc::Response::new(Vec::new()));
+    }
+}
+
 /// Everything this machine can share, monitors first.
 ///
 /// Called when the picker opens rather than kept up to date: windows come and
@@ -849,9 +958,12 @@ pub fn run() {
             set_audio_settings,
             set_talk_key,
             set_talk_binding,
+            open_screen_viewer,
             share_targets,
             start_share,
             stop_share,
+            stop_watching_screen,
+            watch_screen,
             talk_key_is_global
         ])
         .build(tauri::generate_context!())
