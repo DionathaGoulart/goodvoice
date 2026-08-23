@@ -75,6 +75,30 @@ interface Levels {
   input: number;
 }
 
+/** Mirrors `Target` in `src-tauri/src/capture/wgc.rs`. */
+interface ShareTarget {
+  kind: "monitor" | "window";
+  handle: number;
+  name: string;
+  width: number;
+  height: number;
+}
+
+/** Mirrors `Quality` in `src-tauri/src/capture/encoder.rs`. */
+type Quality = "p720" | "p1080";
+
+/** Mirrors `ShareState` in `src-tauri/src/rtc/screen.rs`. */
+type ShareState =
+  | { state: "idle" }
+  | {
+      state: "sharing";
+      target: string;
+      width: number;
+      height: number;
+      hardware: boolean;
+    }
+  | { state: "failed"; detail: string };
+
 /** Mirrors `AudioSettings` in `src-tauri/src/audio/prefs.rs`. */
 interface AudioSettings {
   automaticSensitivity: boolean;
@@ -90,6 +114,7 @@ interface Snapshot {
   health: CallHealth | null;
   speaking: Levels;
   audio: AudioSettings;
+  share: ShareState;
 }
 
 /** The event `push_roster` emits. Kept in step with `ROSTER_EVENT`. */
@@ -118,6 +143,15 @@ const SPEAKING_EVENT = "goodvoice://speaking";
  * where either of them lives — it is told, the same as the tray is.
  */
 const CONTROLS_EVENT = "goodvoice://controls";
+
+/** The event `push_share` emits. Kept in step with `SHARE_EVENT`. */
+const SHARE_EVENT = "goodvoice://share";
+
+/** The two the picker offers, in the order prd.md §3 F3 names them. */
+const QUALITIES: { id: Quality; label: string; hint: string }[] = [
+  { id: "p720", label: "720p", hint: "lighter on the network" },
+  { id: "p1080", label: "1080p", hint: "sharper, and what the budget is for" },
+];
 
 /**
  * The room code the server will accept: `roomCodeSchema` in
@@ -170,6 +204,7 @@ const MODE_CHOICES: { id: ModePreference; label: string }[] = [
 const MODE_STORE = "goodvoice.transmit-mode";
 const TALK_KEY_STORE = "goodvoice.talk-key";
 const AUDIO_STORE = "goodvoice.audio";
+const QUALITY_STORE = "goodvoice.share-quality";
 
 /**
  * The quietest and loudest a manual threshold can be. Mirrors
@@ -252,6 +287,9 @@ const DEFAULT_TALK_KEY = "Space";
 const isMode = (value: string | null): value is TransmitMode =>
   MODES.some((mode) => mode.id === value);
 
+const isQuality = (value: string | null): value is Quality =>
+  QUALITIES.some((option) => option.id === value);
+
 /** `KeyboardEvent.code` as something a person would recognise on a keycap. */
 const keyName = (code: string) =>
   code
@@ -272,6 +310,17 @@ const App: Component = () => {
   const [muted, setMuted] = createSignal(false);
   const [deafened, setDeafened] = createSignal(false);
   const [health, setHealth] = createSignal<CallState>({ state: "live" });
+  const [share, setShare] = createSignal<ShareState>({ state: "idle" });
+  // The picker's own state. Open is a deliberate act — enumerating windows
+  // costs nothing but the list is stale the moment it is drawn, so it is
+  // fetched when the picker opens and not before.
+  const [picking, setPicking] = createSignal(false);
+  const [targets, setTargets] = createSignal<ShareTarget[]>([]);
+  const [quality, setQuality] = createSignal<Quality>(
+    isQuality(localStorage.getItem(QUALITY_STORE))
+      ? (localStorage.getItem(QUALITY_STORE) as Quality)
+      : "p1080",
+  );
   // Keyed by id, not by name: two people in a room may share a name, and the
   // id is what the roster rows are keyed on anyway. A level rather than
   // membership — the dot fades now, and a set cannot say how bright.
@@ -353,6 +402,15 @@ const App: Component = () => {
       setMuted(event.payload.muted);
       setDeafened(event.payload.deafened);
     }),
+    listen<ShareState>(SHARE_EVENT, (event) => {
+      setShare(event.payload);
+      // A share that went live has answered the picker's question, so the
+      // picker gets out of the way. A failure leaves it open: whatever went
+      // wrong, the next thing the user wants is to pick again.
+      if (event.payload.state === "sharing") {
+        setPicking(false);
+      }
+    }),
     listen<CallHealth>(STATE_EVENT, (event) => {
       const { self_id, ...state } = event.payload;
       setHealth(state);
@@ -364,6 +422,8 @@ const App: Component = () => {
         setRoster([]);
         setSpeaking(new Map<string, number>());
         setInputLevel(0);
+        setShare({ state: "idle" });
+        setPicking(false);
         if (state.reason !== "left") {
           setError(state.detail);
         }
@@ -392,6 +452,7 @@ const App: Component = () => {
       }
       setMuted(status.controls.muted);
       setDeafened(status.controls.deafened);
+      setShare(status.share);
       if (!held) {
         setAudio(status.audio);
       }
@@ -594,6 +655,53 @@ const App: Component = () => {
     const next = !deafened();
     setDeafened(next);
     await invoke("set_deafened", { deafened: next });
+  };
+
+  /**
+   * Opens the picker and asks the client what there is to share.
+   *
+   * Asked on every open. Windows open and close while the app is running, so
+   * a list cached at startup would offer things that are gone — and a target
+   * that closes between the picker and the share fails at `start_share`,
+   * which is where it has to be handled anyway.
+   */
+  const openPicker = async () => {
+    setPicking(true);
+    try {
+      setTargets(await invoke<ShareTarget[]>("share_targets"));
+    } catch (failure) {
+      setTargets([]);
+      setShare({ state: "failed", detail: String(failure) });
+    }
+  };
+
+  const pickQuality = (next: Quality) => {
+    setQuality(next);
+    localStorage.setItem(QUALITY_STORE, next);
+  };
+
+  /**
+   * Starts a share, and says nothing about whether it worked.
+   *
+   * The answer arrives on `SHARE_EVENT`, because it is not this window's to
+   * give: opening a capture and renegotiating with the SFU takes a moment, and
+   * the room can refuse (prd.md §8, one sharer at a time).
+   */
+  const startShare = async (target: ShareTarget) => {
+    try {
+      await invoke("start_share", { target, quality: quality() });
+    } catch (failure) {
+      setShare({ state: "failed", detail: String(failure) });
+    }
+  };
+
+  const stopShare = async () => {
+    try {
+      await invoke("stop_share");
+    } catch {
+      // Nothing to stop, which is the state the button was trying to reach.
+    }
+    setShare({ state: "idle" });
   };
 
   /**
@@ -1034,6 +1142,109 @@ const App: Component = () => {
                   {deafened() ? "undeafen" : "deafen"}
                 </button>
               </div>
+
+              <Show
+                when={(() => {
+                  const current = share();
+                  return current.state === "sharing" ? current : null;
+                })()}
+                fallback={
+                  <button class="action" type="button" onClick={openPicker}>
+                    share a screen
+                  </button>
+                }
+              >
+                {(live) => (
+                  <div class="sharing">
+                    <p class="notice" role="status">
+                      sharing {live().target} at {live().width}×{live().height}
+                    </p>
+                    {/* prd.md §3 F3: a software fallback is allowed and the
+                      user must be told. This is the telling. */}
+                    <Show when={!live().hardware}>
+                      <p class="notice notice-warn" role="status">
+                        no hardware encoder — this will cost the machine frames
+                      </p>
+                    </Show>
+                    <button
+                      class="action action-on"
+                      type="button"
+                      onClick={stopShare}
+                    >
+                      stop sharing
+                    </button>
+                  </div>
+                )}
+              </Show>
+
+              <Show
+                when={(() => {
+                  const current = share();
+                  return current.state === "failed" ? current.detail : null;
+                })()}
+              >
+                {(detail) => (
+                  <p class="notice notice-error" role="status">
+                    {detail()}
+                  </p>
+                )}
+              </Show>
+
+              <Show when={picking()}>
+                <div class="picker animate-enter">
+                  <p class="field-label">quality</p>
+                  <div class="modes">
+                    <For each={QUALITIES}>
+                      {(option) => (
+                        <button
+                          class="action"
+                          classList={{
+                            "action-picked": quality() === option.id,
+                          }}
+                          type="button"
+                          onClick={() => pickQuality(option.id)}
+                          aria-pressed={quality() === option.id}
+                          title={option.hint}
+                        >
+                          {option.label}
+                        </button>
+                      )}
+                    </For>
+                  </div>
+
+                  <p class="field-label">what to share</p>
+                  <ul class="targets">
+                    <For
+                      each={targets()}
+                      fallback={<li class="roster-empty">nothing to share</li>}
+                    >
+                      {(target) => (
+                        <li>
+                          <button
+                            class="target"
+                            type="button"
+                            onClick={() => void startShare(target)}
+                          >
+                            <span class="target-kind">{target.kind}</span>
+                            <span class="target-name">{target.name}</span>
+                            <span class="target-size">
+                              {target.width}×{target.height}
+                            </span>
+                          </button>
+                        </li>
+                      )}
+                    </For>
+                  </ul>
+
+                  <button
+                    class="action"
+                    type="button"
+                    onClick={() => setPicking(false)}
+                  >
+                    cancel
+                  </button>
+                </div>
+              </Show>
 
               <button class="action action-leave" type="button" onClick={leave}>
                 leave

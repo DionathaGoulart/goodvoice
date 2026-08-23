@@ -128,6 +128,9 @@ windows = { version = "0.62", features = [
   "Win32_Media_MediaFoundation",
   "Win32_System_Com",
   "Win32_System_Com_StructuredStorage",
+  # ICodecAPI takes its settings as VARIANTs, and a VARIANT is only a type
+  # with this on (task 5.3: GOP size, and a keyframe on demand for 5.4).
+  "Win32_System_Ole",
   "Win32_System_Diagnostics_ToolHelp",
   "Win32_System_ProcessStatus",
   "Win32_System_Threading",

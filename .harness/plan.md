@@ -636,11 +636,45 @@ Goal: two clients talking through the SFU. Riskiest phase — spikes first.
   showing the desktop that was captured.
   **Not measured here:** what capture and encode cost a game. That is 5.5, and
   0.42 ms is an argument rather than a demonstration.
-- [ ] **5.3 720p/1080p selection + publish** — `capture/`, `rtc/`, `ui`. Picker UI
+- [x] **5.3 720p/1080p selection + publish** — `capture/`, `rtc/`, `ui`. Picker UI
   (monitor/window + quality), scale in encoder, publish H.264 track to SFU;
   server enforces one-sharer-at-a-time (DO rejects second share).
   DoD: share visible to a second client; `npx vitest run` covers the DO rule.
   Verify: manual two-client share + tests.
+  Built, in four places. `capture/share.rs` owns a capturer and an encoder on a
+  thread of their own and hands back H.264 packets — neither is `Send`, and
+  that is the whole reason the thread exists. `capture/encoder.rs` grew
+  `Quality`, which fits a source inside 720 or 1080 rows without ever
+  upscaling; the scaling is the same `VideoProcessorBlt` that was already
+  converting to NV12, so it costs nothing new. `rtc/screen.rs` is the seam —
+  the transport publishes video through a trait and never sees a texture — and
+  `rtc/session.rs` publishes the `screen` track, subscribes to a remote one,
+  and reassembles RTP back into access units.
+  **The server half was already done.** `room.ts` has refused a second `screen`
+  since Phase 1, on both roads into it — the `share` message and the SFU
+  proxy's `tracks/new` — and `test/tracks.test.ts` has covered it since. This
+  task found nothing to add there, which is what the closed track vocabulary in
+  `protocol.ts` was for.
+  **A share outlives the session under it.** What the user picked is intent
+  held on the call; each session opens its own capture from it. A reconnect
+  restarts the encode rather than trying to carry a dead track across, which is
+  also what a viewer needs — a new sequence starts with a keyframe.
+  Verified, `bin/share-drill` against the live deploy: ana shared the primary
+  display at **1280×720 on NVENC, live 2.9 s after the pick**; bruno received
+  **141 access units, 878 KB, 4 keyframes**; carla was refused with *"ana is
+  already sharing (already_sharing)"*. The bytes bruno received were written
+  out and **decoded by VLC into ana's desktop at 1280×720** — an unrelated
+  decoder, from the second client's own copy, which is what "visible to a
+  second client" has to mean. `cargo test --workspace` 155, `npm test` in
+  `server/` unchanged and green, fmt/clippy/tsc/prettier green.
+  The picker and the live-share panel are in `docs/ui/share-picker.png` and
+  `docs/ui/share-live.png`, driven through the real app: pick a quality, pick a
+  monitor or window, and the panel says what is being shared and offers the way
+  out. A software encoder would add a warning line there (prd.md §3 F3); this
+  machine has NVENC, so the line is not in the shot.
+  **Not verified:** the picker under the `retro` skin — both screenshots are
+  `terminal`. The picker's CSS is the shared base plus a `terminal` block, so
+  retro is the unmodified base, but it has not been looked at.
 - [ ] **5.4 Viewer window** — `ui`, new Tauri window. Opt-in subscribe on open,
   unsubscribe on close, resizable, aspect-correct; audio unaffected throughout.
   DoD: open/close viewer repeatedly during live share, voice never glitches.

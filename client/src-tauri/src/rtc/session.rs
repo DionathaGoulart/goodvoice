@@ -22,7 +22,11 @@ use std::{
 use bytes::Bytes;
 use rtc::{
     media::Sample,
-    peer_connection::{configuration::media_engine::MIME_TYPE_OPUS, transport::RTCDtlsRole},
+    peer_connection::{
+        configuration::media_engine::{MIME_TYPE_H264, MIME_TYPE_OPUS},
+        transport::RTCDtlsRole,
+    },
+    rtp::{codec::h264::H264Packet, packetizer::Depacketizer as _},
     rtp_transceiver::{
         rtp_sender::{
             RTCRtpCodec, RTCRtpCodecParameters, RTCRtpCodingParameters, RTCRtpEncodingParameters,
@@ -55,6 +59,7 @@ use webrtc::{
 
 use super::{
     reconnect::{Backoff, CallState, EndReason},
+    screen::{starts_with_idr, ScreenSink, ScreenSource, ScreenSourceFactory, ShareState},
     signaling::{
         ClientMessage, IceServer, JoinResponse, Participant, ServerMessage, SfuOperation, Signaling,
     },
@@ -73,6 +78,19 @@ use crate::audio::{
 /// The track name a goodvoice client publishes its microphone under. A closed
 /// vocabulary server-side (`TRACK_KINDS`), so this string is load-bearing.
 const MIC_TRACK: &str = "mic";
+
+/// The track name a screen goes out under (task 5.3). The same closed
+/// vocabulary as [`MIC_TRACK`], and what the room's one-sharer rule keys off:
+/// a `tracks/new` naming this is what the Durable Object refuses when somebody
+/// else is already sharing.
+const SCREEN_TRACK: &str = "screen";
+
+/// H.264's payload type in webrtc-rs' default video set, and the number
+/// Cloudflare answers with. Same reasoning as [`OPUS_PAYLOAD_TYPE`].
+const H264_PAYLOAD_TYPE: PayloadType = 102;
+
+/// The clock RTP counts video in. Fixed at 90 kHz for every video codec.
+const VIDEO_CLOCK_RATE: u32 = 90_000;
 
 /// Opus' de-facto payload type, and the one Cloudflare answers with. Offering
 /// the same number keeps the two sides from renumbering mid-negotiation
@@ -372,6 +390,22 @@ struct Shared {
     /// than `notify_waiters` so a report that lands between two polls of the
     /// session loop is kept rather than dropped.
     lost: Notify,
+    /// What the user wants shared, which outlives the session sharing it. A
+    /// reconnect re-opens the capture from this rather than dropping the share
+    /// (`rtc::screen`).
+    share_intent: Mutex<Option<Arc<dyn ScreenSourceFactory>>>,
+    /// What is actually happening, for the window.
+    share: watch::Sender<ShareState>,
+    /// Rung when [`Self::share_intent`] changes. `notify_one` for the same
+    /// reason as [`Self::lost`]: a change that lands between two polls of the
+    /// session loop has to be kept.
+    share_changed: Notify,
+    /// Where a remote screen goes, if anybody is watching one. `None` is the
+    /// ordinary state, and it is what stops this client subscribing to video
+    /// at all (prd.md §3 F3: viewers opt in).
+    watch_sink: Mutex<Option<Arc<dyn ScreenSink>>>,
+    /// Rung when [`Self::watch_sink`] changes.
+    watch_changed: Notify,
 }
 
 impl Shared {
@@ -400,11 +434,44 @@ impl Shared {
             input: Meter::new(),
             prefs,
             lost: Notify::new(),
+            share_intent: Mutex::new(None),
+            share: watch::Sender::new(ShareState::Idle),
+            share_changed: Notify::new(),
+            watch_sink: Mutex::new(None),
+            watch_changed: Notify::new(),
         })
     }
 
     fn is_leaving(&self) -> bool {
         self.leaving.load(Ordering::Relaxed)
+    }
+
+    /// What the user wants shared, if anything.
+    fn share_intent(&self) -> Option<Arc<dyn ScreenSourceFactory>> {
+        self.share_intent.lock().ok().and_then(|held| held.clone())
+    }
+
+    /// Record what the user wants and wake the session to act on it.
+    fn set_share_intent(&self, factory: Option<Arc<dyn ScreenSourceFactory>>) {
+        if let Ok(mut held) = self.share_intent.lock() {
+            *held = factory;
+        }
+        // A call with no session is a call reconnecting; the next one reads
+        // the intent when it starts, so the missed wake costs nothing.
+        self.share_changed.notify_one();
+    }
+
+    /// Where a remote screen should go, if anywhere.
+    fn watch_sink(&self) -> Option<Arc<dyn ScreenSink>> {
+        self.watch_sink.lock().ok().and_then(|held| held.clone())
+    }
+
+    /// Open or close the viewer. Same wake-up contract as the share intent.
+    fn set_watch_sink(&self, sink: Option<Arc<dyn ScreenSink>>) {
+        if let Ok(mut held) = self.watch_sink.lock() {
+            *held = sink;
+        }
+        self.watch_changed.notify_one();
     }
 
     /// Whether the user has left the microphone on at all. What reaches the
@@ -744,6 +811,51 @@ impl Call {
         self.shared.muted.load(Ordering::Relaxed)
     }
 
+    /// Start sharing a screen.
+    ///
+    /// Returns as soon as the intent is recorded, not once the share is live:
+    /// opening a capture and renegotiating with the SFU takes a moment, and
+    /// the answer — including a refusal, such as somebody else already sharing
+    /// — arrives on [`Self::share`]. Nothing about the voice path waits on
+    /// this (prd.md §3 F3).
+    ///
+    /// The factory rather than a capture, because the share is restarted with
+    /// every session: see [`super::screen`].
+    pub fn start_share(&self, factory: Arc<dyn ScreenSourceFactory>) {
+        self.shared.set_share_intent(Some(factory));
+    }
+
+    /// Stop sharing. Does nothing if this client is not sharing.
+    pub fn stop_share(&self) {
+        self.shared.set_share_intent(None);
+    }
+
+    /// Start receiving the room's screen, into `sink`.
+    ///
+    /// Idempotent, and the only thing that subscribes this client to video: a
+    /// call with no viewer open pulls nothing, whatever anybody else is
+    /// sharing (prd.md §3 F3).
+    pub fn watch_screen(&self, sink: Arc<dyn ScreenSink>) {
+        self.shared.set_watch_sink(Some(sink));
+    }
+
+    /// Stop receiving the room's screen and drop the subscription.
+    pub fn unwatch_screen(&self) {
+        self.shared.set_watch_sink(None);
+    }
+
+    /// What this client's own share is doing.
+    #[must_use]
+    pub fn share(&self) -> watch::Receiver<ShareState> {
+        self.shared.share.subscribe()
+    }
+
+    /// Whether this client is publishing a screen right now.
+    #[must_use]
+    pub fn is_sharing(&self) -> bool {
+        self.shared.share.borrow().is_sharing()
+    }
+
     /// Stops playing audio. The tracks stay subscribed: re-deafening should be
     /// instant, and a renegotiation round trip would not be.
     pub async fn set_deafened(&self, deafened: bool) {
@@ -927,6 +1039,138 @@ async fn reconnect(supervisor: &Supervisor, backoff: &mut Backoff) -> Result<Ses
     }
 }
 
+/// Lets go of everything this seat was carrying.
+///
+/// Called on the way out of [`run_session`], however it ended. Playback tasks
+/// stop before the next session hands their slots to somebody else, and the
+/// capture goes with the seat — the *intent* does not, which is what makes a
+/// share survive a reconnect (see [`reconcile_share`]).
+fn stop_media(
+    subscriber: &Subscriber,
+    playing: &mut HashMap<String, Subscription>,
+    sharing: Option<Sharing>,
+    watching: Option<Watching>,
+) {
+    for (_, subscription) in playing.drain() {
+        subscription.playback.abort();
+        subscriber.shared.sink.clear(subscription.slot);
+    }
+    if let Some(sharing) = sharing {
+        sharing.stop();
+    }
+    if let Some(watching) = watching {
+        watching.playback.abort();
+        if let Some(sink) = subscriber.shared.watch_sink() {
+            sink.ended();
+        }
+    }
+    subscriber.shared.silence();
+}
+
+/// The screen this session is publishing, if it is publishing one.
+struct Sharing {
+    task: JoinHandle<()>,
+}
+
+impl Sharing {
+    fn stop(self) {
+        self.task.abort();
+    }
+}
+
+/// Bring what is being published in line with what the user asked for.
+///
+/// Called when the intent changes and once when a session starts, which is
+/// what carries a share across a reconnect: the new session re-opens the
+/// capture rather than the old one's encoder being expected to survive
+/// (`rtc::screen`).
+async fn reconcile_share(
+    subscriber: &Subscriber,
+    sharing: &mut Option<Sharing>,
+    commands: &mpsc::Sender<ClientMessage>,
+) {
+    let wanted = subscriber.shared.share_intent();
+
+    // Already in the right state. A share whose task has finished on its own —
+    // the window closed — is not: it is dropped here and reported.
+    if let Some(current) = sharing.as_ref() {
+        if wanted.is_some() && !current.task.is_finished() {
+            return;
+        }
+        if let Some(current) = sharing.take() {
+            current.stop();
+        }
+        let _ = commands.send(ClientMessage::Share { sharing: false }).await;
+        if wanted.is_none() {
+            subscriber.shared.share.send_replace(ShareState::Idle);
+            return;
+        }
+    }
+
+    let Some(factory) = wanted else {
+        return;
+    };
+
+    let source = match factory.open() {
+        Ok(source) => source,
+        Err(detail) => {
+            // The capture itself refused — the window closed between the
+            // picker and the share, or there is no encoder. Not worth
+            // retrying on a timer: clear the intent so the user is asked
+            // again rather than being reconnected into a failure.
+            subscriber.shared.set_share_intent(None);
+            subscriber
+                .shared
+                .share
+                .send_replace(ShareState::Failed { detail });
+            return;
+        }
+    };
+
+    let published = match publish_screen(
+        &subscriber.signaling,
+        &subscriber.self_id,
+        subscriber.peer.as_ref(),
+        &subscriber.signals,
+        &subscriber.published,
+    )
+    .await
+    {
+        Ok(published) => published,
+        Err(error) => {
+            // `already_sharing` lands here, and it is the one refusal that is
+            // about the room rather than this client (prd.md §8).
+            subscriber.shared.set_share_intent(None);
+            subscriber.shared.share.send_replace(ShareState::Failed {
+                detail: error.to_string(),
+            });
+            return;
+        }
+    };
+
+    let (width, height) = source.size();
+    let hardware = source.is_hardware();
+    // A viewer subscribes as soon as the roster shows the share, and cannot
+    // decode until a keyframe. Asking now costs one frame and saves everyone
+    // watching the encoder's own interval.
+    source.request_keyframe();
+
+    *sharing = Some(Sharing {
+        task: tokio::spawn(screen_loop(
+            source,
+            published,
+            Arc::clone(&subscriber.shared),
+        )),
+    });
+    let _ = commands.send(ClientMessage::Share { sharing: true }).await;
+    subscriber.shared.share.send_replace(ShareState::Sharing {
+        target: factory.describe(),
+        width,
+        height,
+        hardware,
+    });
+}
+
 /// Follows one seat until it stops working.
 ///
 /// Pulls every `mic` the roster reveals, drops every one that goes away,
@@ -947,6 +1191,17 @@ async fn run_session(supervisor: &Supervisor, session: Session) -> SessionEnd {
     let mut playing: HashMap<String, Subscription> = HashMap::new();
     let mut latest = session.participants;
     reconcile(&subscriber, &mut playing, &latest).await;
+
+    // A share the user started on the previous session is restarted on this
+    // one, here — which is the whole of what "the share survives a reconnect"
+    // means (`rtc::screen`). A no-op when nothing is being shared.
+    let mut sharing: Option<Sharing> = None;
+    reconcile_share(&subscriber, &mut sharing, &session.commands).await;
+
+    // And the other direction: a viewer left open across a reconnect
+    // resubscribes here.
+    let mut watching: Option<Watching> = None;
+    reconcile_watch(&subscriber, &mut watching, &latest).await;
 
     let mut retry = tokio::time::interval(RESUBSCRIBE_INTERVAL);
     retry.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
@@ -972,6 +1227,9 @@ async fn run_session(supervisor: &Supervisor, session: Session) -> SessionEnd {
                         latest = participants;
                         subscriber.shared.roster.send_replace(latest.clone());
                         reconcile(&subscriber, &mut playing, &latest).await;
+                        // Somebody started or stopped sharing, or the sharer
+                        // reconnected under a new session id.
+                        reconcile_watch(&subscriber, &mut watching, &latest).await;
                     }
                     ServerMessage::Error { code, message } => {
                         eprintln!("room error: {message} ({code})");
@@ -983,6 +1241,7 @@ async fn run_session(supervisor: &Supervisor, session: Session) -> SessionEnd {
                 // that failed would otherwise leave that speaker silent for the
                 // rest of the call. A no-op when everyone is already subscribed.
                 reconcile(&subscriber, &mut playing, &latest).await;
+                reconcile_watch(&subscriber, &mut watching, &latest).await;
             }
             _ = meter.tick() => {
                 // Reading eight atomics; the push after it happens only when
@@ -1015,17 +1274,22 @@ async fn run_session(supervisor: &Supervisor, session: Session) -> SessionEnd {
                 }
                 break SessionEnd::Dropped("the microphone stopped reaching the SFU".to_owned());
             }
+            () = subscriber.shared.watch_changed.notified() => {
+                // A viewer opened or closed. This is the only thing that ever
+                // subscribes this client to video.
+                reconcile_watch(&subscriber, &mut watching, &latest).await;
+            }
+            () = subscriber.shared.share_changed.notified() => {
+                // The user started or stopped sharing. Never a reason to end
+                // the session: a share that fails is a share that failed, and
+                // the call goes on without it (prd.md §3 F3: audio is never
+                // gated on video).
+                reconcile_share(&subscriber, &mut sharing, &session.commands).await;
+            }
         }
     };
 
-    // Whatever went wrong, this seat is finished with: stop the playback tasks
-    // before they write into slots the next session is about to hand out, and
-    // close the transport rather than leaving ICE running on a dead session.
-    for (_, subscription) in playing.drain() {
-        subscription.playback.abort();
-        subscriber.shared.sink.clear(subscription.slot);
-    }
-    subscriber.shared.silence();
+    stop_media(&subscriber, &mut playing, sharing.take(), watching.take());
 
     // Hand the seat back on the way out. A drop does not always mean the room
     // is unreachable — a dead sender or a stalled ICE leaves the WebSocket
@@ -1176,6 +1440,26 @@ impl PeerConnectionEventHandler for Events {
 /// The one codec on this path. RFC 7587 fixes the rtpmap encoding parameter at
 /// 2 even for a mono stream, so the SDP says stereo while the payload stays
 /// mono — Opus packets carry their own channel count.
+/// The video codec, which is H.264 and only H.264 (prd.md §7: universal
+/// hardware decode is the whole reason).
+///
+/// `packetization-mode=1` is what lets one access unit be fragmented across
+/// RTP packets, which a 1080p keyframe always needs.
+/// `level-asymmetry-allowed=1` matters because the level travels with the
+/// resolution: a 720p share and a 1080p share are the same profile at
+/// different levels, and without this the two ends would have to renegotiate
+/// when the user changes quality.
+fn h264_codec() -> RTCRtpCodec {
+    RTCRtpCodec {
+        mime_type: MIME_TYPE_H264.to_owned(),
+        clock_rate: VIDEO_CLOCK_RATE,
+        channels: 0,
+        sdp_fmtp_line: "level-asymmetry-allowed=1;packetization-mode=1;profile-level-id=42e01f"
+            .to_owned(),
+        rtcp_feedback: vec![],
+    }
+}
+
 fn opus_codec() -> RTCRtpCodec {
     RTCRtpCodec {
         mime_type: MIME_TYPE_OPUS.to_owned(),
@@ -1197,6 +1481,16 @@ async fn open_peer(
             payload_type: OPUS_PAYLOAD_TYPE,
         },
         RtpCodecKind::Audio,
+    )?;
+    // Registered whether or not this client will ever share: the codec has to
+    // be in the engine before a transceiver can be added to a live peer
+    // connection, and a share starts long after this.
+    media_engine.register_codec(
+        RTCRtpCodecParameters {
+            rtp_codec: h264_codec(),
+            payload_type: H264_PAYLOAD_TYPE,
+        },
+        RtpCodecKind::Video,
     )?;
     let registry = register_default_interceptors(Registry::new(), &mut media_engine)?;
     let runtime = default_runtime()
@@ -1411,18 +1705,8 @@ impl PacketSink for Published {
     /// a device callback, which is where styleguide.md's no-allocation rule
     /// applies.
     async fn send(&self, packet: &[u8]) -> Result<(), String> {
-        self.track
-            .sample_writer(
-                self.ssrc.load(Ordering::Relaxed),
-                self.payload_type.load(Ordering::Relaxed),
-            )
-            .write_sample(&Sample {
-                data: Bytes::copy_from_slice(packet),
-                duration: Duration::from_millis(u64::from(FRAME_MS)),
-                ..Default::default()
-            })
+        self.write(packet, Duration::from_millis(u64::from(FRAME_MS)))
             .await
-            .map_err(one_line)
     }
 }
 
@@ -1443,6 +1727,27 @@ fn one_line(error: impl std::fmt::Display) -> String {
 }
 
 impl Published {
+    /// Puts one sample on the wire, whatever kind of media it is.
+    ///
+    /// The duration is what the packetizer turns into an RTP timestamp step,
+    /// so it is per call rather than per track: audio frames are all
+    /// [`FRAME_MS`], and a screen's are as irregular as the screen is
+    /// (DR-31).
+    async fn write(&self, payload: &[u8], duration: Duration) -> Result<(), String> {
+        self.track
+            .sample_writer(
+                self.ssrc.load(Ordering::Relaxed),
+                self.payload_type.load(Ordering::Relaxed),
+            )
+            .write_sample(&Sample {
+                data: Bytes::copy_from_slice(payload),
+                duration,
+                ..Default::default()
+            })
+            .await
+            .map_err(one_line)
+    }
+
     /// Re-reads the sender's identity from the peer connection.
     ///
     /// Called after every renegotiation. A failure here is not fatal: the
@@ -1459,16 +1764,28 @@ impl Published {
 
 /// The payload type Cloudflare agreed to for our outgoing audio.
 async fn negotiated_payload_type(peer: &dyn PeerConnection) -> Option<PayloadType> {
-    peer.get_senders()
-        .await
-        .first()?
-        .get_parameters()
-        .await
-        .ok()?
-        .rtp_parameters
-        .codecs
-        .first()
-        .map(|codec| codec.payload_type)
+    payload_type_of(peer, MIC_TRACK).await
+}
+
+/// The payload type Cloudflare agreed to for one of our outgoing tracks.
+///
+/// By name rather than by position: a client that is sharing has two senders,
+/// and which one `get_senders` returns first is not something to rely on.
+async fn payload_type_of(peer: &dyn PeerConnection, track_id: &str) -> Option<PayloadType> {
+    for sender in peer.get_senders().await {
+        if sender.track().track_id().await != track_id {
+            continue;
+        }
+        return sender
+            .get_parameters()
+            .await
+            .ok()?
+            .rtp_parameters
+            .codecs
+            .first()
+            .map(|codec| codec.payload_type);
+    }
+    None
 }
 
 async fn publish_mic(
@@ -1545,6 +1862,121 @@ async fn publish_mic(
         ssrc: Arc::new(AtomicU32::new(ssrc)),
         payload_type: Arc::new(AtomicU8::new(payload_type)),
     })
+}
+
+/// Adds an H.264 track to a live peer connection and tells the room about it.
+///
+/// Unlike [`publish_mic`] this happens mid-call, on a peer connection that is
+/// already carrying audio: adding a transceiver renegotiates, and Cloudflare
+/// answers the same `tracks/new` it answers a join with. The audio sender can
+/// be rebuilt by that exchange, which is what [`Published::refresh`] on the
+/// microphone is for at the end.
+///
+/// **This is where the room's one-sharer rule lands.** The Durable Object
+/// refuses a `tracks/new` naming `screen` while somebody else is sharing
+/// (`already_sharing`, server/src/room.ts), so a second sharer fails here
+/// rather than getting a track nobody can see.
+async fn publish_screen(
+    signaling: &Signaling,
+    self_id: &str,
+    peer: &dyn PeerConnection,
+    signals: &Signals,
+    microphone: &Published,
+) -> Result<Published, RtcError> {
+    let track = Arc::new(TrackLocalStaticSample::new(MediaStreamTrack::new(
+        "goodvoice".to_owned(),
+        SCREEN_TRACK.to_owned(),
+        "goodvoice screen".to_owned(),
+        RtpCodecKind::Video,
+        vec![RTCRtpEncodingParameters {
+            rtp_coding_parameters: RTCRtpCodingParameters {
+                ssrc: Some(fresh_ssrc()),
+                ..Default::default()
+            },
+            codec: h264_codec(),
+            ..Default::default()
+        }],
+    ))?);
+
+    let transceiver = peer
+        .add_transceiver_from_track(
+            Arc::clone(&track) as Arc<dyn TrackLocal>,
+            Some(RTCRtpTransceiverInit {
+                direction: RTCRtpTransceiverDirection::Sendonly,
+                ..Default::default()
+            }),
+        )
+        .await?;
+
+    let offer = peer.create_offer(None).await?;
+    peer.set_local_description(offer).await?;
+    let sdp = local_sdp(peer, signals).await?;
+    trace_sdp("screen offer", &sdp);
+
+    let mid = transceiver
+        .mid()
+        .await?
+        .ok_or_else(|| RtcError::Protocol("screen transceiver has no mid".to_owned()))?;
+
+    let answer = signaling
+        .sfu(
+            self_id,
+            SfuOperation::TracksNew,
+            &json!({
+                "sessionDescription": { "type": "offer", "sdp": sdp },
+                "tracks": [{ "location": "local", "mid": mid, "trackName": SCREEN_TRACK }],
+            }),
+        )
+        .await?;
+
+    // A `tracks/new` can come back 200 with the track itself refused, which is
+    // how `already_sharing` arrives when the room let the request through and
+    // Cloudflare did not.
+    if let Some((code, description)) = track_error(&answer) {
+        return Err(RtcError::Sfu(format!("{description} ({code})")));
+    }
+
+    peer.set_remote_description(RTCSessionDescription::answer(sdp_of(&answer)?)?)
+        .await?;
+
+    // The exchange above may have rebuilt the microphone's sender underneath
+    // the encode loop, which would otherwise keep writing to the old one
+    // (DR-8). Same fix as a pull's renegotiation.
+    microphone.refresh(peer).await;
+
+    let payload_type = payload_type_of(peer, SCREEN_TRACK)
+        .await
+        .ok_or_else(|| RtcError::Transport("screen sender has no negotiated codec".to_owned()))?;
+    let ssrc = *track
+        .ssrcs()
+        .await
+        .first()
+        .ok_or_else(|| RtcError::Transport("published screen has no SSRC".to_owned()))?;
+
+    Ok(Published {
+        track,
+        ssrc: Arc::new(AtomicU32::new(ssrc)),
+        payload_type: Arc::new(AtomicU8::new(payload_type)),
+    })
+}
+
+/// Streams encoded frames from one capture onto one track.
+///
+/// Ends when the capture ends — the window closed, the user stopped, or the
+/// session went away — and says which, so the UI can tell the difference
+/// between "you stopped" and "it stopped".
+async fn screen_loop(mut source: Box<dyn ScreenSource>, published: Published, shared: Arc<Shared>) {
+    while let Some(frame) = source.next_frame().await {
+        if shared.is_leaving() {
+            break;
+        }
+        if let Err(detail) = published.write(&frame.bytes, frame.duration).await {
+            // The track is gone. The session is what rebuilds it, and the
+            // share is restarted with the session.
+            eprintln!("screen track stopped: {detail}");
+            break;
+        }
+    }
 }
 
 /// A synchronisation source for the outgoing stream. Nanoseconds since the
@@ -1722,6 +2154,97 @@ async fn reconcile(
     }
 }
 
+/// The remote screen this client is watching, if it is watching one.
+struct Watching {
+    /// Who is sharing. A different sharer means a different subscription.
+    peer: String,
+    /// Their Realtime session, which changes when they reconnect.
+    session_id: String,
+    playback: JoinHandle<()>,
+}
+
+/// Subscribe to the room's screen, or stop, to match what the viewer wants.
+///
+/// **Nothing happens here without a sink.** No viewer open means no
+/// subscription, which means Cloudflare never sends this client the video —
+/// prd.md §3 F3's opt-in, enforced by the absence of a destination rather than
+/// by a flag (`rtc::screen`).
+async fn reconcile_watch(
+    subscriber: &Subscriber,
+    watching: &mut Option<Watching>,
+    participants: &[Participant],
+) {
+    let sink = subscriber.shared.watch_sink();
+
+    // Who, if anyone, is publishing a screen right now. Never this client:
+    // watching your own share is a loopback nobody asked for.
+    let sharer = sink.as_ref().and_then(|_| {
+        participants.iter().find(|peer| {
+            peer.id != subscriber.self_id
+                && peer.publishes(SCREEN_TRACK)
+                && peer.session_id.is_some()
+        })
+    });
+
+    // Still watching the same screen on the same session: nothing to do.
+    if let (Some(current), Some(sharer)) = (watching.as_ref(), sharer) {
+        if current.peer == sharer.id
+            && Some(current.session_id.as_str()) == sharer.session_id.as_deref()
+            && !current.playback.is_finished()
+        {
+            return;
+        }
+    }
+
+    if let Some(current) = watching.take() {
+        current.playback.abort();
+        if let Some(sink) = sink.as_ref() {
+            sink.ended();
+        }
+    }
+
+    let (Some(sink), Some(sharer)) = (sink, sharer) else {
+        return;
+    };
+    let Some(session_id) = sharer.session_id.as_deref() else {
+        return;
+    };
+
+    match subscribe_to_screen(subscriber, session_id, sink).await {
+        Ok(playback) => {
+            *watching = Some(Watching {
+                peer: sharer.id.clone(),
+                session_id: session_id.to_owned(),
+                playback,
+            });
+        }
+        // Worth reporting and not worth ending the call for: audio is never
+        // gated on video (prd.md §3 F3). The retry tick calls back here.
+        Err(error) => eprintln!("could not watch {}'s screen: {error}", sharer.name),
+    }
+}
+
+/// Pulls the room's `screen` track and starts feeding it to `sink`.
+async fn subscribe_to_screen(
+    subscriber: &Subscriber,
+    session_id: &str,
+    sink: Arc<dyn ScreenSink>,
+) -> Result<JoinHandle<()>, RtcError> {
+    let answer = pull_track(subscriber, session_id, SCREEN_TRACK).await?;
+
+    if answer
+        .get("requiresImmediateRenegotiation")
+        .and_then(Value::as_bool)
+        == Some(true)
+    {
+        renegotiate(subscriber, &answer).await?;
+    }
+
+    let ssrc = ssrc_of(&answer);
+    let track = claim_track(&subscriber.signals.tracks, ssrc).await?;
+    Ok(tokio::spawn(screen_playback_loop(track, sink)))
+}
+
 fn free_slot(playing: &HashMap<String, Subscription>) -> Option<usize> {
     (0..MAX_REMOTE_SLOTS).find(|slot| {
         !playing
@@ -1740,7 +2263,7 @@ async fn subscribe_to(
     session_id: &str,
     slot: usize,
 ) -> Result<Subscription, RtcError> {
-    let answer = pull_track(subscriber, session_id).await?;
+    let answer = pull_track(subscriber, session_id, MIC_TRACK).await?;
 
     // Cloudflare only offers when it needs a new m-section. Reusing one that
     // is already there is a valid answer with no SDP in it, and forcing a
@@ -1770,12 +2293,16 @@ async fn subscribe_to(
 /// accepted, which is before their ICE and DTLS finish — so a peer is
 /// advertised a beat before Cloudflare will serve them. Retrying is the whole
 /// fix; there is nothing wrong on either side (DR-8).
-async fn pull_track(subscriber: &Subscriber, session_id: &str) -> Result<Value, RtcError> {
+async fn pull_track(
+    subscriber: &Subscriber,
+    session_id: &str,
+    track_name: &str,
+) -> Result<Value, RtcError> {
     let body = json!({
         "tracks": [{
             "location": "remote",
             "sessionId": session_id,
-            "trackName": MIC_TRACK,
+            "trackName": track_name,
         }],
     });
 
@@ -1968,6 +2495,49 @@ async fn playback_loop(track: Arc<dyn TrackRemote>, slot: usize, shared: Arc<Sha
     }
 
     shared.sink.clear(slot);
+}
+
+/// Reassembles one remote screen's RTP into access units and hands them over.
+///
+/// Two steps, and both are needed. `H264Packet` undoes RTP's own framing —
+/// a fragmented keyframe arrives as dozens of FU-A packets and an aggregated
+/// parameter set as one STAP-A — and the **marker bit** is what says the last
+/// packet of a picture has arrived. A decoder fed per-packet instead of per
+/// access unit shows nothing at all.
+async fn screen_playback_loop(track: Arc<dyn TrackRemote>, sink: Arc<dyn ScreenSink>) {
+    // Annex B, with start codes, which is what a Media Foundation decoder
+    // takes and what the sharer's encoder produced in the first place. That is
+    // the default, and it is set here anyway: the flag decides whether the
+    // bytes coming out are usable, and a default is not a promise.
+    let mut depacketizer = H264Packet::default();
+    depacketizer.is_avc = false;
+    let mut unit: Vec<u8> = Vec::new();
+
+    while let Some(event) = track.poll().await {
+        let TrackRemoteEvent::OnRtpPacket(packet) = event else {
+            if matches!(event, TrackRemoteEvent::OnEnded) {
+                break;
+            }
+            continue;
+        };
+
+        // One malformed or lost fragment loses the picture it belonged to.
+        // The next keyframe repairs that; dropping the partial unit is what
+        // stops a decoder being fed half of one.
+        let Ok(nals) = depacketizer.depacketize(&packet.payload) else {
+            unit.clear();
+            continue;
+        };
+        unit.extend_from_slice(&nals);
+
+        if !packet.header.marker || unit.is_empty() {
+            continue;
+        }
+        sink.accept(&unit, starts_with_idr(&unit));
+        unit.clear();
+    }
+
+    sink.ended();
 }
 
 /// Turns one RTP payload into 20 ms of playback, unless the user is deafened.

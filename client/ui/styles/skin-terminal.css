@@ -195,6 +195,43 @@
   caret-color: var(--accent);
 }
 
+/* --- the picker as a listing --------------------------------------------- */
+
+/*
+ * The picker is a `ls` of the desktop under this skin: no box around it, a
+ * marker per row, and the kind column reading as a file type. The bracket
+ * decoration carries `/ ""` for the same reason every other one here does —
+ * generated content joins the accessible name, and a screen reader should not
+ * read "left-bracket monitor right-bracket" (styleguide.md §3.3, DR-25).
+ */
+[data-skin="terminal"] .picker {
+  border: none;
+  padding: 0;
+}
+
+[data-skin="terminal"] .target-kind::before {
+  content: "[" / "";
+}
+
+[data-skin="terminal"] .target-kind::after {
+  content: "]" / "";
+}
+
+[data-skin="terminal"] .target::before {
+  content: "› " / "";
+  color: var(--fg-muted);
+}
+
+[data-skin="terminal"] .target:hover::before,
+[data-skin="terminal"] .target:focus-visible::before {
+  color: var(--accent);
+}
+
+/* The two qualities have the whole row to share, so they fit unshrunk. */
+[data-skin="terminal"] .picker .modes .action {
+  font-size: 10px;
+}
+
 /* --- the roster as a directory listing ----------------------------------- */
 
 [data-skin="terminal"] .roster-row::before {

@@ -2,13 +2,19 @@
 //!
 //! [`wgc`] is the capture half — what there is to share, and the frames from
 //! sharing it. [`encoder`] is the other half, and takes [`wgc::Frame`]'s
-//! texture where it already is rather than a copy of it. Both are
-//! Windows-only in the way the whole feature is: there is no cross-platform
-//! seam here because there is no second platform, and a stub that compiled
-//! elsewhere would only hide that.
+//! texture where it already is rather than a copy of it. [`share`] is what the
+//! rest of the client uses: it owns one of each on a thread of their own and
+//! hands back H.264 packets, so nothing outside this module holds a COM
+//! interface.
+//!
+//! All three are Windows-only in the way the whole feature is: there is no
+//! cross-platform seam here because there is no second platform, and a stub
+//! that compiled elsewhere would only hide that.
 
 #[cfg(windows)]
 pub mod encoder;
+#[cfg(windows)]
+pub mod share;
 #[cfg(windows)]
 pub mod wgc;
 

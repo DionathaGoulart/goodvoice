@@ -27,6 +27,7 @@ use audio::{
 };
 use rtc::{
     reconnect::CallState,
+    screen::ShareState,
     session::{Call, CallOptions, Levels},
     signaling::Participant,
 };
@@ -77,6 +78,13 @@ const CONTROLS_EVENT: &str = "goodvoice://controls";
 /// every sentence. Sending them together would mean re-rendering the whole
 /// roster twenty times a second.
 const SPEAKING_EVENT: &str = "goodvoice://speaking";
+
+/// The event that says what this client's own screen share is doing.
+///
+/// Separate from the roster, which says who is sharing: this one carries why a
+/// share failed, and what it went live as — including whether the encoder is
+/// in silicon, which prd.md §3 F3 requires be shown.
+const SHARE_EVENT: &str = "goodvoice://share";
 
 /// Identity of the running client, surfaced to the UI on boot.
 #[derive(Debug, Clone, Serialize)]
@@ -141,6 +149,10 @@ pub struct Snapshot {
     /// built has to draw the switches somehow, and this is the one call it
     /// already makes.
     pub audio: AudioSettings,
+    /// What this client's own screen share is doing. [`ShareState::Idle`]
+    /// outside a call, which is also what it is inside one until somebody
+    /// picks something.
+    pub share: ShareState,
 }
 
 /// What the window and the tray menu both show, and neither owns.
@@ -318,6 +330,7 @@ async fn join_call(app: &AppHandle, options: CallOptions) -> Result<CallStatus, 
     tauri::async_runtime::spawn(push_roster(app.clone(), call.roster()));
     tauri::async_runtime::spawn(push_speaking(app.clone(), call.speaking()));
     tauri::async_runtime::spawn(push_state(app.clone(), call.state(), call.self_id_watch()));
+    tauri::async_runtime::spawn(push_share(app.clone(), call.share()));
     *current = Some(call);
     // A fresh call is unmuted and undeafened, whatever the last one ended as.
     state.controls.send_replace(Controls {
@@ -537,6 +550,75 @@ async fn talk_key_is_global(state: State<'_, CurrentCall>) -> Result<bool, Strin
     Ok(state.hotkey.bound.lock().is_ok_and(|bound| bound.is_some()))
 }
 
+/// Everything this machine can share, monitors first.
+///
+/// Called when the picker opens rather than kept up to date: windows come and
+/// go, and a list that is a second old is a list that is right often enough —
+/// a target that has closed by the time it is picked fails at
+/// [`start_share`], which is where it would have to be handled anyway.
+///
+/// # Errors
+///
+/// Returns an error when the screen cannot be enumerated at all, which on a
+/// non-Windows host is always.
+#[tauri::command]
+fn share_targets() -> Result<Vec<capture::wgc::Target>, String> {
+    #[cfg(windows)]
+    {
+        if !capture::wgc::is_supported() {
+            return Err("screen capture is not available on this machine".to_owned());
+        }
+        let mut targets = capture::wgc::monitors().map_err(|error| error.to_string())?;
+        targets.extend(capture::wgc::windows().map_err(|error| error.to_string())?);
+        Ok(targets)
+    }
+    #[cfg(not(windows))]
+    {
+        Err("screen capture is Windows-only".to_owned())
+    }
+}
+
+/// Start sharing `target` at `quality`.
+///
+/// Returns as soon as the intent is recorded. Whether it worked — and the
+/// refusal when somebody else is already sharing — arrives on [`SHARE_EVENT`].
+///
+/// # Errors
+///
+/// Returns an error when there is no call to share into.
+#[tauri::command]
+async fn start_share(
+    state: State<'_, CurrentCall>,
+    target: capture::wgc::Target,
+    quality: capture::encoder::Quality,
+) -> Result<(), String> {
+    let call = state.call.lock().await;
+    let call = call.as_ref().ok_or_else(|| "not in a call".to_owned())?;
+    #[cfg(windows)]
+    {
+        call.start_share(Arc::new(capture::share::ShareFactory::new(target, quality)));
+        Ok(())
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = (call, target, quality);
+        Err("screen capture is Windows-only".to_owned())
+    }
+}
+
+/// Stop sharing. Does nothing if this client is not sharing.
+///
+/// # Errors
+///
+/// Returns an error when there is no call.
+#[tauri::command]
+async fn stop_share(state: State<'_, CurrentCall>) -> Result<(), String> {
+    let call = state.call.lock().await;
+    let call = call.as_ref().ok_or_else(|| "not in a call".to_owned())?;
+    call.stop_share();
+    Ok(())
+}
+
 #[tauri::command]
 fn client_info() -> ClientInfo {
     ClientInfo::current()
@@ -561,6 +643,7 @@ async fn current_status(state: State<'_, CurrentCall>) -> Result<Snapshot, Strin
             health: None,
             speaking: Levels::default(),
             audio: state.prefs.settings(),
+            share: ShareState::Idle,
         });
     };
 
@@ -578,6 +661,7 @@ async fn current_status(state: State<'_, CurrentCall>) -> Result<Snapshot, Strin
         }),
         speaking: call.speaking().borrow().clone(),
         audio: state.prefs.settings(),
+        share: call.share().borrow().clone(),
     })
 }
 
@@ -637,6 +721,22 @@ async fn push_speaking(app: AppHandle, mut speaking: watch::Receiver<Levels>) {
         let _ = app.emit(SPEAKING_EVENT, talking);
 
         if speaking.changed().await.is_err() {
+            return;
+        }
+    }
+}
+
+/// Forwards this client's own share state to the webview until the call ends.
+///
+/// One event rather than a poll, and separate from the roster: the roster says
+/// who is sharing, this says what happened when *this* client tried — including
+/// the refusal when somebody else got there first (prd.md §8).
+async fn push_share(app: AppHandle, mut share: watch::Receiver<ShareState>) {
+    loop {
+        let current = share.borrow_and_update().clone();
+        let _ = app.emit(SHARE_EVENT, current);
+
+        if share.changed().await.is_err() {
             return;
         }
     }
@@ -749,6 +849,9 @@ pub fn run() {
             set_audio_settings,
             set_talk_key,
             set_talk_binding,
+            share_targets,
+            start_share,
+            stop_share,
             talk_key_is_global
         ])
         .build(tauri::generate_context!())
@@ -779,8 +882,8 @@ pub fn run() {
 #[cfg(test)]
 mod tests {
     use super::{
-        AudioSettings, CallHealth, CallState, CallStatus, ClientInfo, Controls, Levels, Snapshot,
-        DEFAULT_SERVER,
+        AudioSettings, CallHealth, CallState, CallStatus, ClientInfo, Controls, Levels, ShareState,
+        Snapshot, DEFAULT_SERVER,
     };
     use crate::rtc::session::Talker;
 
@@ -819,6 +922,7 @@ mod tests {
             health: None,
             speaking: Levels::default(),
             audio: AudioSettings::default(),
+            share: ShareState::Idle,
         })
         .expect("snapshot serialize");
 
@@ -835,6 +939,7 @@ mod tests {
                     "noiseSuppression": true,
                     "echoCancellation": true,
                 },
+                "share": { "state": "idle" },
             })
         );
     }
@@ -868,6 +973,12 @@ mod tests {
                 input: 0.25,
             },
             audio: AudioSettings::default(),
+            share: ShareState::Sharing {
+                target: "\\\\.\\DISPLAY1".to_owned(),
+                width: 1280,
+                height: 720,
+                hardware: true,
+            },
         })
         .expect("snapshot serialize");
 

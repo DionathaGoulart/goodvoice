@@ -55,12 +55,13 @@ use windows::{
             Dxgi::Common::{DXGI_FORMAT_NV12, DXGI_RATIONAL},
         },
         Media::MediaFoundation::{
-            IMFActivate, IMFDXGIDeviceManager, IMFMediaEventGenerator, IMFMediaType, IMFSample,
-            IMFTransform, METransformDrainComplete, METransformHaveOutput, METransformNeedInput,
-            MFCreateDXGIDeviceManager, MFCreateDXGISurfaceBuffer, MFCreateMediaType,
-            MFCreateMemoryBuffer, MFCreateSample, MFMediaType_Video, MFStartup, MFTEnumEx,
-            MFT_ENUM_HARDWARE_URL_Attribute, MFT_FRIENDLY_NAME_Attribute, MFVideoFormat_H264,
-            MFVideoFormat_NV12, MFVideoInterlace_Progressive,
+            eAVEncH264VProfile_Base, CODECAPI_AVEncMPVGOPSize, CODECAPI_AVEncVideoForceKeyFrame,
+            ICodecAPI, IMFActivate, IMFDXGIDeviceManager, IMFMediaEventGenerator, IMFMediaType,
+            IMFSample, IMFTransform, METransformDrainComplete, METransformHaveOutput,
+            METransformNeedInput, MFCreateDXGIDeviceManager, MFCreateDXGISurfaceBuffer,
+            MFCreateMediaType, MFCreateMemoryBuffer, MFCreateSample, MFMediaType_Video, MFStartup,
+            MFTEnumEx, MFT_ENUM_HARDWARE_URL_Attribute, MFT_FRIENDLY_NAME_Attribute,
+            MFVideoFormat_H264, MFVideoFormat_NV12, MFVideoInterlace_Progressive,
             MEDIA_EVENT_GENERATOR_GET_EVENT_FLAGS, MFSTARTUP_NOSOCKET, MFT_CATEGORY_VIDEO_ENCODER,
             MFT_ENUM_FLAG_ASYNCMFT, MFT_ENUM_FLAG_HARDWARE, MFT_ENUM_FLAG_SORTANDFILTER,
             MFT_ENUM_FLAG_SYNCMFT, MFT_MESSAGE_COMMAND_DRAIN, MFT_MESSAGE_NOTIFY_BEGIN_STREAMING,
@@ -70,14 +71,18 @@ use windows::{
             MFT_REGISTER_TYPE_INFO, MF_EVENT_TYPE, MF_E_TRANSFORM_NEED_MORE_INPUT,
             MF_E_TRANSFORM_STREAM_CHANGE, MF_MT_ALL_SAMPLES_INDEPENDENT, MF_MT_AVG_BITRATE,
             MF_MT_FRAME_RATE, MF_MT_FRAME_SIZE, MF_MT_INTERLACE_MODE, MF_MT_MAJOR_TYPE,
-            MF_MT_PIXEL_ASPECT_RATIO, MF_MT_SUBTYPE, MF_SA_D3D11_AWARE, MF_TRANSFORM_ASYNC,
-            MF_TRANSFORM_ASYNC_UNLOCK, MF_VERSION,
+            MF_MT_MPEG2_PROFILE, MF_MT_PIXEL_ASPECT_RATIO, MF_MT_SUBTYPE, MF_SA_D3D11_AWARE,
+            MF_TRANSFORM_ASYNC, MF_TRANSFORM_ASYNC_UNLOCK, MF_VERSION,
         },
-        System::Com::CoTaskMemFree,
+        System::{
+            Com::CoTaskMemFree,
+            Variant::{VARIANT, VT_UI4},
+        },
     },
 };
 
 use super::CaptureError;
+use crate::rtc::screen::starts_with_idr;
 
 /// Media Foundation counts in 100-nanosecond units and so must anything
 /// handing it a timestamp.
@@ -220,9 +225,90 @@ fn attribute_string(activate: &IMFActivate, key: &GUID) -> Option<String> {
     owned
 }
 
+/// What a person picked in the share dialog (prd.md §3 F3).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Quality {
+    /// 720p. Cheaper to encode, cheaper to send, and legible for anything but
+    /// small text.
+    P720,
+    /// 1080p, the ceiling. Above this is not offered: prd.md §4 budgets one
+    /// sharer at 1080p and the FPS benchmark (task 5.5) is written against it.
+    P1080,
+}
+
+impl Quality {
+    /// The tallest frame this quality allows.
+    #[must_use]
+    pub const fn height(self) -> u32 {
+        match self {
+            Self::P720 => 720,
+            Self::P1080 => 1080,
+        }
+    }
+
+    /// What to spend on it, in bits per second.
+    ///
+    /// A screen is not a camera: it holds still for seconds and then a whole
+    /// window moves. The encoder spends far less than this most of the time
+    /// (docs/perf/screenshare-encode.md measured 2 Mbps against a 6 Mbps
+    /// ceiling), so this is headroom for the moments that need it rather than
+    /// a rate anything runs at.
+    #[must_use]
+    pub const fn bitrate(self) -> u32 {
+        match self {
+            Self::P720 => 2_500_000,
+            Self::P1080 => 6_000_000,
+        }
+    }
+
+    /// How to encode a source of this size at this quality.
+    ///
+    /// Never upscales: sharing a 1280×720 window at "1080p" sends 720p, which
+    /// is the same pixels and a third of the bitrate.
+    #[must_use]
+    pub fn plan(self, source: (u32, u32), fps: u32) -> EncodeConfig {
+        let (width, height) = fit(source, self.height());
+        EncodeConfig {
+            source_width: source.0.max(2),
+            source_height: source.1.max(2),
+            width,
+            height,
+            fps,
+            bitrate: self.bitrate(),
+        }
+    }
+}
+
+/// Fit a source inside `limit` rows, keeping its shape, on even boundaries.
+///
+/// Even because NV12 is 4:2:0: an odd dimension has half a chroma sample in
+/// it, and encoders answer that with a format refusal rather than a warning.
+fn fit(source: (u32, u32), limit: u32) -> (u32, u32) {
+    let (source_width, source_height) = (source.0.max(2), source.1.max(2));
+    if source_height <= limit {
+        return (even(source_width), even(source_height));
+    }
+    let width = u64::from(source_width) * u64::from(limit) / u64::from(source_height);
+    (even(u32::try_from(width).unwrap_or(limit)), even(limit))
+}
+
+/// Round down to an even number, never below 2.
+const fn even(value: u32) -> u32 {
+    if value < 2 {
+        2
+    } else {
+        value & !1
+    }
+}
+
 /// What to ask the encoder for.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct EncodeConfig {
+    /// Width of the frames coming in from the capture.
+    pub source_width: u32,
+    /// Height of the frames coming in from the capture.
+    pub source_height: u32,
     /// Encoded width in pixels. Even, because NV12 is 4:2:0.
     pub width: u32,
     /// Encoded height in pixels. Even, for the same reason.
@@ -415,6 +501,10 @@ impl H264Encoder {
             CaptureError::Encoder(format!("{} refused NV12 input: {error}", info.name))
         })?;
 
+        // Both are advisory: an encoder that does not expose `ICodecAPI`, or
+        // does not take these, still encodes. It just decides its own GOP.
+        pin_keyframe_interval(&transform, config.fps);
+
         let converter = Nv12Converter::new(device, context, config)?;
 
         // SAFETY: the transform is live and both messages take no parameter.
@@ -480,6 +570,22 @@ impl H264Encoder {
     #[must_use]
     pub fn config(&self) -> EncodeConfig {
         self.config
+    }
+
+    /// Ask for the next frame to be an IDR.
+    ///
+    /// What a viewer opening mid-share needs (task 5.4): a decoder cannot
+    /// start on a P-frame, so without this a new viewer waits for the next
+    /// scheduled keyframe. Best effort — an encoder that does not expose
+    /// `ICodecAPI` keeps its own schedule, which
+    /// [`pin_keyframe_interval`] has already capped at a second.
+    pub fn request_keyframe(&self) {
+        let Ok(api) = self.transform.cast::<ICodecAPI>() else {
+            return;
+        };
+        let value = variant_u32(1);
+        // SAFETY: the codec API is live and the variant outlives the call.
+        let _ = unsafe { api.SetValue(&CODECAPI_AVEncVideoForceKeyFrame, &raw const value) };
     }
 
     /// Encode one captured frame, appending whatever comes out to `out`.
@@ -706,6 +812,36 @@ impl H264Encoder {
     }
 }
 
+/// Cap the distance between keyframes at one second.
+///
+/// Two things depend on it. A viewer opening mid-share cannot decode until the
+/// next IDR (task 5.4), and a share that lost packets recovers at the next one.
+/// Left alone, encoders choose their own — NVENC's default on this machine
+/// happened to be about a second, which is not the same as being told.
+fn pin_keyframe_interval(transform: &IMFTransform, fps: u32) {
+    let Ok(api) = transform.cast::<ICodecAPI>() else {
+        return;
+    };
+    let value = variant_u32(fps.max(1));
+    // SAFETY: the codec API is live and the variant outlives the call.
+    let _ = unsafe { api.SetValue(&CODECAPI_AVEncMPVGOPSize, &raw const value) };
+}
+
+/// A `VT_UI4` variant, which is the only shape `ICodecAPI` is asked for here.
+fn variant_u32(value: u32) -> VARIANT {
+    let mut variant = VARIANT::default();
+    // SAFETY: `VARIANT` is zeroed by `Default`, so both the tag and the union
+    // start empty; writing a `u32` into `ulVal` after tagging it `VT_UI4` is
+    // the documented way to build one, and `VT_UI4` owns nothing that would
+    // need freeing.
+    unsafe {
+        let inner = &mut variant.Anonymous.Anonymous;
+        inner.vt = VT_UI4;
+        inner.Anonymous.ulVal = value;
+    }
+    variant
+}
+
 /// Copy one encoded sample out of Media Foundation's memory.
 ///
 /// This is the one copy on the path, and it is the right one: the bitstream is
@@ -744,33 +880,6 @@ fn read_packet(sample: &IMFSample) -> Result<Packet, CaptureError> {
     })
 }
 
-/// Whether an Annex B access unit carries an IDR slice or a parameter set.
-///
-/// Read from the bitstream rather than from the sample's attributes because
-/// the attribute is not set by every encoder, and a viewer that guesses wrong
-/// about where it can start (task 5.4) shows a grey rectangle.
-fn starts_with_idr(bytes: &[u8]) -> bool {
-    let mut index = 0;
-    while index + 4 <= bytes.len() {
-        // Annex B start codes are 00 00 01 or 00 00 00 01.
-        let (offset, header) = match bytes[index..] {
-            [0, 0, 1, header, ..] => (4, header),
-            [0, 0, 0, 1, header, ..] => (5, header),
-            _ => {
-                index += 1;
-                continue;
-            }
-        };
-        // 5 = IDR slice, 7 = SPS, 8 = PPS. Any of the three means a decoder
-        // can start here.
-        if matches!(header & 0x1f, 5 | 7 | 8) {
-            return true;
-        }
-        index += offset;
-    }
-    false
-}
-
 /// The `DXGI` device manager an MFT needs before it will take textures.
 fn device_manager(device: &ID3D11Device) -> Result<IMFDXGIDeviceManager, CaptureError> {
     let mut token = 0_u32;
@@ -791,6 +900,21 @@ fn output_type(config: EncodeConfig) -> Result<IMFMediaType, CaptureError> {
     // SAFETY: the media type is live and both keys take a UINT32.
     unsafe { media.SetUINT32(&MF_MT_AVG_BITRATE, config.bitrate) }
         .map_err(|error| CaptureError::Encoder(format!("setting the bitrate: {error}")))?;
+
+    // Baseline, and asked for rather than accepted. Left to itself NVENC
+    // produces Main, which is fine for a file and is a negotiation risk on the
+    // wire: the SDP offer names one `profile-level-id`, and a decoder is
+    // entitled to believe it. Baseline also has no B-frames, so a frame comes
+    // out for every frame that goes in and the share adds no reordering delay.
+    // Advisory: an encoder that will not take it keeps its own profile, and
+    // the offer allows an asymmetric level for exactly that reason.
+    // SAFETY: the media type is live and the key takes a UINT32.
+    let _ = unsafe {
+        media.SetUINT32(
+            &MF_MT_MPEG2_PROFILE,
+            eAVEncH264VProfile_Base.0.unsigned_abs(),
+        )
+    };
     Ok(media)
 }
 
@@ -865,8 +989,8 @@ impl Nv12Converter {
         let desc = D3D11_VIDEO_PROCESSOR_CONTENT_DESC {
             InputFrameFormat: D3D11_VIDEO_FRAME_FORMAT_PROGRESSIVE,
             InputFrameRate: rate,
-            InputWidth: config.width,
-            InputHeight: config.height,
+            InputWidth: config.source_width,
+            InputHeight: config.source_height,
             OutputFrameRate: rate,
             OutputWidth: config.width,
             OutputHeight: config.height,
@@ -1014,20 +1138,43 @@ mod tests {
     }
 
     #[test]
-    fn an_idr_is_found_behind_either_start_code() {
-        // Four-byte start code, NAL header 0x65: IDR slice.
-        assert!(starts_with_idr(&[0, 0, 0, 1, 0x65, 0xff]));
-        // Three-byte start code, NAL header 0x67: SPS.
-        assert!(starts_with_idr(&[0, 0, 1, 0x67, 0x42]));
-        // 0x41 is a non-IDR slice: a P-frame, and not a place to start.
-        assert!(!starts_with_idr(&[0, 0, 0, 1, 0x41, 0x9a, 0x00]));
-        assert!(!starts_with_idr(&[]));
+    fn a_quality_never_upscales() {
+        // A 720p window shared at "1080p" is still 720p.
+        let plan = Quality::P1080.plan((1280, 720), 30);
+        assert_eq!((plan.width, plan.height), (1280, 720));
+        assert_eq!((plan.source_width, plan.source_height), (1280, 720));
     }
 
     #[test]
-    fn an_sps_after_a_p_slice_still_counts() {
-        let bytes = [0, 0, 0, 1, 0x41, 0x9a, 0, 0, 0, 1, 0x67, 0x42];
-        assert!(starts_with_idr(&bytes));
+    fn a_quality_keeps_the_shape_of_what_it_scales() {
+        let plan = Quality::P720.plan((2560, 1440), 30);
+        assert_eq!((plan.width, plan.height), (1280, 720));
+
+        // 16:10, which is where a naive width calculation goes wrong.
+        let plan = Quality::P720.plan((1920, 1200), 30);
+        assert_eq!((plan.width, plan.height), (1152, 720));
+
+        // A rotated display: taller than it is wide, and still fitted by rows.
+        let plan = Quality::P720.plan((1080, 1920), 30);
+        assert_eq!((plan.width, plan.height), (404, 720));
+    }
+
+    #[test]
+    fn every_encoded_dimension_is_even() {
+        for source in [(1919, 1079), (1367, 769), (3, 3), (0, 0)] {
+            for quality in [Quality::P720, Quality::P1080] {
+                let plan = quality.plan(source, 30);
+                assert_eq!(plan.width % 2, 0, "{source:?} {quality:?}");
+                assert_eq!(plan.height % 2, 0, "{source:?} {quality:?}");
+                assert!(plan.width >= 2 && plan.height >= 2);
+            }
+        }
+    }
+
+    #[test]
+    fn the_bigger_quality_costs_more() {
+        assert!(Quality::P1080.bitrate() > Quality::P720.bitrate());
+        assert!(Quality::P1080.height() > Quality::P720.height());
     }
 
     #[test]

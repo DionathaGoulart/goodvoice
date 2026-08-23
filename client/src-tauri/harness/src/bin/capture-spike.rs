@@ -29,6 +29,7 @@
 //! cargo run -p goodvoice-harness --bin capture-spike -- --monitor DISPLAY2
 //! cargo run -p goodvoice-harness --bin capture-spike -- --encode --seconds 10
 //! cargo run -p goodvoice-harness --bin capture-spike -- --software    # the fallback, and its warning
+//! cargo run -p goodvoice-harness --bin capture-spike -- --encode --720
 //! ```
 
 #[cfg(not(windows))]
@@ -67,7 +68,7 @@ mod windows_spike {
     };
 
     use goodvoice_client_lib::capture::{
-        encoder::{self, EncodeConfig, H264Encoder, Packet, Selection},
+        encoder::{self, EncodeConfig, H264Encoder, Packet, Quality, Selection},
         wgc::{self, Capturer, Cursor, Target, TargetKind},
     };
 
@@ -83,10 +84,9 @@ mod windows_spike {
     /// than as a hang, short enough to keep the progress line moving.
     const FRAME_WAIT: Duration = Duration::from_millis(500);
 
-    /// What `--encode` asks the encoder for. 1080p30 at 6 Mbps is the top of
-    /// what task 5.3 will offer, so it is the case worth measuring.
+    /// What `--encode` asks the encoder for. The bitrate comes with the
+    /// quality; 30 fps is what task 5.3 publishes at.
     const ENCODE_FPS: u32 = 30;
-    const ENCODE_BITRATE: u32 = 6_000_000;
 
     /// Media Foundation counts time in 100-nanosecond units.
     const HNS_PER_SECOND: i32 = 10_000_000;
@@ -297,12 +297,7 @@ mod windows_spike {
             let (width, height) = capturer.size().context("sizing the capture")?;
             // NV12 is 4:2:0, so both dimensions have to be even. Rounding down
             // loses at most one row and one column of a screen.
-            let config = EncodeConfig {
-                width: width & !1,
-                height: height & !1,
-                fps: ENCODE_FPS,
-                bitrate: ENCODE_BITRATE,
-            };
+            let config = args.quality.plan((width, height), ENCODE_FPS);
             let selection = if args.software {
                 Selection::SoftwareOnly
             } else {
@@ -637,6 +632,7 @@ mod windows_spike {
         list: bool,
         encode: bool,
         software: bool,
+        quality: Quality,
         monitor: Option<String>,
         window: Option<String>,
         seconds: u64,
@@ -650,6 +646,7 @@ mod windows_spike {
                 list: false,
                 encode: false,
                 software: false,
+                quality: Quality::P1080,
                 monitor: None,
                 window: None,
                 seconds: DEFAULT_SECONDS,
@@ -668,6 +665,8 @@ mod windows_spike {
                         args.encode = true;
                         args.software = true;
                     }
+                    "--720" => args.quality = Quality::P720,
+                    "--1080" => args.quality = Quality::P1080,
                     "--monitor" => args.monitor = rest.next(),
                     "--window" => args.window = rest.next(),
                     "--seconds" => {

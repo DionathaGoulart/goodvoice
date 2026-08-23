@@ -319,6 +319,100 @@ body {
   gap: 8px;
 }
 
+/* --- sharing a screen ---------------------------------------------------- */
+
+/*
+ * The live-share block: what is being shared, whatever warning it came with,
+ * and the way out. A column so the warning sits under the fact it qualifies
+ * rather than beside it.
+ */
+.sharing {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+/*
+ * The picker. A panel inside the panel, because it is a question the window is
+ * asking rather than a part of the room: it appears when asked for and closes
+ * when answered.
+ */
+.picker {
+  border: var(--frame-border) solid var(--border);
+  border-radius: var(--radius-box);
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 10px;
+}
+
+/* Two qualities, equal weight — same reasoning as `.modes`. */
+.picker .modes {
+  grid-template-columns: repeat(2, 1fr);
+}
+
+/*
+ * Scrolls, and has to: a desktop with a dozen windows open produces a dozen
+ * rows, and a picker that grew with them would push the leave button off a
+ * 480-px-tall window.
+ */
+.targets {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  list-style: none;
+  margin: 0;
+  max-height: 180px;
+  overflow-y: auto;
+  padding: 0;
+}
+
+/*
+ * One thing that can be shared. A button rather than a row with a button in
+ * it: the whole row is the target, and half a row that does nothing is a
+ * smaller target for no reason.
+ */
+.target {
+  align-items: baseline;
+  background: transparent;
+  border: var(--frame-border) solid transparent;
+  border-radius: var(--radius-field);
+  color: inherit;
+  cursor: pointer;
+  display: flex;
+  font: inherit;
+  gap: 8px;
+  padding: 6px 6px;
+  text-align: left;
+  width: 100%;
+}
+
+.target:hover,
+.target:focus-visible {
+  border-color: var(--accent);
+}
+
+.target-kind {
+  color: var(--fg-muted);
+  flex: 0 0 auto;
+  font-size: 10px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.target-name {
+  flex: 1 1 auto;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.target-size {
+  color: var(--fg-muted);
+  flex: 0 0 auto;
+  font-size: 11px;
+}
+
 /* --- roster -------------------------------------------------------------- */
 
 .roster {

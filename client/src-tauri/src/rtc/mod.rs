@@ -5,9 +5,12 @@
 //! path meets hardware only at [`crate::audio::device`]'s seam.
 //!
 //! [`reconnect`] holds what a call does when the session under it dies: the
-//! retry schedule and the state the UI shows while it runs.
+//! retry schedule and the state the UI shows while it runs. [`screen`] is the
+//! same kind of seam as the audio one, for video: a call publishes an H.264
+//! track without knowing that a monitor exists.
 
 pub mod reconnect;
+pub mod screen;
 pub mod session;
 pub mod signaling;
 
