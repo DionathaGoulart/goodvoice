@@ -32,14 +32,46 @@ jobs:
         run: |
           echo "LIBCLANG_PATH=C:\Program Files\LLVM\bin" >> $env:GITHUB_ENV
           echo "C:\Program Files\LLVM\bin" >> $env:GITHUB_PATH
+      # meson chooses its compiler by looking at PATH, and windows-latest puts
+      # Strawberry Perl's gcc and a MinGW toolchain ahead of everything. The
+      # vendored C++ has to be built by the compiler the Rust side links with:
+      # gcc gets as far as abseil's cctz, where MinGW's own
+      # `windows.foundation.h` fails to compile against it.
+      #
+      # This is `C:\Users\<you>\gv\env.ps1` on the development machine, which
+      # is why the two agree. An environment does not survive into the next
+      # step, so what VsDevCmd set has to cross through GITHUB_ENV.
+      - name: Enter the MSVC environment
+        run: |
+          $vs = & "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe" `
+            -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 `
+            -property installationPath
+          Import-Module "$vs\Common7\Tools\Microsoft.VisualStudio.DevShell.dll"
+          Enter-VsDevShell -VsInstallPath $vs -SkipAutomaticLocation `
+            -DevCmdArguments '-arch=x64 -host_arch=x64' | Out-Null
+          "INCLUDE=$env:INCLUDE" >> $env:GITHUB_ENV
+          "LIB=$env:LIB" >> $env:GITHUB_ENV
+          "LIBPATH=$env:LIBPATH" >> $env:GITHUB_ENV
+          # Named outright as well as put on PATH: meson honours CC and CXX
+          # before it goes looking, so this cannot be lost to PATH order.
+          "CC=cl" >> $env:GITHUB_ENV
+          "CXX=cl" >> $env:GITHUB_ENV
+          # DR-4: the vendored libopus still declares cmake_minimum_required
+          # (VERSION 3.1), which CMake 4 refuses without this.
+          "CMAKE_POLICY_VERSION_MINIMUM=3.5" >> $env:GITHUB_ENV
+          $env:PATH -split ';' |
+            Where-Object { $_ -and $_ -notmatch 'Strawberry|mingw' } >> $env:GITHUB_PATH
       # The C++ tree is 440 objects and builds once; the cache is what keeps
       # every later run from paying for it again.
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: client/src-tauri
-      - run: cargo fmt --check
-      - run: cargo clippy --all-targets -- -D warnings
-      - run: cargo test
+      # `--all`/`--workspace`: the harnesses are their own package now (DR-29),
+      # and a gate that stops at the tauri crate would stop checking eleven
+      # measurement tools and the six tests inside `bin/soak`.
+      - run: cargo fmt --all --check
+      - run: cargo clippy --workspace --all-targets -- -D warnings
+      - run: cargo test --workspace
 
   web:
     runs-on: ubuntu-latest
