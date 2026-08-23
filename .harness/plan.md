@@ -42,6 +42,11 @@ Goal: repo builds, CI green, hello-world client and worker exist and deploy.
   DoD: workflow file is valid and passes on push.
   Verify: `gh run watch` on the push, or `act` locally if available.
   Green on run 32386485723 — all four jobs, including rust on windows-latest.
+  **Green again on run 32617030554, which is the first run since task 3.4
+  vendored a C++ tree** — the twenty-seven commits between the two were never
+  pushed, so four separate breakages sat unseen and arrived together. DR-30
+  has them: prettier reformatting somebody else's source, and three different
+  ways for a Windows runner to build C++ with the wrong toolchain.
 - [x] **0.5 [WIN] Hardware risk probe (spike)** — `client/src-tauri/harness/src/bin/probe.rs`.
   Tiny binary that (a) enumerates WASAPI render/capture devices + their shared-mode
   min buffer sizes, (b) enumerates Media Foundation H.264 encoders and flags which
@@ -2663,3 +2668,57 @@ NSIS script's "Copy external binaries" section is empty. Installed and heard at
 newer version stopped shipping, so an install made from the previous bundle
 keeps its `audio-spike.exe` until someone deletes it. Only this machine ever
 had one.
+
+### DR-30: four ways a Windows runner builds the wrong thing (2026-08-23)
+
+**Context.** The first push in twenty-seven commits, so the first CI run since
+task 3.4 vendored webrtc-audio-processing. Four failures, arriving together
+because nothing had been pushed in between. Each one is a thing the
+development machine gets right by accident.
+
+**1. `prettier --check .` walked the vendored C++ tree.** Four files, one of
+them the upstream project's own `.gitlab-ci.yml`. Not ours to reformat, and a
+`--write` in there would have buried DR-24's six patches in whitespace.
+`src-tauri/vendor` in `.prettierignore`.
+
+**2. meson found gcc.** windows-latest puts Strawberry Perl's gcc and a MinGW
+toolchain ahead of MSVC, and meson picks its compiler by looking. It got as far
+as abseil's cctz, where MinGW's own `windows.foundation.h` redefines
+`IReference<boolean>` over `IReference<BYTE>` and loses the
+`WindowsCreateStringReference` family. The fix is the development machine's own
+`env.ps1`: enter the dev shell, and carry `INCLUDE`/`LIB`/`LIBPATH` into
+`GITHUB_ENV` because an environment does not survive into the next step. `CC`
+and `CXX` are named outright as well, so PATH order is not load-bearing.
+
+**3. Then meson found Git's `link.exe`.** *"Found GNU link.exe instead of MSVC
+link.exe … This link.exe is not a linker."* It is coreutils' `link`, which
+makes a hard link, and Git for Windows puts its `usr/bin` ahead of the dev
+shell. Filtered out of PATH alongside Strawberry and MinGW.
+
+**4. Then MAX_PATH, reported as an empty filename.** `C1083: Cannot open
+compiler generated file: '': Invalid argument`, on the same file MinGW had
+failed to write a dependency file for — which is the tell that both runs hit
+the same 260 characters and only the wording differed. The default target
+directory spends 44 of them on
+`D:\a\goodvoice\goodvoice\client\src-tauri\target` before meson nests
+abseil under a `libabsl_synchronization.a.p` object name.
+`CARGO_TARGET_DIR: D:\gv`. The development machine has written to
+`C:\Users\<you>\gv\target` since task 4.5, for the unrelated reason that
+OneDrive was syncing 13 GB of build output, and has been quietly short enough
+ever since.
+
+**5. And then bindgen read the wrong clang's headers.** Every AVX-512 intrinsic
+an undeclared identifier — `__builtin_elementwise_fshl` and friends — out of
+`VC\Tools\Llvm\x64\lib\clang\22\include`. Visual Studio ships its own
+clang, the dev shell puts it on PATH, and whichever LLVM answers first is the
+one bindgen loads. **The LLVM step was before the dev shell and had to be
+after it**, which is the order `env.ps1` has always used. The step now prints
+the version it loaded and fails outright if `libclang.dll` is not where it
+expects, rather than letting bindgen quietly find another: run 32617030554
+says `clang version 20.1.8`, not 22.
+
+**What this is really about.** Every one of the five is the development machine
+being right for a reason nobody wrote down — a short path chosen for OneDrive,
+a PATH order chosen for no stated reason at all. CI is the only thing that asks
+those questions out loud, and it cannot ask them while nobody pushes. 142 tests
+on the runner now, which is what `--workspace` is worth after DR-29.
