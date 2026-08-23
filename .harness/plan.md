@@ -589,10 +589,29 @@ Goal: two clients talking through the SFU. Riskiest phase — spikes first.
 
 ## Phase 5 — Screen share
 
-- [ ] **5.1 [WIN] WGC capture spike** — `capture/wgc.rs`. Enumerate
+- [x] **5.1 [WIN] WGC capture spike** — `capture/wgc.rs`. Enumerate
   monitors/windows, capture frames via Windows.Graphics.Capture, report fps/format.
   DoD: spike bin dumps N frames + timing stats; DR records surface format and
   frame-pool behavior. Verify: `cargo run -p goodvoice-harness --bin capture-spike`.
+  Built: `capture/wgc.rs` is the whole capture half — `monitors()` and
+  `windows()` say what there is to share, `Capturer` captures one of them, and
+  `Frame` hands back the D3D11 texture the frame already lives in. Nothing on
+  this path copies: `Frame::copy_to_cpu` exists for the spike, for tests and
+  for a software fallback, and task 5.2's encoder takes `Frame::texture`
+  instead.
+  **The pool is free-threaded and the handler only signals.** WGC calls
+  `FrameArrived` on its own thread; the consumer's thread is what calls
+  `TryGetNextFrame`. That keeps every D3D11 call on one thread and makes "a
+  frame nobody took" a recycled frame rather than a stalled pool — the drop
+  policy a live share wants.
+  Verified on the DR-12 machine, output in DR-31: **B8G8R8A8_UNORM, texture
+  size equal to content size, 141 frames in 8.0 s from the primary monitor
+  (36 fps at the median interval)** and 105 in 6.0 s from a window. Three
+  1920×1080 frames written to disk and opened — real desktop, right colours,
+  cursor drawn. `cargo test --workspace` 145 (3 new), fmt and clippy green.
+  **Not measured here:** what capture costs the machine. WGC's own overhead is
+  part of task 5.5's FPS budget and only means anything with an encoder behind
+  it.
 - [ ] **5.2 [WIN] Hardware encode paths** — `capture/encoder.rs`. Media Foundation
   H.264: NVENC, AMF, QuickSync; pick first available hw MFT; zero-copy
   (GPU texture → encoder) where possible; software fallback flagged to caller.
@@ -2722,3 +2741,84 @@ being right for a reason nobody wrote down — a short path chosen for OneDrive,
 a PATH order chosen for no stated reason at all. CI is the only thing that asks
 those questions out loud, and it cannot ask them while nobody pushes. 142 tests
 on the runner now, which is what `--workspace` is worth after DR-29.
+
+### DR-31: what Windows.Graphics.Capture gives, and what it withholds (2026-08-23)
+
+**Context.** Task 5.1 asks three questions on real silicon: what is there to
+capture, what format do frames arrive in, and how does the frame pool behave.
+`bin/capture-spike` asks the machine rather than the documentation. Same
+machine as DR-12 — Windows 11 (10.0.26200), RTX 2060 — with a 1920×1080
+primary and a rotated 768×1366 second display.
+
+**What there is.** Two monitors and, at that moment, exactly **one** window:
+
+```
+## monitors
+- **\\.\DISPLAY1 (1920×1080, primary)** — 1920×1080, handle 0x1007f
+- **\\.\DISPLAY2 (768×1366)** — 768×1366, handle 0x20001
+
+## windows
+- **◑ Plan.md completion** — 1280×800, handle 0x40304
+```
+
+One window is the interesting number. `EnumWindows` on this desktop returns
+well over a hundred handles; all but one of them is invisible, minimised, a
+tool window, or **cloaked** — the DWM state that backs every suspended UWP app
+and every virtual desktop you are not looking at. Cloaked windows are visible
+by `IsWindowVisible`, have titles, and cannot be captured. A picker that
+skipped that filter (task 5.3) would offer a list mostly made of things that
+fail when clicked.
+
+**The format, verbatim:**
+
+```
+- texture 1920×1080, content 1920×1080
+- DXGI format 87 (DXGI_FORMAT_B8G8R8A8_UNORM)
+```
+
+BGRA8, and — on a monitor — texture size equal to content size. The two are
+separate fields because they diverge on a window: a pool sized for a window
+keeps its old textures when the window shrinks, and the remainder is undefined.
+Anything that scales or encodes reads `ContentSize`, not the texture's.
+
+That format is also the answer 5.2 wanted: BGRA8 is what Media Foundation's
+H.264 encoders take as input, so the capture and the encoder agree without a
+conversion pass between them.
+
+**The frame pool does not tick.** This is the finding, and it is the one that
+would have been assumed wrong:
+
+| target | frames | wall clock | 500 ms waits that timed out |
+|---|---|---|---|
+| primary monitor, terminal scrolling | 141 | 8.0 s | 0 |
+| the terminal window itself | 105 | 6.0 s | 0 |
+| second monitor, nothing moving | **1** | 6.1 s | **12** |
+
+An idle display produces exactly one frame — the initial one — and then
+nothing at all. Not a slow frame, not a duplicate: silence. WGC delivers on
+content change, so **frames per second is a property of what is on the screen,
+not of the capture**, and a timeout means "nothing happened" rather than "the
+capture broke". `Capturer::next_frame` returns `Ok(None)` for it and says so.
+
+Two consequences reach later tasks. Task 5.3's publish path cannot treat a gap
+as a stall, and must not wait for a frame that has no reason to arrive. And
+task 5.5's benchmark gets its target for free: a still screen costs nothing
+because nothing is captured.
+
+**Intervals, while the content was moving:**
+
+```
+- interval min 13.9 ms, median 27.8 ms, p95 205.5 ms, max 305.5 ms   (monitor)
+- interval min 13.9 ms, median 22.3 ms, p95 145.8 ms, max 208.3 ms   (window)
+```
+
+The 13.9 ms floor is the display's 72 Hz refresh, which is the ceiling WGC can
+deliver at. The long tail is not jitter — it is the pauses between bursts of
+scrolling. The median is the honest number for a moving screen, and both are
+comfortably above the 30 fps a share needs.
+
+**One thing that worked and was not expected to.**
+`SetIsBorderRequired(false)` succeeded from an unpackaged process: the dumped
+window frame has no yellow capture border on it. It is still called
+best-effort in the code, because the call is documented as privileged and a
+border is a cosmetic complaint where a failed share is not.

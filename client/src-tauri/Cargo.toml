@@ -110,8 +110,20 @@ tokio = { version = "1", features = ["test-util"] }
 # tauri already pulls in, so it costs no extra build.
 [target.'cfg(windows)'.dependencies]
 windows = { version = "0.62", features = [
+  # Screen capture (task 5.1). `Graphics_Capture` is the WinRT half —
+  # the frame pool and the capture session — and the three `Win32_System_WinRT`
+  # entries are the bridge back to the D3D11 device the frames actually live
+  # on. Neither half is usable without the other.
+  "Graphics_Capture",
+  "Graphics_DirectX_Direct3D11",
   "Win32_Devices_FunctionDiscovery",
   "Win32_Foundation",
+  "Win32_Graphics_Direct3D",
+  "Win32_Graphics_Direct3D11",
+  "Win32_Graphics_Dwm",
+  "Win32_Graphics_Dxgi",
+  "Win32_Graphics_Dxgi_Common",
+  "Win32_Graphics_Gdi",
   "Win32_Media_Audio",
   "Win32_Media_MediaFoundation",
   "Win32_System_Com",
@@ -120,6 +132,9 @@ windows = { version = "0.62", features = [
   "Win32_System_ProcessStatus",
   "Win32_System_Threading",
   "Win32_System_Variant",
+  "Win32_System_WinRT",
+  "Win32_System_WinRT_Direct3D11",
+  "Win32_System_WinRT_Graphics_Capture",
   "Win32_UI_Shell_PropertiesSystem",
   "Win32_UI_WindowsAndMessaging",
 ] }
