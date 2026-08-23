@@ -634,7 +634,8 @@ Goal: two clients talking through the SFU. Riskiest phase — spikes first.
   `GOODVOICE_AUTOJOIN`, was heard by `bin/listener` in the same room at
   **50 frames a second with real microphone audio**, 8 seconds, against the
   live deploy. That is the DoD's "join a call", from an install rather than
-  from `target/release`.
+  from `target/release`. Rebuilt and re-measured after task 4.7, so the bundle
+  that exists carries the settings screen.
   Found and fixed on the way — DR-27: the first installer packaged
   `audio-spike.exe` **as the app**, because nothing in the manifest said which
   of twelve binaries is the app. `default-run` says so now.
