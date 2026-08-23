@@ -37,9 +37,9 @@ cheapest possible way to pass.
 
 ```text
 cargo build --release --features custom-protocol --bin goodvoice-client
-cargo build --release --bin soak
-cargo run --release --bin soak                    # 30 minutes, the budget run
-cargo run --release --bin soak -- --minutes 2     # a shakedown
+cargo build -p goodvoice-harness --release --bin soak
+cargo run -p goodvoice-harness --release --bin soak                    # 30 minutes, the budget run
+cargo run -p goodvoice-harness --release --bin soak -- --minutes 2     # a shakedown
 ```
 
 **`--features custom-protocol` is not optional.** Without it

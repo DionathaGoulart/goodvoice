@@ -26,8 +26,8 @@
 //! is counted as lost rather than paired with the next one.
 //!
 //! ```text
-//! cargo run --bin latency
-//! cargo run --bin latency -- --base http://localhost:8787 --room test --pings 30
+//! cargo run -p goodvoice-harness --bin latency
+//! cargo run -p goodvoice-harness --bin latency -- --base http://localhost:8787 --room test --pings 30
 //! ```
 
 use std::{

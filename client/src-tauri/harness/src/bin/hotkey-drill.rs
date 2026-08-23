@@ -7,8 +7,8 @@
 //! whatever has focus, it is not this.
 //!
 //! ```text
-//! cargo run --bin hotkey-drill                 # Space, for ten seconds
-//! cargo run --bin hotkey-drill -- --key KeyV --seconds 30
+//! cargo run -p goodvoice-harness --bin hotkey-drill                 # Space, for ten seconds
+//! cargo run -p goodvoice-harness --bin hotkey-drill -- --key KeyV --seconds 30
 //! ```
 //!
 //! Press and release the key in any other window. Every transition is printed

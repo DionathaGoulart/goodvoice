@@ -19,8 +19,8 @@
 //! would keep the count climbing; only a client that sends nothing freezes it.
 //!
 //! ```text
-//! cargo run --bin mute-drill
-//! cargo run --bin mute-drill -- --base http://localhost:8787
+//! cargo run -p goodvoice-harness --bin mute-drill
+//! cargo run -p goodvoice-harness --bin mute-drill -- --base http://localhost:8787
 //! ```
 
 use std::{

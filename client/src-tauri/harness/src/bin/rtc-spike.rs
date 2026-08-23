@@ -12,8 +12,8 @@
 //! would pass even if a client were only hearing itself.
 //!
 //! ```text
-//! cargo run --bin rtc-spike -- --room test
-//! cargo run --bin rtc-spike -- --base http://localhost:8787
+//! cargo run -p goodvoice-harness --bin rtc-spike -- --room test
+//! cargo run -p goodvoice-harness --bin rtc-spike -- --base http://localhost:8787
 //! ```
 
 use std::{

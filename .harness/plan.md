@@ -42,13 +42,13 @@ Goal: repo builds, CI green, hello-world client and worker exist and deploy.
   DoD: workflow file is valid and passes on push.
   Verify: `gh run watch` on the push, or `act` locally if available.
   Green on run 32386485723 — all four jobs, including rust on windows-latest.
-- [x] **0.5 [WIN] Hardware risk probe (spike)** — `client/src-tauri/src/bin/probe.rs`.
+- [x] **0.5 [WIN] Hardware risk probe (spike)** — `client/src-tauri/harness/src/bin/probe.rs`.
   Tiny binary that (a) enumerates WASAPI render/capture devices + their shared-mode
   min buffer sizes, (b) enumerates Media Foundation H.264 encoders and flags which
   are hardware (NVENC/AMF/QuickSync). Front-loads the two hardware unknowns.
   DoD: probe output from a real Windows gaming machine pasted into a Decision
   Record in this file (devices found, min buffer ms, hw encoders found).
-  Verify: `cargo run --bin probe` on Windows host.
+  Verify: `cargo run -p goodvoice-harness --bin probe` on Windows host.
   Run on the RTX 2060 machine, output in DR-12. Two answers worth having
   early: `IAudioClient3` offers **nothing beyond the default period** on this
   hardware, which is most of task 2.1's argument, and NVENC is present, which
@@ -105,7 +105,7 @@ Goal: two clients talking through the SFU. Riskiest phase — spikes first.
   Decides `cpal` vs `wasapi` crate (PRD open question 4) — write the Decision Record.
   DoD: mic loopback audible; round-trip device latency measured and recorded in DR.
   Verify: `cargo test -p goodvoice-client audio` + manual loopback run
-  (`cargo run --bin audio-spike`).
+  (`cargo run -p goodvoice-harness --bin audio-spike`).
   **Narrowed by 2.4.** The seam is in (`audio/device.rs`) with a working cpal
   backend behind it (`audio/hardware.rs`), so this task is no longer "build the
   audio layer" — it is the measurement it was always about: does cpal's WASAPI
@@ -148,12 +148,12 @@ Goal: two clients talking through the SFU. Riskiest phase — spikes first.
   Verify: `cargo test -p goodvoice-client opus`.
   Done out of order — it is not [WIN] and does not depend on 2.1's outcome.
   See DR-3 (crate choice) and DR-4 (CMake pin).
-- [x] **2.3 webrtc-rs ↔ Cloudflare SFU spike** — `client/src-tauri/src/bin/rtc-spike.rs`.
+- [x] **2.3 webrtc-rs ↔ Cloudflare SFU spike** — `client/src-tauri/harness/src/bin/rtc-spike.rs`.
   Prove webrtc-rs can complete ICE/DTLS with Realtime SFU and push an Opus track
   (PRD open question 2). This is the project's biggest unknown — if blocked,
   Decision Record + libwebrtc FFI evaluation, and STOP for user input.
   DoD: a published track from client A is pulled by a throwaway web page or second
-  client. Verify: `cargo run --bin rtc-spike -- --room test` against Phase 1 deploy.
+  client. Verify: `cargo run -p goodvoice-harness --bin rtc-spike -- --room test` against Phase 1 deploy.
   **Server half:** the Worker proxy DR-2 called for is in —
   `POST /rooms/:code/sfu/tracks/new`, `PUT …/renegotiate`, `PUT …/tracks/close`,
   signed with the app secret, scoped to the caller's own session, and refusing
@@ -177,7 +177,7 @@ Goal: two clients talking through the SFU. Riskiest phase — spikes first.
   tones. See DR-8 for what the live runs turned up.
   **Not verified:** the DoD's two Windows machines. Everything here is hardware
   agnostic and was exercised on macOS; the Windows leg needs a Windows host.
-- [x] **2.5 [WIN] Latency measurement harness** — `client/src-tauri/src/bin/latency.rs`
+- [x] **2.5 [WIN] Latency measurement harness** — `client/src-tauri/harness/src/bin/latency.rs`
   or in-app debug overlay. Measure mouth-to-ear latency (loopback tone timestamp
   method) across the real SFU path.
   DoD: measured number recorded in a Decision Record vs the 80 ms budget; if over
@@ -252,7 +252,7 @@ Goal: two clients talking through the SFU. Riskiest phase — spikes first.
   | bob undeafens | 100 frames, roster back to `deafened=false` |
 
   Each flag is read from the *other* client's roster, which is what the DoD's
-  "visible for everyone" means. Verify: `cargo run --bin mute-drill`, plus
+  "visible for everyone" means. Verify: `cargo run -p goodvoice-harness --bin mute-drill`, plus
   `cargo test` (116) and `npx vitest run` (85, `presence.test.ts` among them).
   **Both halves closed on the real app — DR-26.** A person muted the shipping
   client with its own microphone in a live room, and a listener in the same
@@ -498,7 +498,7 @@ Goal: two clients talking through the SFU. Riskiest phase — spikes first.
   DoD: `bin/soak` reports a peak at or under 120 MB with the call audible in
   every sample — or a DR says which levers were tried, what each measured, and
   why the budget is being restated instead.
-  Verify: `cargo run --release --bin soak`, 30 minutes, both captures updated.
+  Verify: `cargo run -p goodvoice-harness --release --bin soak`, 30 minutes, both captures updated.
   **Met with room to spare: 34.1 MB peak, 34.0 median, against 120.** (c), and
   only (c). (a) and (b) share a ceiling neither can pass — they make an idle
   browser cheaper and the browser is still running, which lands somewhere near
@@ -587,13 +587,13 @@ Goal: two clients talking through the SFU. Riskiest phase — spikes first.
 - [ ] **5.1 [WIN] WGC capture spike** — `capture/wgc.rs`. Enumerate
   monitors/windows, capture frames via Windows.Graphics.Capture, report fps/format.
   DoD: spike bin dumps N frames + timing stats; DR records surface format and
-  frame-pool behavior. Verify: `cargo run --bin capture-spike`.
+  frame-pool behavior. Verify: `cargo run -p goodvoice-harness --bin capture-spike`.
 - [ ] **5.2 [WIN] Hardware encode paths** — `capture/encoder.rs`. Media Foundation
   H.264: NVENC, AMF, QuickSync; pick first available hw MFT; zero-copy
   (GPU texture → encoder) where possible; software fallback flagged to caller.
   DoD: encoded bitstream plays in a standard player from at least one hw path
   (per 0.5 probe results); fallback path warns.
-  Verify: `cargo run --bin capture-spike -- --encode` + committed sample analysis.
+  Verify: `cargo run -p goodvoice-harness --bin capture-spike -- --encode` + committed sample analysis.
 - [ ] **5.3 720p/1080p selection + publish** — `capture/`, `rtc/`, `ui`. Picker UI
   (monitor/window + quality), scale in encoder, publish H.264 track to SFU;
   server enforces one-sharer-at-a-time (DO rejects second share).
@@ -643,9 +643,9 @@ Goal: two clients talking through the SFU. Riskiest phase — spikes first.
   6.2 and 6.2 has not started, so nothing here registers `goodvoice://`. And
   the install was done on this machine, not a clean VM: it proves the bundle
   runs, not that it carries everything a machine without the toolchain needs.
-  **Known blemish (DR-27):** the bundle also drops a 1.1 MB `audio-spike.exe`
-  next to the app. It is inert, and removing it means moving the ten harness
-  binaries out of `src/bin/`.
+  **The bundle is the app and nothing else, as of DR-29.** It used to drop a
+  1.1 MB `audio-spike.exe` beside it. NSIS is 3.0 MB, MSI 4.3 MB, and the
+  installed directory is `goodvoice-client.exe` and `uninstall.exe`.
 - [ ] **6.4 README final + first release** — README (features, budgets, measured
   numbers, self-host pointer, screenshots), tag `v0.1.0`, GitHub release with
   installer artifact via CI.
@@ -2616,3 +2616,50 @@ first `FindAll` has to be thrown away and a second one made. And a search by
 name alone is not safe here — the wordmark's accent span is a `Text` element
 literally named "voice", so a script looking for the voice-activity button
 clicks the logo. Match on `ControlType.Button` as well as on the name.
+
+### DR-29: the harnesses are a package, because neither road out was config (2026-08-23)
+
+**Context.** DR-27 left the installer carrying `audio-spike.exe` — a 1.1 MB
+measurement tool in a 3.1 MB bundle — and named the fix: move the harnesses out
+of `src/bin/` and declare them with explicit `[[bin]]` paths. That was done, and
+**the installer got worse**: all eleven harnesses shipped instead of one.
+
+**So the bundler reads a tauri crate for binaries two ways.** Every `[[bin]]`
+its manifest declares, *and* whatever files sit in its `src/bin/`. Declaring
+them explicitly does not move them out of reach; it hands the bundler a list.
+The old behaviour — exactly one stray binary — was the second road with nothing
+on the first.
+
+**`bundle.externalBin: []` does not close either road.** Tested against a
+`tauri bundle` with no recompile: the wxs came back with all thirteen sources
+regardless. Those entries reach the NSIS template's "external binaries" section
+but they do not come from that config key.
+
+**Decision: `client/src-tauri/harness`, its own package in the workspace.** A
+package the tauri crate does not own is on neither road. The tauri crate is
+back to one binary, `src/bin/` does not exist there, and the manifest declares
+no `[[bin]]` at all.
+
+**What it cost, which is what DR-27 got wrong.** DR-27 said `cargo run --bin
+<name>` would be unchanged. It is not: the root of `client/src-tauri` is a
+package, so `--bin` resolves inside it and the harnesses are no longer there.
+Every command grew `-p goodvoice-harness` — 37 of them across the plan's task
+list, `docs/`, and the harnesses' own usage comments. Cargo's error names the
+package for you, which is the only reason this is a nuisance rather than a
+trap. The gates grew a flag each for the same reason: `cargo fmt --all`,
+`cargo clippy --workspace`, `cargo test --workspace`. Without them the new
+package is unlinted and `bin/soak`'s six tests stop running.
+
+`[workspace.lints.clippy]` holds the pedantic setting now, and both packages
+inherit it, so the harnesses are held to the bar they were already meeting.
+
+**Measured.** NSIS 3.10 MB → 2.99 MB, MSI 5.09 → 4.52. The wxs lists
+`goodvoice-client.exe` and `goodvoice_client_lib.dll` and nothing else; the
+NSIS script's "Copy external binaries" section is empty. Installed and heard at
+50 frames a second by a listener in the same room. `cargo test --workspace` is
+142 — the 136 the tauri crate had, plus the 6 in `bin/soak` that moved with it.
+
+**One upgrade wart, for exactly one machine.** NSIS does not remove files a
+newer version stopped shipping, so an install made from the previous bundle
+keeps its `audio-spike.exe` until someone deletes it. Only this machine ever
+had one.

@@ -1873,6 +1873,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "goodvoice-harness"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "goodvoice-client",
+ "tokio",
+ "windows 0.62.2",
+]
+
+[[package]]
 name = "group"
 version = "0.13.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"

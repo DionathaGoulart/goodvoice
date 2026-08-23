@@ -10,8 +10,8 @@
 //!    the new session id rather than staying pointed at the dead one (DR-8).
 //!
 //! ```text
-//! cargo run --bin reconnect-drill
-//! cargo run --bin reconnect-drill -- --base http://localhost:8787 --room test
+//! cargo run -p goodvoice-harness --bin reconnect-drill
+//! cargo run -p goodvoice-harness --bin reconnect-drill -- --base http://localhost:8787 --room test
 //! ```
 //!
 //! The drop here is [`Call::drop_session`], not a real network failure: taking

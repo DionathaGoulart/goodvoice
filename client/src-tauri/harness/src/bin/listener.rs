@@ -11,8 +11,8 @@
 //! came back.
 //!
 //! ```text
-//! cargo run --bin listener -- --room squad
-//! cargo run --bin listener -- --room squad --tone 1200
+//! cargo run -p goodvoice-harness --bin listener -- --room squad
+//! cargo run -p goodvoice-harness --bin listener -- --room squad --tone 1200
 //! ```
 //!
 //! # Reading the echo column

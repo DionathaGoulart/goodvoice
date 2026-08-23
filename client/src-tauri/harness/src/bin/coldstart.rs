@@ -23,8 +23,8 @@
 //! # Running it
 //!
 //! ```text
-//! cargo run --bin coldstart                 # five runs against the live deploy
-//! cargo run --bin coldstart -- --runs 3 --exe target\debug\goodvoice-client.exe
+//! cargo run -p goodvoice-harness --bin coldstart                 # five runs against the live deploy
+//! cargo run -p goodvoice-harness --bin coldstart -- --runs 3 --exe target\debug\goodvoice-client.exe
 //! ```
 //!
 //! Every run uses a fresh room, so a run cannot be disturbed by the ghost of

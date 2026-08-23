@@ -11,13 +11,13 @@
 //! Everything here goes through the same `hardware::open()` the app uses, so
 //! what it measures is the app's path and not a spike's.
 //!
-//! # Monitor — `cargo run --bin audio-spike`
+//! # Monitor — `cargo run -p goodvoice-harness --bin audio-spike`
 //!
 //! The microphone, played back through the speakers. The point is the first
 //! half of the task's definition of done: audible loopback. **Wear
 //! headphones** — a microphone that can hear the speakers will howl.
 //!
-//! # Round trip — `cargo run --bin audio-spike -- --roundtrip`
+//! # Round trip — `cargo run -p goodvoice-harness --bin audio-spike -- --roundtrip`
 //!
 //! A 5 ms burst leaves the speakers once a second and the microphone listens
 //! for it. What comes back is the whole path a call's audio takes through the

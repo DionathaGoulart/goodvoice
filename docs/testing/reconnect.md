@@ -18,9 +18,9 @@ the half the drill cannot see.
 
 ```sh
 cd client/src-tauri
-cargo run --release --bin reconnect-drill
+cargo run -p goodvoice-harness --release --bin reconnect-drill
 # or against a Worker of your own:
-cargo run --release --bin reconnect-drill -- --base http://localhost:8787
+cargo run -p goodvoice-harness --release --bin reconnect-drill -- --base http://localhost:8787
 ```
 
 Two clients join a fresh room and hold a conversation. One of them throws its
@@ -46,7 +46,7 @@ client's side. It affects the whole machine, so close anything that would mind.
 
 ```sh
 # 1. start a call in one terminal and check you can hear the other end
-cargo run --release --bin call -- --room netdown-test
+cargo run -p goodvoice-harness --release --bin call -- --room netdown-test
 
 # 2. in another terminal, take the network away for ten seconds
 cat <<'RULES' | sudo pfctl -f - -E

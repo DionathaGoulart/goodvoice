@@ -5,8 +5,8 @@
 //! since there is no echo cancellation until task 3.4:
 //!
 //! ```text
-//! cargo run --bin call -- --room squad --name rafael
-//! cargo run --bin call -- --room squad --name dio --base http://localhost:8787
+//! cargo run -p goodvoice-harness --bin call -- --room squad --name rafael
+//! cargo run -p goodvoice-harness --bin call -- --room squad --name dio --base http://localhost:8787
 //! ```
 //!
 //! `m` toggles mute, `d` toggles deafen, `q` leaves. The roster is printed
@@ -16,7 +16,7 @@
 //! same thing a slider does can be measured from a script:
 //!
 //! ```text
-//! cargo run --bin call -- --room squad --mode voice --threshold 0.9
+//! cargo run -p goodvoice-harness --bin call -- --room squad --mode voice --threshold 0.9
 //! ```
 //!
 //! A threshold of 0.9 is a gate nothing short of a shout opens; run

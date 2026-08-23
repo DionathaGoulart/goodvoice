@@ -36,8 +36,8 @@ EXIT=0
 `EXIT=0` only when both edges arrived. The drill runs standalone too:
 
 ```sh
-cargo run --bin hotkey-drill                        # Space, ten seconds
-cargo run --bin hotkey-drill -- --key KeyV --seconds 30
+cargo run -p goodvoice-harness --bin hotkey-drill                        # Space, ten seconds
+cargo run -p goodvoice-harness --bin hotkey-drill -- --key KeyV --seconds 30
 ```
 
 ### Two things that make this script look broken

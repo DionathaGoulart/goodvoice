@@ -1,5 +1,5 @@
 [workspace]
-members = ["."]
+members = [".", "harness"]
 # The vendored `-sys` crate is a package, not a member: it is built through
 # [patch.crates-io] below and has nothing to do with this workspace's builds.
 exclude = ["vendor"]
@@ -13,11 +13,12 @@ edition = "2021"
 rust-version = "1.82"
 license = "MIT"
 publish = false
-# Eleven binaries live here (the app plus ten harnesses), and nothing in the
-# manifest said which one is the app. `tauri build` bundled the alphabetically
-# first — `audio-spike` — into a 1.4 MB installer that would have installed a
-# 386 KB spike under the app's name. This is the field that answers it, for
-# `cargo run` and for the bundler alike.
+# One binary lives here now — DR-29 moved the harnesses into their own package
+# — so this is belt and braces. It is kept because of what happened when it was
+# missing (DR-27): with twelve binaries in the package and nothing saying which
+# was the app, `tauri build` shipped the alphabetically first one under the
+# product's name. Anything that adds a second binary here should find this
+# already answered.
 default-run = "goodvoice-client"
 
 [lib]
@@ -25,10 +26,14 @@ default-run = "goodvoice-client"
 name = "goodvoice_client_lib"
 crate-type = ["staticlib", "cdylib", "rlib"]
 
-# styleguide.md: pedantic on at the crate root, no blanket allows. Declared here
-# so binaries and tests inherit it too, not just `lib.rs`.
-[lints.clippy]
+# styleguide.md: pedantic on at the crate root, no blanket allows. On the
+# workspace so the harness package is held to the same bar, and inherited here
+# so binaries and tests get it too, not just `lib.rs`.
+[workspace.lints.clippy]
 pedantic = { level = "warn", priority = -1 }
+
+[lints]
+workspace = true
 
 [features]
 # What tells `generate_context!` to embed `../dist` instead of pointing the
