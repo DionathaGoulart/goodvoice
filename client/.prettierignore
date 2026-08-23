@@ -3,3 +3,7 @@ dist
 src-tauri/target
 src-tauri/gen
 package-lock.json
+# Somebody else's source. DR-24 vendored webrtc-audio-processing-sys to carry
+# six patches; its markdown and CI config are not ours to reformat, and a
+# `prettier --write` in here would bury the patches in whitespace.
+src-tauri/vendor
