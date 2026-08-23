@@ -32,10 +32,12 @@ jobs:
         run: |
           echo "LIBCLANG_PATH=C:\Program Files\LLVM\bin" >> $env:GITHUB_ENV
           echo "C:\Program Files\LLVM\bin" >> $env:GITHUB_PATH
-      # meson chooses its compiler by looking at PATH, and windows-latest puts
-      # Strawberry Perl's gcc and a MinGW toolchain ahead of everything. The
-      # vendored C++ has to be built by the compiler the Rust side links with:
-      # gcc gets as far as abseil's cctz, where MinGW's own
+      # meson chooses its toolchain by looking at PATH, and windows-latest
+      # stocks it with three things that answer before MSVC does: Strawberry
+      # Perl's gcc, a MinGW toolchain, and — the subtle one — Git for Windows'
+      # `usr\bin\link.exe`, which is coreutils' `link` and not a linker at all.
+      # The vendored C++ has to be built by the compiler the Rust side links
+      # with: gcc gets as far as abseil's cctz, where MinGW's own
       # `windows.foundation.h` fails to compile against it.
       #
       # This is `C:\Users\<you>\gv\env.ps1` on the development machine, which
@@ -60,7 +62,7 @@ jobs:
           # (VERSION 3.1), which CMake 4 refuses without this.
           "CMAKE_POLICY_VERSION_MINIMUM=3.5" >> $env:GITHUB_ENV
           $env:PATH -split ';' |
-            Where-Object { $_ -and $_ -notmatch 'Strawberry|mingw' } >> $env:GITHUB_PATH
+            Where-Object { $_ -and $_ -notmatch 'Strawberry|mingw|Git\\usr\\bin' } >> $env:GITHUB_PATH
       # The C++ tree is 440 objects and builds once; the cache is what keeps
       # every later run from paying for it again.
       - uses: Swatinem/rust-cache@v2
