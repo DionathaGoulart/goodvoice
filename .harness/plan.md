@@ -851,10 +851,13 @@ Goal: two clients talking through the SFU. Riskiest phase — spikes first.
   Found and fixed on the way — DR-27: the first installer packaged
   `audio-spike.exe` **as the app**, because nothing in the manifest said which
   of twelve binaries is the app. `default-run` says so now.
-  **Not done — the two the task also names.** Protocol registration belongs to
-  6.2 and 6.2 has not started, so nothing here registers `goodvoice://`. And
-  the install was done on this machine, not a clean VM: it proves the bundle
-  runs, not that it carries everything a machine without the toolchain needs.
+  **Protocol registration is done, by 6.2.** The installer writes
+  `HKCU\Software\Classes\goodvoice` with `URL Protocol` and the installed exe
+  behind `"%1"`, read back from the registry after a real install, and a
+  clicked link opens the app into the room it names.
+  **Not done — the clean VM.** The install was done on this machine, which
+  proves the bundle runs; it does not prove it carries everything a machine
+  without the toolchain needs.
   **The bundle is the app and nothing else, as of DR-29.** It used to drop a
   1.1 MB `audio-spike.exe` beside it. NSIS is 3.0 MB, MSI 4.3 MB, and the
   installed directory is `goodvoice-client.exe` and `uninstall.exe`.
