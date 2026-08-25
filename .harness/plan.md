@@ -736,11 +736,32 @@ Goal: two clients talking through the SFU. Riskiest phase — spikes first.
   closes. Windows' per-process IO counters do not see the media sockets
   (5.2 / 5.4 / 5.6 kB/s across never-opened, open and closed-again: the voice
   path and nothing else), so it needs an instrument this task did not have.
-- [ ] **5.5 [WIN] FPS-impact benchmark** — `docs/perf/screenshare-bench.md`.
+- [x] **5.5 [WIN] FPS-impact benchmark** — `docs/perf/screenshare-bench.md`.
   Run a GPU-bound game (e.g. built-in benchmark), record FPS with/without 1080p
   share (hw encode). Target ~0 delta.
   DoD: methodology + numbers committed; budget met or DR with fix plan.
   Verify: committed benchmark doc reproducible by another dev.
+  **Numbers committed, and the budget is missed.** *Far Far West* at 57 fps
+  with the GPU 95% busy, three 30-second PresentMon captures a run —
+  game alone, game sharing, game alone again:
+
+  | share | fps alone | fps sharing | delta | GPU ms a frame | noise |
+  |---|---|---|---|---|---|
+  | 1080p30 | 57.0 | 53.8 | **−5.6%** | 16.64 → 17.57 | −0.5 fps |
+  | 720p30 | 56.9 | 54.4 | **−4.4%** | 16.66 → 17.32 | −0.4 fps |
+  | 1080p15 | 56.5 | 54.7 | −3.2% | 16.77 → 17.25 | −2.0 fps |
+
+  prd.md §4 asks for ~0 and this is 5.6%, five to eight times the run's own
+  idle-to-idle noise. The third row is the fix plan's first step, measured:
+  **0.93 ms → 0.48 ms when the share rate halves**, linear, because every part
+  of the cost is per-frame. Where it goes: 1.8 ms of GPU per *shared* frame, of
+  which DR-32's NVENC is 0.42 — the rest is WGC handing over a 1920×1080 BGRA
+  texture and the video processor making NV12 of it (DR-31), which is also why
+  720p saves so little. Methodology, the whole table and four things worth
+  trying are in `docs/perf/screenshare-bench.md`; the decision is DR-35.
+  The instrument is Intel's PresentMon 2.5.1 (signed, verified), driven by
+  `docs/perf/screenshare-bench.ps1` — **elevated**, because an ETW session
+  needs it.
 
 ## Phase 6 — Ship
 
@@ -3105,3 +3126,52 @@ in up to two seconds. It needs SDP feedback lines, an RTCP read loop on the
 screen sender, and its own verification against the live SFU — a task, not a
 footnote, and one that composes with both fixes above rather than replacing
 them.
+
+### DR-35: sharing costs a GPU-bound game 5.6%, and the budget said ~0 (2026-08-24)
+
+**Context.** Task 5.5 asked for the FPS cost of sharing, against prd.md §4's
+"~0 FPS impact sharing". Nobody had measured it; the number was an assumption
+carried since the PRD.
+
+**Measured.** *Far Far West*, a steady scene at 57 fps with the GPU 95% busy —
+the case the budget is about — and three 30-second PresentMon captures a run so
+that drift has somewhere to show:
+
+| share | fps alone → sharing | delta | GPU ms a frame | idle-to-idle noise |
+|---|---|---|---|---|
+| 1080p30 | 57.0 → 53.8 | **−5.6%** | 16.64 → 17.57 | −0.5 fps |
+| 720p30 | 56.9 → 54.4 | **−4.4%** | 16.66 → 17.32 | −0.4 fps |
+| 1080p15 | 56.5 → 54.7 | −3.2% | 16.77 → 17.25 | −2.0 fps |
+
+**Where it goes.** 0.93 ms × 57 frames ≈ 53 ms of GPU a second, for 30 shared
+frames: **1.8 ms a shared frame**, of which DR-32's NVENC is 0.42. The other
+1.4 is WGC handing over a 1920×1080 BGRA texture and the video processor making
+NV12 of it — which no encoder here can skip (DR-31), and which is why 720p
+saves a third rather than a half: both qualities read the same source.
+
+**Options.**
+
+1. **Fewer frames a second while a game is on screen.** The one lever already
+   measured: 0.93 ms → 0.48 when the rate halves, because everything in the
+   path is per-frame. 15 fps is choppy for a game and unremarkable for a
+   document, so the rate wants to follow what is being shared rather than be a
+   constant.
+2. **Cheapen the conversion.** 1.4 ms for a capture and a colour convert, on a
+   card that encodes in 0.42, is not obviously right. `VideoProcessorBlt` runs
+   per frame at source resolution; scale-and-convert in one shader pass at the
+   *output* resolution is the alternative, and it is the only option that
+   improves the 30 fps case without changing what a viewer sees.
+3. **Change the budget.** "~0" was never measured. 5.6% on the worst case, for
+   a feature somebody turned on deliberately and can turn off in a click, may
+   be an honest price.
+
+**Decision: none yet, and that is deliberate.** The task's DoD is "budget met
+or DR with fix plan", and the fix plan is (1) and (2) with (1) already
+quantified. What is not defensible is the number being unknown, which it was
+until today. Task 6.4's README carries measured numbers, and this one has to be
+in it whichever way the choice goes.
+
+**Two notes for whoever runs it next.** PresentMon needs an elevated shell —
+an ETW session is not something a normal user opens — and the run is three
+captures rather than two: the third caught a two-fps drift in the 15 fps run
+that would otherwise have been read as the share costing nothing.
