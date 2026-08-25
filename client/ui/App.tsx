@@ -23,6 +23,10 @@ interface ClientInfo {
   name: string;
   version: string;
   server: string;
+  /** What the build shipped with, for the "back to it" button. */
+  defaultServer: string;
+  /** Whether the server above was chosen by a person (prd.md §9). */
+  serverChosen: boolean;
 }
 
 /** Mirrors `Participant` in `src-tauri/src/rtc/signaling.rs`. */
@@ -298,7 +302,38 @@ const keyName = (code: string) =>
     .toLowerCase();
 
 const App: Component = () => {
-  const [info] = createResource(() => invoke<ClientInfo>("client_info"));
+  const [info, { mutate: setInfo }] = createResource(() =>
+    invoke<ClientInfo>("client_info"),
+  );
+
+  /**
+   * The Worker this client joins rooms on, while somebody is editing it.
+   *
+   * Self-hosting ends with "paste the Worker URL into the client's settings"
+   * (prd.md §9, docs/self-hosting.md), and this is that box. The client is the
+   * source of truth — it remembers the choice on disk, because the window is
+   * not the only thing that joins — so this signal is only what is being
+   * typed, and `info()` is what is in force.
+   */
+  const [serverDraft, setServerDraft] = createSignal<string | null>(null);
+  const [serverError, setServerError] = createSignal<string | null>(null);
+  const [savingServer, setSavingServer] = createSignal(false);
+
+  const serverText = () => serverDraft() ?? info()?.server ?? "";
+
+  const saveServer = async (url: string) => {
+    setSavingServer(true);
+    setServerError(null);
+    try {
+      const next = await invoke<ClientInfo>("set_server", { url });
+      setInfo(next);
+      setServerDraft(null);
+    } catch (reason) {
+      setServerError(String(reason));
+    } finally {
+      setSavingServer(false);
+    }
+  };
 
   const [room, setRoom] = createSignal("");
   const [name, setName] = createSignal("");
@@ -884,6 +919,60 @@ const App: Component = () => {
         on={audio().echoCancellation}
         onChange={(on) => changeAudio({ echoCancellation: on })}
       />
+
+      <h2 class="section">server</h2>
+
+      <label class="field">
+        <span class="field-label">worker url</span>
+        <input
+          class="field-input"
+          value={serverText()}
+          onInput={(event) => setServerDraft(event.currentTarget.value)}
+          placeholder={info()?.defaultServer ?? "https://…"}
+          autocapitalize="none"
+          autocomplete="off"
+          spellcheck={false}
+          disabled={savingServer()}
+        />
+      </label>
+
+      <div class="modes">
+        <button
+          class="action"
+          type="button"
+          disabled={savingServer() || serverText().trim() === info()?.server}
+          onClick={() => void saveServer(serverText())}
+        >
+          use this server
+        </button>
+        <Show when={info()?.serverChosen}>
+          <button
+            class="action"
+            type="button"
+            disabled={savingServer()}
+            onClick={() => void saveServer("")}
+          >
+            back to the bundled one
+          </button>
+        </Show>
+      </div>
+
+      <Show
+        when={serverError()}
+        fallback={
+          <p class="notice">
+            {call()
+              ? "the next call joins here; this one stays where it is"
+              : "your own deploy goes here — docs/self-hosting.md"}
+          </p>
+        }
+      >
+        {(message) => (
+          <p class="notice notice-error" role="alert">
+            {message()}
+          </p>
+        )}
+      </Show>
 
       <h2 class="section">appearance</h2>
 

@@ -1,0 +1,6 @@
+# Shell scripts are run by bash, including on Windows, and bash will not run a
+# script with carriage returns in it: `$'\r': command not found`, on line 1.
+# A clone with `core.autocrlf=true` — the Git for Windows default — produces
+# exactly that, so the self-hoster following docs/self-hosting.md would find
+# `server/scripts/smoke.sh` broken before they ever reached Cloudflare.
+*.sh text eol=lf

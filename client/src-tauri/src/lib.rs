@@ -7,6 +7,7 @@
 
 pub mod audio;
 pub mod capture;
+pub mod home;
 pub mod rtc;
 pub mod tray;
 
@@ -21,6 +22,8 @@ use std::{
 use serde::Serialize;
 use tauri::{AppHandle, Emitter as _, Manager as _, State};
 use tokio::sync::{watch, Mutex};
+
+use home::Home;
 
 use audio::{
     device::AudioSink,
@@ -94,17 +97,28 @@ const SHARE_EVENT: &str = "goodvoice://share";
 pub struct ClientInfo {
     pub name: String,
     pub version: String,
-    /// Where this build joins rooms by default.
+    /// Where this client joins rooms: what was chosen in the settings, or
+    /// what the build shipped with.
     pub server: String,
+    /// What the build shipped with, so the window can offer to go back to it
+    /// and can say when it is already there.
+    #[serde(rename = "defaultServer")]
+    pub default_server: String,
+    /// Whether [`Self::server`] was chosen by a person (prd.md §9) rather than
+    /// inherited from the build.
+    #[serde(rename = "serverChosen")]
+    pub server_chosen: bool,
 }
 
 impl ClientInfo {
     #[must_use]
-    pub fn current() -> Self {
+    pub fn of(home: &Home) -> Self {
         Self {
             name: env!("CARGO_PKG_NAME").to_owned(),
             version: env!("CARGO_PKG_VERSION").to_owned(),
-            server: DEFAULT_SERVER.to_owned(),
+            server: home.server(),
+            default_server: home.fallback().to_owned(),
+            server_chosen: home.is_chosen(),
         }
     }
 }
@@ -758,9 +772,33 @@ async fn stop_share(state: State<'_, CurrentCall>) -> Result<(), String> {
     Ok(())
 }
 
+/// # Errors
+///
+/// Never. The `Result` is what an async command owes its caller, and async is
+/// what lets this take the state by value like every other command here.
 #[tauri::command]
-fn client_info() -> ClientInfo {
-    ClientInfo::current()
+async fn client_info(home: State<'_, Home>) -> Result<ClientInfo, String> {
+    Ok(ClientInfo::of(&home))
+}
+
+/// Points this client at a Worker of somebody's own (prd.md §9).
+///
+/// An empty string means "back to the one this build shipped with", which is
+/// why this is not two commands: a window offering both needs one place where
+/// what it sent becomes what the client will use.
+///
+/// Takes effect on the next join. A call in progress belongs to the server it
+/// was made on, and moving it would mean leaving a room the other people are
+/// still in.
+///
+/// # Errors
+///
+/// A sentence for the person who typed it, when what they typed is not an
+/// origin — see [`home::normalise`].
+#[tauri::command]
+async fn set_server(home: State<'_, Home>, url: String) -> Result<ClientInfo, String> {
+    home.choose(&url)?;
+    Ok(ClientInfo::of(&home))
 }
 
 /// The call as it stands right now, for a window that has just been built.
@@ -814,7 +852,10 @@ async fn current_status(state: State<'_, CurrentCall>) -> Result<Snapshot, Strin
 async fn autojoin(app: AppHandle, room: String, since_start: Instant) {
     println!("autojoin starting at {} ms", millis(since_start));
     let options = CallOptions {
-        base: DEFAULT_SERVER.to_owned(),
+        // The chosen server, not the built-in one: a self-hoster's client is
+        // pointed at their Worker, and a join that ignored that would reach a
+        // room nobody else is in (task 6.1).
+        base: app.state::<Home>().server(),
         room,
         name: "coldstart".to_owned(),
         // Open, not push-to-talk: nobody is holding a key in a scripted run.
@@ -956,6 +997,11 @@ pub fn run() {
         .setup(move |app| {
             app.manage(CurrentCall::default());
             app.manage(tray::Tray::default());
+            // Before anything that joins, autojoin included: what server this
+            // client is pointed at is the first thing a join needs and the one
+            // thing a self-hoster changes (task 6.1).
+            let config = app.path().app_config_dir().ok();
+            app.manage(Home::open(config.as_deref(), DEFAULT_SERVER));
 
             // A host that will not give us a tray is not a reason to refuse to
             // run — it is a reason to keep a window that closes normally, which
@@ -979,6 +1025,7 @@ pub fn run() {
         .on_window_event(tray::window_event)
         .invoke_handler(tauri::generate_handler![
             client_info,
+            set_server,
             current_status,
             join_room,
             leave_room,
@@ -1176,7 +1223,7 @@ mod tests {
 
     #[test]
     fn client_info_reports_crate_metadata() {
-        let info = ClientInfo::current();
+        let info = ClientInfo::of(&crate::Home::open(None, DEFAULT_SERVER));
         assert_eq!(info.name, "goodvoice-client");
         assert!(!info.version.is_empty());
     }

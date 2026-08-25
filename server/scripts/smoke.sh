@@ -16,6 +16,11 @@ if [[ -z "$BASE" ]]; then
 fi
 BASE="${BASE%/}"
 
+command -v node >/dev/null 2>&1 || {
+  echo "this needs Node 22+ on PATH: the WebSocket and JSON checks run in it" >&2
+  exit 69
+}
+
 ROOM="smoke-$(date +%s)"
 pass() { printf '  ok   %s\n' "$1"; }
 fail() { printf '  FAIL %s\n' "$1" >&2; exit 1; }
@@ -29,7 +34,11 @@ pass "GET /health"
 
 # --- join --------------------------------------------------------------------
 join() {
-  curl -sS -o /dev/stdout -w '\n%{http_code}' \
+  # No `-o /dev/stdout`: curl writes the body there anyway, and Windows curl
+  # — the one a self-hoster gets in Git Bash — cannot open that path at all.
+  # It fails with "client returned ERROR on write", which reads like the server
+  # hung up.
+  curl -sS -w '\n%{http_code}' \
     -X POST "$BASE/rooms/$ROOM/join" \
     -H 'content-type: application/json' \
     -d "{\"name\":\"$1\"}"
@@ -55,7 +64,7 @@ pass "POST /rooms/:code/join (session + ICE servers returned)"
 WS_BASE="${BASE/https:\/\//wss://}"
 WS_BASE="${WS_BASE/http:\/\//ws://}"
 
-BASE="$BASE" ROOM="$ROOM" WS_BASE="$WS_BASE" PARTICIPANT="$participant" node --input-type=module -e '
+if ! BASE="$BASE" ROOM="$ROOM" WS_BASE="$WS_BASE" PARTICIPANT="$participant" node --input-type=module -e '
 const { WS_BASE, BASE, ROOM, PARTICIPANT } = process.env;
 const socket = new WebSocket(`${WS_BASE}/rooms/${ROOM}/ws?p=${PARTICIPANT}`);
 const seen = [];
@@ -90,7 +99,14 @@ socket.addEventListener("message", async (event) => {
 });
 
 socket.addEventListener("error", () => done(1, "websocket errored"));
-' && pass "GET /rooms/:code/ws (welcome + roster push)"
+'; then
+  # Not `&& pass`: a command on the left of && is exempt from `set -e`, so a
+  # failing socket check printed its stack trace and the script carried on to
+  # announce that all checks passed. It did that for as long as this script has
+  # existed, and only ever on a host where the check could fail.
+  fail "GET /rooms/:code/ws (welcome + roster push)"
+fi
+pass "GET /rooms/:code/ws (welcome + roster push)"
 
 # --- capacity ----------------------------------------------------------------
 # The smoke socket above has closed by now, so how many participants are left is

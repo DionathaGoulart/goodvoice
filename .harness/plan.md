@@ -765,10 +765,37 @@ Goal: two clients talking through the SFU. Riskiest phase — spikes first.
 
 ## Phase 6 — Ship
 
-- [ ] **6.1 Self-hosting guide** — `docs/self-hosting.md`. Cloudflare account →
+- [x] **6.1 Self-hosting guide** — `docs/self-hosting.md`. Cloudflare account →
   Calls app → secrets → `wrangler deploy` → point client at Worker URL. A
   non-Cloudflare-user must succeed following only this doc.
   DoD: guide tested from scratch on a fresh account. Verify: clean-account walkthrough.
+  **The guide is written, and writing it found that its fourth step did not
+  exist.** prd.md §9 ends "paste the Worker URL into the client's settings" and
+  there was nowhere to paste it: `GOODVOICE_SERVER` was a *build-time* value,
+  so pointing a client at your own Worker meant installing Rust and MSVC and
+  rebuilding — for everyone in the squad, not just whoever deployed it. There
+  is a **server** section in the settings screen now, and `home.rs` remembers
+  what is typed there, on disk, where the things that join without a window can
+  read it (autojoin today, task 6.2's invite links next). DR-36.
+  Measured rather than asserted, by `docs/testing/server-setting.ps1`: a URL
+  that is not an origin is refused with a sentence and **nothing is written**;
+  a valid-but-wrong origin is kept, and the restarted client **fails there**
+  rather than falling back to the bundled address — which is the only way to
+  tell "the setting works" from "the setting is ignored"; and the real one is
+  kept the same way, joined, and **heard at 50 frames a second** by
+  `bin/listener` in the same room.
+  Three things the smoke test owed a self-hoster, all found by running it the
+  way one would: it printed **`all checks passed` while a check was failing**
+  (a command on the left of `&&` is exempt from `set -e`), `curl -o /dev/stdout`
+  cannot run on Windows curl at all, and a clone with Git for Windows'
+  default `core.autocrlf` broke the script before Cloudflare was ever reached
+  (`.gitattributes` now pins `*.sh` to LF). It passes four for four from Git
+  Bash against the live deploy.
+  **Not verified — the DoD itself:** the walkthrough, from the beginning, by
+  somebody with a fresh Cloudflare account. Steps 1 and 5 are dashboard
+  journeys, and a dashboard is the one thing here that cannot be measured from
+  a terminal. The guide says so in its own last section rather than pretending
+  otherwise.
 - [ ] **6.2 Invite links** — `client` (deep link `goodvoice://join/<room>`),
   Windows protocol registration via Tauri config; UI "copy invite" button.
   DoD: clicking a link on a machine with the app installed joins the room.
@@ -3175,3 +3202,48 @@ in it whichever way the choice goes.
 an ETW session is not something a normal user opens — and the run is three
 captures rather than two: the third caught a two-fps drift in the 15 fps run
 that would otherwise have been read as the share costing nothing.
+
+### DR-36: the client could not be pointed anywhere (2026-08-24)
+
+**Context.** Task 6.1 is a document, and the document has four steps: make a
+Realtime app, deploy the Worker, check it, point the client at it. Writing the
+fourth one is where it stopped. prd.md §9 says "paste the Worker URL into the
+client's settings"; the client had no such setting.
+
+What it had was `DEFAULT_SERVER`, an `option_env!("GOODVOICE_SERVER")` read at
+**compile time**. So self-hosting meant every person in the squad installing
+Rust, MSVC, LLVM and Node, and building a client of their own — for a project
+whose task 6.3 ships a 3 MB installer precisely so that nobody has to.
+
+**Where the setting lives, and why not `localStorage`.** The window is not the
+only thing that joins. `GOODVOICE_AUTOJOIN` joins before a webview exists (task
+4.4), and task 6.2's `goodvoice://join/<room>` will join from a link — neither
+can ask a window what server it had in mind. So `home.rs` keeps it in the app's
+config directory as `settings.json`, read once at startup, written whole on
+change, and the window is a client of that rather than the owner of it.
+
+**Three decisions inside it, each because of what a person will actually type.**
+An empty box means "back to the bundled server" rather than an error, because
+that is the only way back. A trailing slash is stripped, because every path the
+client builds starts with one and `https://x//rooms/y` is a 404 that reads like
+a bug in the room code. And a URL with a *path* is refused outright rather than
+trimmed to its origin — the thing somebody pastes is the dashboard URL of the
+Worker, and telling them beats silently pointing them somewhere they did not
+ask for.
+
+**The test that matters is the negative one.** Setting the working URL and
+watching the client join proves almost nothing: a client that ignored the
+setting entirely would pass it, because the bundled address is the working one.
+So `docs/testing/server-setting.ps1` sets an origin that cannot exist, restarts
+the app, and requires the join to **fail there**. Then it sets the real one and
+requires `bin/listener` to hear fifty frames a second in that room.
+
+**And the guide's own tools were broken for the person it is written for.**
+`server/scripts/smoke.sh` announced `all checks passed` with a failing
+WebSocket check underneath it — `cmd && pass` puts the command on the left of
+`&&`, where `set -e` does not reach, so only a host where that check *could*
+fail would ever notice. It also used `curl -o /dev/stdout`, which Windows curl
+cannot open, and Git for Windows' default `core.autocrlf` rewrote the script's
+line endings so that bash refused line 1. A self-hoster on Windows — this
+project's whole audience — hit all three before reaching Cloudflare. Fixed,
+and `.gitattributes` pins `*.sh` to LF so the third cannot come back.
