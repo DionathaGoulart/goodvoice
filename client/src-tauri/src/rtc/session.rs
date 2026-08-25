@@ -13,7 +13,7 @@
 use std::{
     collections::HashMap,
     sync::{
-        atomic::{AtomicBool, AtomicU32, AtomicU8, Ordering},
+        atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicU8, Ordering},
         Arc, Mutex,
     },
     time::{Duration, Instant},
@@ -403,10 +403,23 @@ struct Shared {
     /// Where a remote screen goes, if anybody is watching one. `None` is the
     /// ordinary state, and it is what stops this client subscribing to video
     /// at all (prd.md §3 F3: viewers opt in).
-    watch_sink: Mutex<Option<Arc<dyn ScreenSink>>>,
+    watch_sink: Mutex<Option<WatchSink>>,
     /// Rung when [`Self::watch_sink`] changes.
     watch_changed: Notify,
 }
+
+/// A viewer's sink, and which viewer it belongs to.
+struct WatchSink {
+    /// Names one opening of the viewer window, process-wide and forever
+    /// increasing. See [`Shared::clear_watch_sink`] for what it is for.
+    generation: u64,
+    sink: Arc<dyn ScreenSink>,
+}
+
+/// Hands out [`WatchSink::generation`]. Static rather than per-call: a
+/// generation that restarted with each call could name a viewer from the
+/// previous one.
+static NEXT_WATCH: AtomicU64 = AtomicU64::new(0);
 
 impl Shared {
     fn new(
@@ -463,13 +476,44 @@ impl Shared {
 
     /// Where a remote screen should go, if anywhere.
     fn watch_sink(&self) -> Option<Arc<dyn ScreenSink>> {
-        self.watch_sink.lock().ok().and_then(|held| held.clone())
+        self.watch_sink
+            .lock()
+            .ok()
+            .and_then(|held| held.as_ref().map(|current| Arc::clone(&current.sink)))
     }
 
-    /// Open or close the viewer. Same wake-up contract as the share intent.
-    fn set_watch_sink(&self, sink: Option<Arc<dyn ScreenSink>>) {
+    /// A viewer opened. Same wake-up contract as the share intent.
+    ///
+    /// The generation it answers with is how the caller says *this* viewer
+    /// later, when it closes: see [`Self::clear_watch_sink`].
+    fn set_watch_sink(&self, sink: Arc<dyn ScreenSink>) -> u64 {
+        let generation = NEXT_WATCH.fetch_add(1, Ordering::Relaxed);
         if let Ok(mut held) = self.watch_sink.lock() {
-            *held = sink;
+            *held = Some(WatchSink { generation, sink });
+        }
+        self.watch_changed.notify_one();
+        generation
+    }
+
+    /// A viewer closed — but only if it is still the one being fed.
+    ///
+    /// A window's closing is noticed asynchronously (`crate::viewer_closed`)
+    /// and a person can open the next viewer before that lands. Unconditional,
+    /// this would then take the *new* window's sink away and leave a viewer
+    /// that never gets a picture; there is nothing in the window to notice
+    /// that and nothing to recover it.
+    fn clear_watch_sink(&self, generation: u64) {
+        match self.watch_sink.lock() {
+            Ok(mut held)
+                if held
+                    .as_ref()
+                    .is_some_and(|current| current.generation == generation) =>
+            {
+                *held = None;
+            }
+            // Somebody else's sink, or a poisoned lock: either way there is
+            // nothing here to wake the session about.
+            _ => return,
         }
         self.watch_changed.notify_one();
     }
@@ -832,16 +876,22 @@ impl Call {
 
     /// Start receiving the room's screen, into `sink`.
     ///
-    /// Idempotent, and the only thing that subscribes this client to video: a
-    /// call with no viewer open pulls nothing, whatever anybody else is
-    /// sharing (prd.md §3 F3).
-    pub fn watch_screen(&self, sink: Arc<dyn ScreenSink>) {
-        self.shared.set_watch_sink(Some(sink));
+    /// The only thing that subscribes this client to video: a call with no
+    /// viewer open pulls nothing, whatever anybody else is sharing (prd.md §3
+    /// F3). Calling it again swaps the sink — the frames follow, from the next
+    /// access unit — which is what a second viewer window needs.
+    ///
+    /// The generation it returns names this viewer to [`Self::unwatch_screen`].
+    pub fn watch_screen(&self, sink: Arc<dyn ScreenSink>) -> u64 {
+        self.shared.set_watch_sink(sink)
     }
 
     /// Stop receiving the room's screen and drop the subscription.
-    pub fn unwatch_screen(&self) {
-        self.shared.set_watch_sink(None);
+    ///
+    /// Does nothing if a later viewer has taken over since `generation` was
+    /// handed out.
+    pub fn unwatch_screen(&self, generation: u64) {
+        self.shared.clear_watch_sink(generation);
     }
 
     /// What this client's own share is doing.
@@ -2203,14 +2253,14 @@ async fn reconcile_watch(
         }
     }
 
-    let (Some(sink), Some(sharer)) = (sink, sharer) else {
+    let (Some(_), Some(sharer)) = (sink, sharer) else {
         return;
     };
     let Some(session_id) = sharer.session_id.as_deref() else {
         return;
     };
 
-    match subscribe_to_screen(subscriber, session_id, sink).await {
+    match subscribe_to_screen(subscriber, session_id).await {
         Ok(playback) => {
             *watching = Some(Watching {
                 peer: sharer.id.clone(),
@@ -2224,11 +2274,10 @@ async fn reconcile_watch(
     }
 }
 
-/// Pulls the room's `screen` track and starts feeding it to `sink`.
+/// Pulls the room's `screen` track and starts feeding whatever viewer is open.
 async fn subscribe_to_screen(
     subscriber: &Subscriber,
     session_id: &str,
-    sink: Arc<dyn ScreenSink>,
 ) -> Result<JoinHandle<()>, RtcError> {
     let answer = pull_track(subscriber, session_id, SCREEN_TRACK).await?;
 
@@ -2242,7 +2291,10 @@ async fn subscribe_to_screen(
 
     let ssrc = ssrc_of(&answer);
     let track = claim_track(&subscriber.signals.tracks, ssrc).await?;
-    Ok(tokio::spawn(screen_playback_loop(track, sink)))
+    Ok(tokio::spawn(screen_playback_loop(
+        track,
+        Arc::clone(&subscriber.shared),
+    )))
 }
 
 fn free_slot(playing: &HashMap<String, Subscription>) -> Option<usize> {
@@ -2504,7 +2556,7 @@ async fn playback_loop(track: Arc<dyn TrackRemote>, slot: usize, shared: Arc<Sha
 /// parameter set as one STAP-A — and the **marker bit** is what says the last
 /// packet of a picture has arrived. A decoder fed per-packet instead of per
 /// access unit shows nothing at all.
-async fn screen_playback_loop(track: Arc<dyn TrackRemote>, sink: Arc<dyn ScreenSink>) {
+async fn screen_playback_loop(track: Arc<dyn TrackRemote>, shared: Arc<Shared>) {
     // Annex B, with start codes, which is what a Media Foundation decoder
     // takes and what the sharer's encoder produced in the first place. That is
     // the default, and it is set here anyway: the flag decides whether the
@@ -2533,11 +2585,21 @@ async fn screen_playback_loop(track: Arc<dyn TrackRemote>, sink: Arc<dyn ScreenS
         if !packet.header.marker || unit.is_empty() {
             continue;
         }
-        sink.accept(&unit, starts_with_idr(&unit));
+        // Looked up per unit, not captured when the subscription was made: a
+        // viewer that closes and reopens is a *new* sink on the same
+        // subscription, and a loop holding the old one would feed a window
+        // that no longer exists while the new one waited for a picture.
+        if let Some(sink) = shared.watch_sink() {
+            sink.accept(&unit, starts_with_idr(&unit));
+        }
         unit.clear();
     }
 
-    sink.ended();
+    // The track ended under us — the sharer stopped, or the session dropped.
+    // Whoever is watching now is who has to be told.
+    if let Some(sink) = shared.watch_sink() {
+        sink.ended();
+    }
 }
 
 /// Turns one RTP payload into 20 ms of playback, unless the user is deafened.
@@ -2734,6 +2796,58 @@ mod tests {
         let (code, description) = track_error(&answer).expect("a per-track error");
         assert_eq!(code, "mystery");
         assert!(!description.is_empty());
+    }
+
+    // --- the viewer's subscription ---------------------------------------
+
+    /// A sink that only remembers whether it was fed.
+    struct Counting(AtomicUsize);
+
+    impl super::ScreenSink for Counting {
+        fn accept(&self, _unit: &[u8], _keyframe: bool) {
+            self.0.fetch_add(1, Ordering::Relaxed);
+        }
+        fn ended(&self) {}
+    }
+
+    /// The bug DR-33 is about, in the one line that caused it: a second viewer
+    /// window installs a second sink, and what is already subscribed has to
+    /// start feeding *that* one.
+    #[test]
+    fn a_second_viewer_takes_the_frames_over() {
+        let shared = test_shared();
+        let first = Arc::new(Counting(AtomicUsize::new(0)));
+        let second = Arc::new(Counting(AtomicUsize::new(0)));
+
+        shared.set_watch_sink(Arc::clone(&first) as Arc<dyn super::ScreenSink>);
+        shared.watch_sink().expect("a viewer").accept(&[0], true);
+        shared.set_watch_sink(Arc::clone(&second) as Arc<dyn super::ScreenSink>);
+        shared.watch_sink().expect("a viewer").accept(&[0], true);
+
+        assert_eq!(first.0.load(Ordering::Relaxed), 1);
+        assert_eq!(second.0.load(Ordering::Relaxed), 1, "the frames moved on");
+    }
+
+    /// The race the generation exists for: a window's closing is noticed after
+    /// the fact, and by then the next window may already be watching.
+    #[test]
+    fn a_closing_window_cannot_unsubscribe_the_one_after_it() {
+        let shared = test_shared();
+        let first = Arc::new(Counting(AtomicUsize::new(0)));
+        let second = Arc::new(Counting(AtomicUsize::new(0)));
+
+        let closing = shared.set_watch_sink(Arc::clone(&first) as Arc<dyn super::ScreenSink>);
+        let current = shared.set_watch_sink(Arc::clone(&second) as Arc<dyn super::ScreenSink>);
+
+        // The late arrival of the first window's destruction.
+        shared.clear_watch_sink(closing);
+        assert!(shared.watch_sink().is_some(), "the second viewer survived");
+
+        shared.clear_watch_sink(current);
+        assert!(
+            shared.watch_sink().is_none(),
+            "and its own close still works"
+        );
     }
 
     // --- the playback path, without a network ----------------------------

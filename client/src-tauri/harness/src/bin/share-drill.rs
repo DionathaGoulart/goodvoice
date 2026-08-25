@@ -90,7 +90,7 @@ mod windows_drill {
         // measuring that.
         let bruno = join(&args.base, &room, "bruno").await?;
         let watched = Arc::new(Watched::new(args.out.join("received.h264")));
-        bruno.watch_screen(Arc::clone(&watched) as Arc<dyn ScreenSink>);
+        let viewer = bruno.watch_screen(Arc::clone(&watched) as Arc<dyn ScreenSink>);
 
         let ana = join(&args.base, &room, "ana").await?;
         ana.start_share(Arc::new(ShareFactory::new(target, args.quality)));
@@ -122,7 +122,7 @@ mod windows_drill {
         tokio::time::sleep(Duration::from_secs(args.seconds)).await;
 
         ana.stop_share();
-        bruno.unwatch_screen();
+        bruno.unwatch_screen(viewer);
         let report = watched.report()?;
 
         drop(carla);

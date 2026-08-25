@@ -152,10 +152,11 @@ const Viewer: Component = () => {
 
   onCleanup(() => {
     window.clearTimeout(patience);
-    // Both, and in this order: the client stops pulling the track, then the
-    // decoder lets go of its buffers. The subscription is what costs the room
-    // bandwidth, so it goes first.
-    void invoke("stop_watching_screen").catch(() => {});
+    // The subscription is not given up here, and this is the only place it
+    // looks like it should be. A window is *destroyed*, not unmounted: closing
+    // it takes the webview down with it and none of this runs. So the client
+    // watches for the window ending instead (`viewer_closed` in lib.rs), which
+    // is the only version of it that is true whichever way the window goes.
     decoder?.close();
     decoder = undefined;
   });

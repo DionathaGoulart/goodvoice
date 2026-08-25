@@ -429,6 +429,20 @@ impl Capturer {
     /// **WGC only produces a frame when the content moves.** A timeout here is
     /// not an error and not a dropped capture; it means nothing happened.
     ///
+    /// # The pool is asked anyway
+    ///
+    /// A notice is how a *change* announces itself, and it is not the only way
+    /// a frame exists: the session's first frame is the screen as it already
+    /// is, and on a screen that then never moves no notice ever follows. A
+    /// capture that only ever read on a notice published nothing at all in
+    /// that case — 0 access units in 20 seconds, measured (DR-34) — and a
+    /// viewer would sit on "nobody is sharing" until somebody moved a window.
+    ///
+    /// So the timeout asks the pool directly. It answers once, with the
+    /// content as it stands, and then has nothing until something changes
+    /// again — so this is one frame on a still screen rather than ten a
+    /// second: the same 15 seconds went from 0 access units to 9.
+    ///
     /// # Errors
     ///
     /// [`CaptureError::Stopped`] if the pool thread has gone away, which only
@@ -437,7 +451,15 @@ impl Capturer {
     pub fn next_frame(&self, timeout: Duration) -> Result<Option<Frame<'_>>, CaptureError> {
         match self.arrivals.recv_timeout(timeout) {
             Ok(()) => {}
-            Err(RecvTimeoutError::Timeout) => return Ok(None),
+            Err(RecvTimeoutError::Timeout) => {
+                // Nothing announced itself. There may still be a frame sitting
+                // in the pool — see above — and if there is not, this is the
+                // `Ok(None)` it always was.
+                let Ok(frame) = self.pool.TryGetNextFrame() else {
+                    return Ok(None);
+                };
+                return Frame::new(self, frame).map(Some);
+            }
             Err(RecvTimeoutError::Disconnected) => return Err(CaptureError::Stopped),
         }
 

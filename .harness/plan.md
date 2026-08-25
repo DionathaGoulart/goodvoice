@@ -675,19 +675,29 @@ Goal: two clients talking through the SFU. Riskiest phase — spikes first.
   **Not verified:** the picker under the `retro` skin — both screenshots are
   `terminal`. The picker's CSS is the shared base plus a `terminal` block, so
   retro is the unmodified base, but it has not been looked at.
-- [ ] **5.4 Viewer window** — `ui`, new Tauri window. Opt-in subscribe on open,
+- [x] **5.4 Viewer window** — `ui`, new Tauri window. Opt-in subscribe on open,
   unsubscribe on close, resizable, aspect-correct; audio unaffected throughout.
   DoD: open/close viewer repeatedly during live share, voice never glitches.
   Verify: manual + `npx tsc --noEmit`.
-  **Written, not verified.** Everything below exists, compiles and passes the
-  gates; what has not happened is a person opening and closing the window
-  during a live share, which is the entire definition of done. Left unticked
-  for that reason.
+  **Closed by measurement — which found two bugs before it could close
+  anything.** `docs/testing/viewer.ps1` drives the shipping client through UI
+  Automation: it opens and closes the viewer four times against a live share
+  while `bin/viewer-drill` shares a screen from the other end of the call and
+  counts the voice coming back. **101 seconds measured, none of them below 45
+  frames a second, lowest second 49** — and the same again on a second run and
+  under the other skin. That is the DoD's sentence, measured the way DR-26
+  measures things rather than listened to.
+  The rest of the run is the picture: 954×534 inside a 960×540 window,
+  675×375 stretched into 1084×381, 498×282 squashed into 504×661 —
+  **1.77 to 1.80 every time**, which is 16:9 keeping its shape while the
+  letterbox grows around it. Both skins, `retro` (the default, and the one
+  §5.3 left unlooked-at) and `terminal`. `docs/ui/viewer-letterbox.png` is the
+  stretched one as a person sees it.
   Built: `ui/Viewer.tsx` is a second Tauri window (label `screen`) rendered
   from the same bundle, routed on `location.hash` in `main.tsx`.
-  `open_screen_viewer`, `watch_screen` and `stop_watching_screen` in `lib.rs`
-  are the commands behind it, and the main window grows a *watch N's screen*
-  button whenever the roster shows somebody else sharing.
+  `open_screen_viewer` and `watch_screen` in `lib.rs` are the commands behind
+  it, and the main window grows a *watch N's screen* button whenever the roster
+  shows somebody else sharing.
   **The decode happens in the webview.** WebView2 ships WebCodecs, so
   `VideoDecoder` decodes H.264 on the same silicon that encoded it, and what
   crosses the IPC is what came off the wire — tens of kilobytes an access unit
@@ -698,21 +708,34 @@ Goal: two clients talking through the SFU. Riskiest phase — spikes first.
   is the keyframe flag** — RTP does not carry one, a decoder cannot start on a
   P-frame, and sending it as a second message would let it arrive out of order.
   An empty message means the share ended.
-  **Opt-in is the window's lifetime, not a flag.** `Call::watch_screen` is the
-  only thing that pulls the video track, and only this window ever calls it —
-  so a client with no viewer open is one Cloudflare is not sending video to at
-  all (prd.md §3 F3).
-  `tray::window_event` now ignores every window but `main`: without that, task
-  4.6's minimise-into-the-tray would destroy the viewer and end a live share
-  every time somebody put it out of the way.
-  Verified so far: `npx tsc --noEmit`, `prettier --check` and `cargo clippy
-  --workspace --all-targets -- -D warnings` green; the client and the harness
-  build in release.
-  **Still to do:** the manual run — the sharer is `bin/share-drill --room
-  <code> --seconds <n>`, and the app joins the same room with
-  `GOODVOICE_AUTOJOIN`. Open and close the viewer repeatedly while that runs
-  and listen for the voice path glitching. Also unverified: the aspect-correct
-  claim through a resize, and the viewer under the `retro` skin.
+  **Opt-in is the window's lifetime, and now literally so.** There is no
+  `stop_watching_screen` command any more: a window is *destroyed*, and a
+  webview taken down with its window never runs the cleanup that used to send
+  it. `tray::window_event` sees the destruction and gives the subscription up
+  (DR-33), so the only way to be subscribed is to have a viewer open, whichever
+  way the window goes.
+  `tray::window_event` also ignores every other event on that window: without
+  that, task 4.6's minimise-into-the-tray would destroy the viewer and end a
+  live share every time somebody put it out of the way.
+  **Two bugs, both invisible to every gate.** Only the first viewer ever got a
+  picture — DR-33, and every one after it sat on "nobody is sharing" while a
+  share was live. And a screen that was not moving published nothing at all —
+  DR-34, 0 access units in 20 seconds, which made the viewer black for anyone
+  sharing a document rather than a game. Both are fixed and both have a
+  regression that fails without the fix: `a_second_viewer_takes_the_frames_over`
+  in `rtc/session.rs`, and the cycle table in `docs/testing/viewer.md`.
+  Verified: `npx tsc --noEmit`, `npm run format:check`, `cargo fmt --all
+  --check`, `cargo clippy --workspace --all-targets -- -D warnings` and
+  `cargo test --workspace` (151) all green; the drills above against the live
+  deploy.
+  **Left unmeasured:** whether Cloudflare stops *sending* the video once a
+  viewer closes. The client stops pulling and stops decoding, but nothing tells
+  the SFU — `tracks/close` is allowlisted by the Worker and unused by the
+  client — so the "Cloudflare is not sending video to a client with no viewer"
+  half of §3 F3 holds until the first viewer opens and is unproven after one
+  closes. Windows' per-process IO counters do not see the media sockets
+  (5.2 / 5.4 / 5.6 kB/s across never-opened, open and closed-again: the voice
+  path and nothing else), so it needs an instrument this task did not have.
 - [ ] **5.5 [WIN] FPS-impact benchmark** — `docs/perf/screenshare-bench.md`.
   Run a GPU-bound game (e.g. built-in benchmark), record FPS with/without 1080p
   share (hw encode). Target ~0 delta.
@@ -2977,3 +3000,108 @@ capture and encode is part of the path rather than an optimisation to
 reconsider. It runs on the capture's own device, which is why `Capturer`
 exposes `device()` and `context()` and why the encoder takes them rather than
 making its own.
+
+### DR-33: only the first viewer ever got a picture (2026-08-24)
+
+**Context.** Task 5.4 was written, compiled and left unticked because nobody
+had opened and closed the window during a live share. Somebody — a script —
+finally did: `docs/testing/viewer.ps1`, driving the shipping client through UI
+Automation while `bin/viewer-drill` shared a screen from the other end.
+
+The first viewer showed the screen. The second, third and fourth sat on
+**"nobody is sharing"** while a share was live, every time.
+
+**Two faults, and the second one hid behind the first.**
+
+**1. The playback loop was feeding a window that no longer existed.**
+`screen_playback_loop` was spawned with the sink it had at subscribe time and
+kept it forever. Opening a second viewer installed a second sink and changed
+nothing: the frames kept arriving at the first one's IPC channel, which
+belonged to a destroyed webview and swallowed them. The loop now reads
+`Shared::watch_sink()` per access unit — a lookup behind a mutex, once per
+frame at 30 fps, against a decode that costs milliseconds.
+
+**2. Nothing gave the subscription up, because the window never got to.**
+`Viewer.tsx` sent `stop_watching_screen` from Solid's `onCleanup`, which is an
+*unmount*. Closing a window is a **destroy**: the webview goes with it and no
+JavaScript in it runs again. So the sink stayed installed, the call stayed
+subscribed, and `reconcile_watch` — which correctly does nothing when the
+sharer and the session have not changed — had no reason to re-wire anything.
+
+The command is gone. `tray::window_event` already sees every window's events
+for task 4.6's sake, so the viewer's `Destroyed` is what unsubscribes now.
+That also makes prd.md §3 F3's "viewers opt in" a property of the window's
+lifetime rather than of a message the window has to remember to send, which is
+what task 5.4 always claimed it was.
+
+**The race that fix introduced, and the generation that closes it.** A window's
+destruction is noticed asynchronously — the handler spawns onto the runtime —
+and a person can open the next viewer before that lands. Unconditionally
+clearing the sink would then take the *new* window's subscription away, and
+nothing in the window would notice or recover. So `watch_screen` returns a
+generation, `unwatch_screen` takes one, and a close only clears the sink it was
+handed out for. The generation is read synchronously in the window event, where
+it is still the closing window's.
+
+**Why no gate caught it.** `cargo test`, clippy, `tsc` and `prettier` were all
+green over the broken code, and stayed green. The transport was not even wrong:
+`bin/rewatch` — join, watch, unwatch, watch again, headless — **passed against
+the same build**, because a drill that unsubscribes properly exercises the path
+that works. What was broken was reachable only through a window being closed by
+a person, which is exactly the step the task had been left unticked for.
+
+Two tests now fail without the fix: `a_second_viewer_takes_the_frames_over` and
+`a_closing_window_cannot_unsubscribe_the_one_after_it`.
+
+### DR-34: a screen that is not moving was a screen that published nothing (2026-08-24)
+
+**Context.** `viewer.ps1` puts a plain grey sheet over the monitor while it
+runs, so that the aspect-ratio measurement has a picture whose edges it can
+find (a nearly-black wallpaper inside a nearly-black letterbox measures
+nothing). The sheet made the shared screen perfectly still — and cycles 2, 3
+and 4 went black again, after DR-33 was fixed and verified.
+
+**Measured, with `bin/share-drill` under the sheet: 0 access units, 0 bytes, 20
+seconds.** Not a viewer problem at all. The sharer was publishing nothing.
+
+**Why.** WGC produces a frame when the content changes and nothing when it does
+not (DR-31), and the client only ever read the pool when the arrival callback
+said something had changed. Two consequences nobody had separated:
+
+- **A share that starts on a still screen never sends a first frame**, so
+  there is no keyframe, so no viewer can decode anything, ever, until somebody
+  moves a window.
+- **A share whose screen goes still ends mid-GOP.** A viewer opening later gets
+  P-frames at best and cannot start on one. `request_keyframe` exists and is
+  called exactly once, when the share starts, because the sharer has no way to
+  know a viewer arrived: the H.264 codec is registered with `rtcp_feedback:
+  vec![]`, so no PLI is negotiated and Cloudflare has nothing to ask with.
+
+**Two fixes, both in the capture thread, neither touching negotiation.**
+
+**Ask the pool anyway.** On the poll timeout, `Capturer::next_frame` now calls
+`TryGetNextFrame` rather than assuming a timeout means an empty pool. The
+session's first frame is the screen as it already is and arrives without ever
+being a *change*; asking gets it. It answers once and then has nothing until
+something moves, so this is one frame on a still screen rather than ten a
+second — the same 20 seconds went from 0 access units to 11.
+
+**Repeat the last keyframe every two seconds while nothing is happening.** The
+picture has not changed, so the IDR already in hand *is* the current picture:
+re-sending it costs no encode and gives a viewer that opens mid-stillness
+something to start on within two seconds. `share.rs` keeps the last keyframe
+packet and drops it when a resize makes it describe a different shape.
+
+**What it costs.** A perfectly still 720p share is **69 kB over 20 seconds —
+3.5 kB/s**, all of it keyframes of a screen doing nothing. Against zero before,
+and against a share that was useless before. On a moving screen it costs
+nothing at all: the repeat only fires when the capture has been silent for two
+seconds.
+
+**What was considered and not done.** Negotiating `nack pli` / `ccm fir` on
+H.264 and requesting a keyframe when Cloudflare asks for one is the version of
+this that costs nothing at all and serves a viewer in milliseconds rather than
+in up to two seconds. It needs SDP feedback lines, an RTCP read loop on the
+screen sender, and its own verification against the live SFU — a task, not a
+footnote, and one that composes with both fixes above rather than replacing
+them.

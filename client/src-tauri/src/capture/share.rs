@@ -56,6 +56,21 @@ pub const SHARE_FPS: u32 = 30;
 /// thread would stall the frame pool it is draining.
 const PACKET_QUEUE: usize = 8;
 
+/// How long a still screen may go without saying anything before the last
+/// keyframe is sent again.
+///
+/// WGC produces nothing while nothing changes (DR-31), so a share of a
+/// document, an IDE or a paused game is a track that stops mid-GOP — and a
+/// viewer opening onto one has nothing to start a decoder with. It would wait,
+/// showing "nobody is sharing", until whoever is sharing happened to move
+/// something (DR-34).
+///
+/// Re-sending the keyframe that is already in hand fixes that without encoding
+/// anything: the picture has not changed, so the last IDR *is* the current
+/// picture. What it costs is one keyframe every two seconds while the screen
+/// is still, and nothing at all while it is not.
+const STILL_KEYFRAME: Duration = Duration::from_secs(2);
+
 /// How long the capture thread waits on a frame before checking whether it has
 /// been told to stop.
 ///
@@ -221,11 +236,32 @@ fn run(
     let interval = Duration::from_nanos(1_000_000_000 / u64::from(SHARE_FPS.max(1)));
     let mut last: Option<Instant> = None;
     let mut encoded = Vec::new();
+    // The last picture that a decoder could start on, and when anything was
+    // last put on the wire. See [`STILL_KEYFRAME`].
+    let mut recent_key: Option<Packet> = None;
+    let mut sent = Instant::now();
 
     while !stop.load(Ordering::Relaxed) {
         let frame = match pipeline.capturer.next_frame(POLL) {
             Ok(Some(frame)) => frame,
-            Ok(None) => continue,
+            // Nothing changed on screen. If nothing has for a while, say the
+            // last thing again so that a viewer opening now has a picture.
+            Ok(None) => {
+                if let Some(key) = recent_key.as_ref() {
+                    if sent.elapsed() >= STILL_KEYFRAME {
+                        if packets.try_send(key.clone()).is_err() {
+                            // Closed, or a queue nobody is draining: the first
+                            // ends the share, and the second means the wire is
+                            // busy enough that a repeat is not what it needs.
+                            if packets.is_closed() {
+                                return;
+                            }
+                        }
+                        sent = Instant::now();
+                    }
+                }
+                continue;
+            }
             // The window closed or the display went away. Ending the channel
             // is how the rest of the client finds out.
             Err(_) => break,
@@ -250,6 +286,10 @@ fn run(
             if pipeline.resize(quality).is_err() {
                 break;
             }
+            // A keyframe from before the resize describes a picture of a
+            // different shape, and sending it again would hand a decoder a
+            // sequence that contradicts the one it is following.
+            recent_key = None;
             continue;
         }
 
@@ -270,6 +310,10 @@ fn run(
         drop(frame);
 
         for packet in encoded.drain(..) {
+            if packet.keyframe {
+                recent_key = Some(packet.clone());
+            }
+            sent = Instant::now();
             // A full queue means nobody is draining fast enough, and the
             // frames waiting in it are the least worth keeping — so the new
             // one is dropped rather than blocking the capture. A disconnected

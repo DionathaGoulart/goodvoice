@@ -256,9 +256,17 @@ fn quit(app: &AppHandle) {
 /// Nothing here fires when there is no tray: an app whose window closes into
 /// nothing is an app that cannot be reopened.
 pub fn window_event(window: &Window, event: &WindowEvent) {
-    // The main window only. The screen viewer (task 5.4) is a window in its own
-    // right, and one that destroyed itself when minimised would end a live
-    // share every time somebody put it out of the way.
+    // The screen viewer (task 5.4) is a window in its own right, and none of
+    // what follows applies to it: one that destroyed itself when minimised
+    // would end a live share every time somebody put it out of the way. What
+    // it does owe is the subscription it opened, which nothing else can give
+    // back — a destroyed webview does not get to run its own cleanup.
+    if window.label() == crate::VIEWER_LABEL {
+        if matches!(event, WindowEvent::Destroyed) {
+            crate::viewer_closed(window.app_handle());
+        }
+        return;
+    }
     if window.label() != "main" {
         return;
     }

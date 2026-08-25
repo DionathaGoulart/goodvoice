@@ -11,7 +11,10 @@ pub mod rtc;
 pub mod tray;
 
 use std::{
-    sync::{Arc, Mutex as StdMutex},
+    sync::{
+        atomic::{self, AtomicU64},
+        Arc, Mutex as StdMutex,
+    },
     time::Instant,
 };
 
@@ -248,6 +251,13 @@ struct CurrentCall {
     /// the window and the tray, so whoever made it does not have to know who
     /// else is showing it.
     controls: watch::Sender<Controls>,
+    /// Which opening of the viewer window is being fed, as
+    /// [`Call::watch_screen`] named it.
+    ///
+    /// Plain and atomic rather than behind [`Self::call`]'s lock because the
+    /// window event that reads it ([`viewer_closed`]) is synchronous and
+    /// cannot wait for an async lock.
+    viewer: AtomicU64,
 }
 
 impl Default for CurrentCall {
@@ -257,6 +267,7 @@ impl Default for CurrentCall {
             hotkey: Hotkey::default(),
             prefs: Arc::new(AudioPrefs::default()),
             controls: watch::Sender::new(Controls::default()),
+            viewer: AtomicU64::new(0),
         }
     }
 }
@@ -618,21 +629,40 @@ async fn watch_screen(
 ) -> Result<(), String> {
     let call = state.call.lock().await;
     let call = call.as_ref().ok_or_else(|| "not in a call".to_owned())?;
-    call.watch_screen(Arc::new(ChannelSink { frames }));
+    let generation = call.watch_screen(Arc::new(ChannelSink { frames }));
+    state.viewer.store(generation, atomic::Ordering::Relaxed);
     Ok(())
 }
 
-/// Stops feeding this window the room's screen, and drops the subscription.
+/// Gives the subscription up when the viewer window goes away.
 ///
-/// # Errors
+/// **There is no `stop_watching_screen` command**, and there was one until
+/// this was measured: a window is *destroyed*, and a webview taken down with
+/// its window never runs the cleanup that would have sent it. Every viewer
+/// after the first one then opened onto a subscription whose frames were still
+/// addressed to the window that closed, and sat on "nobody is sharing" while a
+/// share was live (DR-33).
 ///
-/// Returns an error when there is no call.
-#[tauri::command]
-async fn stop_watching_screen(state: State<'_, CurrentCall>) -> Result<(), String> {
-    let call = state.call.lock().await;
-    let call = call.as_ref().ok_or_else(|| "not in a call".to_owned())?;
-    call.unwatch_screen();
-    Ok(())
+/// So the window's own end is the unsubscribe, which is also what makes
+/// "viewers opt in" (prd.md §3 F3) a property of the window's lifetime rather
+/// than of a message the window has to remember to send.
+///
+/// The generation is read here, synchronously, and honoured later: by the time
+/// the spawned task runs, a person may already have opened the next viewer,
+/// and taking *its* sink away would leave a window nothing could recover.
+fn viewer_closed(app: &AppHandle) {
+    let generation = app
+        .state::<CurrentCall>()
+        .viewer
+        .load(atomic::Ordering::Relaxed);
+    let app = app.clone();
+    tauri::async_runtime::spawn(async move {
+        let call = app.state::<CurrentCall>();
+        let call = call.call.lock().await;
+        if let Some(call) = call.as_ref() {
+            call.unwatch_screen(generation);
+        }
+    });
 }
 
 /// A [`ScreenSink`] that forwards to one window.
@@ -645,9 +675,9 @@ impl rtc::screen::ScreenSink for ChannelSink {
         let mut payload = Vec::with_capacity(unit.len() + 1);
         payload.push(u8::from(keyframe));
         payload.extend_from_slice(unit);
-        // A window that has gone away is the ordinary end of a viewer, and the
-        // call unsubscribes on its own the moment `stop_watching_screen`
-        // arrives. Nothing to report and nothing to do.
+        // A window that has gone away is the ordinary end of a viewer, and
+        // the call gives the subscription up the moment the window is
+        // destroyed (`viewer_closed`). Nothing to report and nothing to do.
         let _ = self.frames.send(tauri::ipc::Response::new(payload));
     }
 
@@ -962,7 +992,6 @@ pub fn run() {
             share_targets,
             start_share,
             stop_share,
-            stop_watching_screen,
             watch_screen,
             talk_key_is_global
         ])
