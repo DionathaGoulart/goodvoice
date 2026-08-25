@@ -94,7 +94,10 @@ mod windows_drill {
                 if first == 0 {
                     "**never**".to_owned()
                 } else {
-                    #[allow(clippy::cast_precision_loss, reason = "milliseconds, bounded by the round")]
+                    #[allow(
+                        clippy::cast_precision_loss,
+                        reason = "milliseconds, bounded by the round"
+                    )]
                     let seconds = first as f64 / 1000.0;
                     format!("{seconds:.2} s")
                 }
