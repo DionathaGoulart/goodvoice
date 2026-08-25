@@ -800,6 +800,37 @@ Goal: two clients talking through the SFU. Riskiest phase — spikes first.
   Windows protocol registration via Tauri config; UI "copy invite" button.
   DoD: clicking a link on a machine with the app installed joins the room.
   Verify: manual link test.
+  **Built and seen working; the drill around it is not yet trustworthy.**
+  `invite.rs` reads and writes the links, `tauri-plugin-deep-link` registers
+  `goodvoice://` from the installer — verified in the registry after a real
+  install: `HKCU\Software\Classes\goodvoice` with `URL Protocol` and the
+  installed exe behind `"%1"` — and `tauri-plugin-single-instance` (with its
+  `deep-link` feature) folds the second process Windows starts for a link back
+  into the running one.
+  Seen directly, on the installed app, with a warmed UI Automation tree:
+  clicking `goodvoice://join/<room>` opens goodvoice **into that room** —
+  window reading `ROOM SHA-37539`, roster showing `anon (you)` — and
+  `bin/listener` heard it at **50 frames a second** in the same room. A second
+  link arriving during that call does **not** take it: the window stays in the
+  first room and shows *an invite to shb-13576 — you are already in a call*
+  with **leave and join** and **dismiss**. A link naming another deploy is not
+  followed at all and says which server it was for.
+  **Three things it owes.** The launching link is handled by the first process
+  and nothing in the plugin does that on its own —
+  `deep_link().handle_cli_arguments(std::env::args())` in `setup` is what makes
+  a *clicked* link work at all, and without it the room in the link is silently
+  lost. A join that fails from a link is **still silent**: the window falls back
+  to the join form with nothing said, which is what a person would see if the
+  microphone were busy, and the same `INVITE_EVENT` that carries the other
+  refusals should carry this one. And `docs/testing/invite.ps1` is written but
+  **flaky against the installed app** — two of its three checks have passed and
+  failed across runs for reasons that turned out to be the harness (a room
+  matcher that also matched the invite banner's own text, a force-killed app
+  whose WASAPI endpoint was still busy), so it is committed as a starting point
+  rather than as a result.
+  What it did settle: the room in the masthead now carries `aria-label="room
+  <code>"`, because a bare room code is ambiguous to anything reading this
+  window — a screen reader included.
 - [ ] **6.3 Installer** — Tauri bundler MSI/NSIS config; icon, version, protocol
   registration included.
   DoD: `npm run tauri build` yields installer; clean-VM install → join a call.
