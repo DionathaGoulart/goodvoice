@@ -21,27 +21,24 @@
 
 ## Start here
 
-**Where this stopped:** 2026-08-25, mid-task-6.2. Phases 0–5 are closed, and so
-is §6.1. What is open is §6.2, §6.3, §6.4 and Phase 7 — and **Phase 7 opens with
-the order to do all of it in**. Nothing else in this file needs reading first.
+**Where this stopped:** 2026-08-25, with §6.2 closed. Phases 0–5 are closed,
+and so are §6.1 and §6.2. What is open is §6.3, §6.4 and Phase 7 — and
+**Phase 7 opens with the order to do all of it in**, whose row 1 is now done.
+Nothing else in this file needs reading first.
 
 ### The next three things, in this order
 
-1. **§6.2 — a link that cannot join has to say so.** `open_invite` in
-   `client/src-tauri/src/lib.rs` already emits `INVITE_EVENT` for the two
-   refusals it knows about (another deploy, already in a call); a `join_call`
-   that *fails* — a microphone another application is holding, most often —
-   returns to the window with nothing said and the join form showing. Give that
-   the same event, with the error as its reason and `joinable: true` so the
-   window can offer to try again.
-2. **§6.2 — `docs/testing/invite.ps1`, green twice in a row.** It is written
-   and its three checks have each passed; it has also failed twice for reasons
-   in itself rather than in the client (both fixed, both written down in its
-   own header). Until two consecutive clean runs exist, 6.2 stays unticked.
-   The drill needs an **installed** app: `cd client && npm run tauri build`,
-   then the NSIS installer with `/S`.
-3. **Phase 7 row 2 — decide DR-35**, because §6.4's README publishes that
-   number and cannot be written until somebody has chosen what it says.
+1. **Phase 7 row 2 — decide §7.1, DR-35**, because §6.4's README publishes that
+   number and cannot be written until somebody has chosen what it says. It is a
+   decision, not a measurement: the three options are written up in DR-35 and
+   the one that matters is already measured.
+2. **Phase 7 rows 3–7 — the five checklists a person has to walk** (§7.2 the
+   tray menu, §7.3 the rebuilt window's flicker, §7.4 the share picker under
+   `retro`, §7.5 the talk key over a fullscreen game, §7.6 a room hearing
+   itself). None of them can be run from a terminal, and all five block the
+   release.
+3. **§6.3 — the clean-VM install**, which needs a second Windows machine that
+   has never had the toolchain on it.
 
 ### What this machine needs
 
@@ -874,11 +871,11 @@ Goal: two clients talking through the SFU. Riskiest phase — spikes first.
   journeys, and a dashboard is the one thing here that cannot be measured from
   a terminal. The guide says so in its own last section rather than pretending
   otherwise. **§7.11** owns this now.
-- [ ] **6.2 Invite links** — `client` (deep link `goodvoice://join/<room>`),
+- [x] **6.2 Invite links** — `client` (deep link `goodvoice://join/<room>`),
   Windows protocol registration via Tauri config; UI "copy invite" button.
   DoD: clicking a link on a machine with the app installed joins the room.
   Verify: manual link test.
-  **Built and seen working; the drill around it is not yet trustworthy.**
+  **Built, measured, and drilled three times running.**
   `invite.rs` reads and writes the links, `tauri-plugin-deep-link` registers
   `goodvoice://` from the installer — verified in the registry after a real
   install: `HKCU\Software\Classes\goodvoice` with `URL Protocol` and the
@@ -893,20 +890,36 @@ Goal: two clients talking through the SFU. Riskiest phase — spikes first.
   first room and shows *an invite to shb-13576 — you are already in a call*
   with **leave and join** and **dismiss**. A link naming another deploy is not
   followed at all and says which server it was for.
-  **Three things it owes.** The launching link is handled by the first process
-  and nothing in the plugin does that on its own —
-  `deep_link().handle_cli_arguments(std::env::args())` in `setup` is what makes
-  a *clicked* link work at all, and without it the room in the link is silently
-  lost. A join that fails from a link is **still silent**: the window falls back
-  to the join form with nothing said, which is what a person would see if the
-  microphone were busy, and the same `INVITE_EVENT` that carries the other
-  refusals should carry this one. And `docs/testing/invite.ps1` is written but
-  **flaky against the installed app** — two of its three checks have passed and
-  failed across runs for reasons that turned out to be the harness (a room
-  matcher that also matched the invite banner's own text, a force-killed app
-  whose WASAPI endpoint was still busy), so it is committed as a starting point
-  rather than as a result.
-  What it did settle: the room in the masthead now carries `aria-label="room
+  The launching link is handled by the first process and nothing in the plugin
+  does that on its own — `deep_link().handle_cli_arguments(std::env::args())`
+  in `setup` is what makes a *clicked* link work at all, and without it the
+  room in the link is silently lost.
+  **A link that cannot join says so now, and so do the other two refusals —
+  DR-37.** The client had been answering links before there was a webview to
+  hear the answer: Windows starts the process *for* the link, so `open_invite`
+  has usually finished — refused it, or failed on a microphone another program
+  was holding — while the window is still being built, and an event emitted
+  then reaches nobody. Measured on the installed build: a cold click on a link
+  for another deploy left the window saying `ROOM | NAME | JOIN` and nothing
+  else; the same click now reads *an invite to cold-refuse-31 — that invite is
+  for https://goodvoice-elsewhere.invalid, and this client is on …*. The offer
+  is kept as well as emitted and `Snapshot` carries it, which is the mechanism
+  task 4.6 already needed; the window says when it has answered
+  (`dismiss_invite`) so a rebuilt webview does not resurrect an hour-old
+  banner. A failed join is the third refusal, offered back as *try `<room>`
+  again*.
+  **`docs/testing/invite.ps1` passes, three times consecutively**, against the
+  installed `goodvoice_0.1.0_x64-setup.exe`, with `bin/listener` hearing the
+  room at up to 51 frames a second on each run. Two of its three historical
+  failures were the drill rather than the client, and the last one was the
+  worst: it waited for the window to *say something*, and a join form is twelve
+  accessible names within a second while a cold start plus a join is up to
+  thirty — so it read the form it had just waited for and called a working link
+  broken. It waits for an *answer* now. Its `Explain` step is gone: a release
+  Tauri build is a GUI-subsystem process, so the two runs where it handed the
+  URL to the binary and read the redirected output were always going to print
+  nothing.
+  What it also settled: the room in the masthead carries `aria-label="room
   <code>"`, because a bare room code is ambiguous to anything reading this
   window — a screen reader included.
 - [ ] **6.3 Installer** — Tauri bundler MSI/NSIS config; icon, version, protocol
@@ -960,7 +973,7 @@ knew about itself. The checkbox is here.
 
 | # | task | needs | blocks v0.1.0? |
 |---|---|---|---|
-| 1 | §6.2 invite links — the silent failure, and a drill that passes twice | this machine | **yes** |
+| ~~1~~ | ~~§6.2 invite links — the silent failure, and a drill that passes twice~~ — done 2026-08-25, DR-37 | this machine | — |
 | 2 | §7.1 decide DR-35: what a screen share costs a game | a decision | **yes** — 6.4 prints the number |
 | 3 | §7.2 the tray menu checklist | a person, ten minutes | **yes** |
 | 4 | §7.3 the rebuilt window's flicker | a person, two minutes | **yes** |
@@ -3478,3 +3491,58 @@ cannot open, and Git for Windows' default `core.autocrlf` rewrote the script's
 line endings so that bash refused line 1. A self-hoster on Windows — this
 project's whole audience — hit all three before reaching Cloudflare. Fixed,
 and `.gitattributes` pins `*.sh` to LF so the third cannot come back.
+
+### DR-37: the client answered a link before anybody could hear it (2026-08-25)
+
+**Context.** Task 6.2 owed two things: a link whose join *fails* should say so
+rather than land on the join form, and `docs/testing/invite.ps1` should pass
+twice running. The first was three lines — emit the `INVITE_EVENT` that already
+carries the other two refusals. Then the drill failed on its **first** check,
+which had nothing to do with any of that, and the window it printed was a plain
+join form: no room, and no reason either.
+
+**The thing that was actually broken.** A `goodvoice://` link is the only path
+in this client that runs *before a person is looking*. Windows starts the
+process for the link, `handle_cli_arguments` feeds it to `open_invite` inside
+`setup`, and by the time the webview has been built and `App.tsx` has called
+`listen()`, the client has usually already decided: refused the link, or tried
+to join and failed on a microphone another program was holding. `app.emit` to a
+webview that is not listening yet reaches nobody. The window then draws the
+join form, which is indistinguishable from a link that did nothing at all.
+
+Measured both ways on the installed build. Before: clicking
+`goodvoice://join/cold-refuse-31?s=https://goodvoice-elsewhere.invalid` cold
+left the window saying `SETTINGS | ROOM | ROOM | NAME | NAME | JOIN` — the
+refusal was decided, printed to a console a GUI build does not have, and lost.
+After: the same click, the same binary, `an invite to cold-refuse-31 — that
+invite is for https://goodvoice-elsewhere.invalid, and this client is on
+https://goodvoice.goodvoice-server.workers.dev`.
+
+**Decision.** An offer is *kept* as well as emitted (`offer_invite`), and
+`Snapshot` carries it, so whichever window mounts first picks it up — the same
+mechanism task 4.6 already needed for a call that began while the webview was
+away. The window says when it is done with it (`dismiss_invite`), from both the
+accept and the dismiss, because a webview is thrown away and rebuilt on every
+trip through the tray and an offer that outlived its answer would greet
+somebody with an invite from an hour ago.
+
+**Consequences.** The three refusals — another deploy, already in a call, a
+join that failed — are now equally durable, and the failed join is new. The
+window's button reads *try `<room>` again* when there is no call to leave.
+
+**Two of the drill's three failures were the drill.** It waited for the window
+to *say something* and then read what it said: a join form is twelve accessible
+names within a second of launch, while a cold start plus a join is thirty
+(measured — the app was in the room at t+11s on a warm run and t+38s on the
+first run after an install, with `bin/listener` hearing 50 frames a second in
+that room throughout). So it waited for a window, found one, read the form and
+called a working link broken. It now waits for an *answer* — the room, or the
+client saying why not — with the failure branch printing everything the window
+says. Its `Explain` step went too: it handed the URL to the binary with the
+output redirected and printed nothing, twice, because a release Tauri build is
+a GUI-subsystem process with nowhere to write. The client explains itself in
+its own window now, which is where a person reads it anyway.
+
+**Measurements.** `docs\testing\invite.ps1` against the installed
+`goodvoice_0.1.0_x64-setup.exe`: **PASS three times consecutively**, with the
+room heard by `bin/listener` at up to 51 frames a second on each run.

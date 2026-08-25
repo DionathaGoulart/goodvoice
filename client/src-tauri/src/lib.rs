@@ -87,11 +87,16 @@ const CONTROLS_EVENT: &str = "goodvoice://controls";
 const SPEAKING_EVENT: &str = "goodvoice://speaking";
 
 /// The event a `goodvoice://` link produces when the client cannot simply act
-/// on it: a room it is being asked to join while already in another, or a link
-/// for a server this client is not pointed at.
+/// on it: a room it is being asked to join while already in another, a link
+/// for a server this client is not pointed at, or a join that failed.
 ///
-/// A link that *can* be acted on produces no event of its own — it joins, and
-/// the join tells the window through [`CALL_EVENT`] the same as any other.
+/// A link that *can* be acted on, and does, produces no event of its own — it
+/// joins, and the join tells the window through [`CALL_EVENT`] the same as any
+/// other.
+///
+/// Emitted *and* kept, by [`offer_invite`]: a link is the thing that starts
+/// this process, so this event is routinely sent before a webview exists to
+/// hear it.
 const INVITE_EVENT: &str = "goodvoice://invite";
 
 /// The event that says what this client's own screen share is doing.
@@ -192,6 +197,14 @@ pub struct Snapshot {
     /// outside a call, which is also what it is inside one until somebody
     /// picks something.
     pub share: ShareState,
+    /// A link this client would not act on, still waiting to be answered.
+    ///
+    /// Here for the same reason the call is: [`INVITE_EVENT`] carries the
+    /// moment, and a window that did not exist at that moment never hears it.
+    /// A link is the one thing that *starts* this app, so the offer is
+    /// routinely made before there is a webview listening — see
+    /// [`offer_invite`].
+    pub invite: Option<InviteOffer>,
 }
 
 /// What the window and the tray menu both show, and neither owns.
@@ -294,6 +307,14 @@ struct CurrentCall {
     /// window event that reads it ([`viewer_closed`]) is synchronous and
     /// cannot wait for an async lock.
     viewer: AtomicU64,
+    /// The last link this client would not act on, until a window answers it.
+    ///
+    /// Not a `watch` like [`Self::controls`]: nothing polls this, and it is
+    /// read exactly once per window, by [`current_status`]. Cleared by
+    /// [`dismiss_invite`] when the window has taken it or put it away, so that
+    /// the webview being rebuilt out of the tray (task 4.6) does not bring a
+    /// banner back from an hour ago.
+    invite: StdMutex<Option<InviteOffer>>,
 }
 
 impl Default for CurrentCall {
@@ -304,6 +325,7 @@ impl Default for CurrentCall {
             prefs: Arc::new(AudioPrefs::default()),
             controls: watch::Sender::new(Controls::default()),
             viewer: AtomicU64::new(0),
+            invite: StdMutex::default(),
         }
     }
 }
@@ -853,6 +875,10 @@ async fn invite_link(
 #[tauri::command]
 async fn current_status(state: State<'_, CurrentCall>) -> Result<Snapshot, String> {
     let controls = *state.controls.borrow();
+    // Read rather than taken: the window says when it has dealt with the offer
+    // (`dismiss_invite`), and a window that asked and then died before drawing
+    // it would otherwise have swallowed somebody's invite on the way out.
+    let invite = state.invite.lock().ok().and_then(|pending| pending.clone());
     let call = state.call.lock().await;
     let Some(call) = call.as_ref() else {
         return Ok(Snapshot {
@@ -862,6 +888,7 @@ async fn current_status(state: State<'_, CurrentCall>) -> Result<Snapshot, Strin
             speaking: Levels::default(),
             audio: state.prefs.settings(),
             share: ShareState::Idle,
+            invite,
         });
     };
 
@@ -880,7 +907,27 @@ async fn current_status(state: State<'_, CurrentCall>) -> Result<Snapshot, Strin
         speaking: call.speaking().borrow().clone(),
         audio: state.prefs.settings(),
         share: call.share().borrow().clone(),
+        invite,
     })
+}
+
+/// Forgets the link the window has just answered.
+///
+/// Called for both answers, because both are answers: taking the offer joins
+/// the room, and dismissing it says no. What must not happen is the offer
+/// outliving either — the webview is thrown away and rebuilt every time
+/// goodvoice goes to the tray and comes back (task 4.6), and a kept offer
+/// would greet somebody with an invite from an hour ago every time.
+///
+/// # Errors
+///
+/// Never. The `Result` is there so the UI can await it like the others.
+#[tauri::command]
+async fn dismiss_invite(state: State<'_, CurrentCall>) -> Result<(), String> {
+    if let Ok(mut pending) = state.invite.lock() {
+        *pending = None;
+    }
+    Ok(())
 }
 
 /// Joins the room named in [`AUTOJOIN_ENV`], if there is one.
@@ -921,7 +968,8 @@ async fn autojoin(app: AppHandle, room: String, since_start: Instant) {
 /// it, and while it is running when Windows hands one to a second instance
 /// that `single_instance` then folds into this one.
 ///
-/// Three answers, and the window only hears about the last two:
+/// Four answers, and the window hears about every one that is not a plain
+/// join:
 ///
 /// - **not in a call** — join, exactly as if the room had been typed. The
 ///   window learns from [`CALL_EVENT`], which is how it learns about any join
@@ -930,6 +978,12 @@ async fn autojoin(app: AppHandle, room: String, since_start: Instant) {
 ///   link arrived is not something to do on their behalf.
 /// - **another deploy** — refuse it, with the address. A link must never move
 ///   a client to a server of the sender's choosing (`invite`).
+/// - **the join failed** — say so, with what failed as the reason. A link is
+///   the one way into a room with no form behind it: a microphone another
+///   application is holding used to leave the window sitting on the join form
+///   with nothing said, which reads as a link that did nothing at all. It is
+///   offered back as joinable, because the usual cause is somebody else's
+///   program and the usual fix is to try again.
 async fn open_invite(app: AppHandle, url: String) {
     let asked = match invite::parse(&url) {
         Ok(asked) => asked,
@@ -942,8 +996,8 @@ async fn open_invite(app: AppHandle, url: String) {
     let ours = app.state::<Home>().server();
     if let Some(theirs) = asked.server.as_deref() {
         if theirs != ours {
-            let _ = app.emit(
-                INVITE_EVENT,
+            offer_invite(
+                &app,
                 InviteOffer {
                     room: asked.room.clone(),
                     reason: format!("that invite is for {theirs}, and this client is on {ours}"),
@@ -955,8 +1009,8 @@ async fn open_invite(app: AppHandle, url: String) {
     }
 
     if app.state::<CurrentCall>().call.lock().await.is_some() {
-        let _ = app.emit(
-            INVITE_EVENT,
+        offer_invite(
+            &app,
             InviteOffer {
                 room: asked.room.clone(),
                 reason: "you are already in a call".to_owned(),
@@ -968,7 +1022,7 @@ async fn open_invite(app: AppHandle, url: String) {
 
     let options = CallOptions {
         base: ours,
-        room: asked.room,
+        room: asked.room.clone(),
         // The window has a name in it and this path has no window to ask —
         // the same position autojoin is in, and the same answer.
         name: "anon".to_owned(),
@@ -977,7 +1031,36 @@ async fn open_invite(app: AppHandle, url: String) {
     };
     if let Err(error) = join_call(&app, options).await {
         eprintln!("could not join from a link: {error}");
+        offer_invite(
+            &app,
+            InviteOffer {
+                room: asked.room,
+                reason: error,
+                joinable: true,
+            },
+        );
     }
+}
+
+/// Hands an offer to the window, whether or not there is a window yet.
+///
+/// Both halves matter, and the second one is the one that was missing. A
+/// `goodvoice://` link is the only thing in this client that runs *before* a
+/// person is looking: Windows starts the process for it, and [`open_invite`]
+/// has usually finished — refused the link, or tried to join and failed on a
+/// microphone somebody else's program is holding — while the webview is still
+/// being built. An event emitted then reaches nobody, and the window that
+/// arrives a second later shows a plain join form, which is indistinguishable
+/// from a link that did nothing at all. That is what made the drill flaky
+/// rather than the drill: it is the same race that [`Snapshot`] exists for.
+///
+/// So the offer is also *kept*, and [`current_status`] hands it to whichever
+/// window asks first.
+fn offer_invite(app: &AppHandle, offer: InviteOffer) {
+    if let Ok(mut pending) = app.state::<CurrentCall>().invite.lock() {
+        *pending = Some(offer.clone());
+    }
+    let _ = app.emit(INVITE_EVENT, offer);
 }
 
 /// Whole milliseconds since the app started running, for the startup marks.
@@ -1178,6 +1261,7 @@ pub fn run() {
             set_server,
             invite_link,
             current_status,
+            dismiss_invite,
             join_room,
             leave_room,
             set_muted,
@@ -1221,8 +1305,8 @@ pub fn run() {
 #[cfg(test)]
 mod tests {
     use super::{
-        AudioSettings, CallHealth, CallState, CallStatus, ClientInfo, Controls, Levels, ShareState,
-        Snapshot, DEFAULT_SERVER,
+        AudioSettings, CallHealth, CallState, CallStatus, ClientInfo, Controls, InviteOffer,
+        Levels, ShareState, Snapshot, DEFAULT_SERVER,
     };
     use crate::rtc::session::Talker;
 
@@ -1262,6 +1346,7 @@ mod tests {
             speaking: Levels::default(),
             audio: AudioSettings::default(),
             share: ShareState::Idle,
+            invite: None,
         })
         .expect("snapshot serialize");
 
@@ -1279,6 +1364,7 @@ mod tests {
                     "echoCancellation": true,
                 },
                 "share": { "state": "idle" },
+                "invite": null,
             })
         );
     }
@@ -1318,6 +1404,7 @@ mod tests {
                 height: 720,
                 hardware: true,
             },
+            invite: None,
         })
         .expect("snapshot serialize");
 
@@ -1330,6 +1417,35 @@ mod tests {
         assert_eq!(payload["speaking"]["talking"][0]["id"], "seat-2");
         assert_eq!(payload["speaking"]["talking"][0]["level"], 0.5);
         assert_eq!(payload["speaking"]["input"], 0.25);
+    }
+
+    /// A link that arrived before the window did.
+    ///
+    /// This is the field the whole of `offer_invite` exists for: a
+    /// `goodvoice://` link starts the process, so the client has usually
+    /// decided about it — refused it, or tried to join and failed — before
+    /// there is a webview subscribed to [`INVITE_EVENT`]. The window reads
+    /// these three names out of the snapshot (`InviteOffer` in App.tsx).
+    #[test]
+    fn a_link_answered_before_the_window_existed_is_still_in_the_snapshot() {
+        let payload = serde_json::to_value(Snapshot {
+            call: None,
+            controls: Controls::default(),
+            health: None,
+            speaking: Levels::default(),
+            audio: AudioSettings::default(),
+            share: ShareState::Idle,
+            invite: Some(InviteOffer {
+                room: "friday".to_owned(),
+                reason: "the microphone is in use".to_owned(),
+                joinable: true,
+            }),
+        })
+        .expect("snapshot serialize");
+
+        assert_eq!(payload["invite"]["room"], "friday");
+        assert_eq!(payload["invite"]["reason"], "the microphone is in use");
+        assert_eq!(payload["invite"]["joinable"], true);
     }
 
     /// The other half of that contract: the settings panel reads these four

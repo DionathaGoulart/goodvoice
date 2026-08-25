@@ -26,6 +26,16 @@
 # instead and was flaky for a reason that has nothing to do with links — a
 # microphone another application had taken. Frames are still reported when
 # there are any, as evidence rather than as the verdict.
+#
+# **Everything here waits for an answer, never for a window.** The three
+# reasons this drill has failed against a working client were all its own, and
+# the third was the worst: it waited for the window to *say something*, and a
+# window says twelve things — the join form — within a second of appearing,
+# while a join takes several. It then read the join form it had just waited for
+# and reported a link that did not work. Both other reasons are written up
+# where they were fixed: a room matcher that also matched the invite banner's
+# own text (`In-Room`), and a force-killed app whose WASAPI endpoint was still
+# busy (`Stop-App`).
 [CmdletBinding()]
 param(
   [string] $Server = 'https://goodvoice.goodvoice-server.workers.dev',
@@ -68,15 +78,31 @@ function Read-Window {
   } catch { return @() }
 }
 
-# Waits for the window to be saying something, and returns everything it says.
-function Wait-Window([int] $Seconds = 25) {
+# Waits for the window to say the thing being waited for, and returns
+# everything it says — whether or not it ever said it.
+#
+# `$Answered` is asked of every read. Waiting for a window to merely *exist*
+# is what made this drill lie: the join form is twelve accessible names and it
+# is up within a second, while a join is a microphone, an ICE round and a
+# Cloudflare session — several seconds later. A drill that stopped at "the
+# window is saying something" read the join form and called a working link
+# broken, twice.
+function Wait-For([scriptblock] $Answered, [int] $Seconds = 40) {
   $deadline = (Get-Date).AddSeconds($Seconds)
+  $said = @()
   while ((Get-Date) -lt $deadline) {
     $said = Read-Window
-    if ($said.Count -gt 4) { return $said }
+    if ($said.Count -gt 0 -and (& $Answered $said)) { return $said }
     Start-Sleep -Milliseconds 500
   }
-  return @()
+  return $said
+}
+
+# The window is offering an invite rather than acting on it — which is an
+# answer, and one this drill waits for twice.
+function Offering([string[]] $said, [string] $room) {
+  return @($said | Where-Object { $_ -imatch "^\s*$room\s*$" }).Count -gt 0 -and
+         @($said | Where-Object { $_ -imatch 'an invite to' }).Count -gt 0
 }
 
 # The room this client is *in*, which is not the only room the window names: an
@@ -101,24 +127,14 @@ function Stop-App {
   Start-Sleep -Seconds 5
 }
 
-# What the client says for itself, when a link did not do what it should.
+# Why there is no "ask the client what went wrong" step here.
 #
-# The shell launches the installed app with no console to write to, so nothing
-# it prints can be read from here. Handing the same URL to the same binary
-# directly is the nearest thing to asking it what happened.
-function Explain([string] $room) {
-  Stop-App
-  $out = Join-Path $Out 'direct.txt'
-  $err = Join-Path $Out 'direct.err'
-  $app = Start-Process -FilePath $Installed -PassThru `
-    -ArgumentList "goodvoice://join/$room" -RedirectStandardOutput $out -RedirectStandardError $err
-  Start-Sleep -Seconds 12
-  $app | Stop-Process -Force -EA SilentlyContinue
-  Start-Sleep -Seconds 2
-  Write-Output '  --- what the client said when handed the same link directly'
-  Read-Log $out | Where-Object { $_ } | ForEach-Object { Write-Output "      $_" }
-  Read-Log $err | Where-Object { $_ } | ForEach-Object { Write-Output "      $_" }
-}
+# There was one: it handed the same URL to the same binary with the output
+# redirected, and it printed nothing, twice, because a release build of a Tauri
+# app is a GUI-subsystem process — `println!` and `eprintln!` have nowhere to
+# go. The client says what went wrong in its own window instead, which is where
+# a person would read it anyway, and the failing branches below print
+# everything the window says.
 
 function Click([string] $link) { Start-Process $link }
 
@@ -173,11 +189,13 @@ if (Test-Path $ListenerExe) {
 
 Say "clicking goodvoice://join/$first"
 Click "goodvoice://join/$first`?s=$Server"
-$said = Wait-Window
+# Either answer ends the wait: the room, or the client saying why not. The
+# second is an answer as much as the first — it is the one 6.2 added — and
+# waiting the full deadline for it would only delay a verdict already reached.
+$said = Wait-For { param($it) (In-Room $it $first) -or (Offering $it $first) }
 if ($said.Count -eq 0) { Write-Output 'NO_WINDOW_AFTER_CLICK'; Stop-App; exit 4 }
 if (-not (In-Room $said $first)) {
   Write-Output "LINK_DID_NOT_JOIN: the window says [$($said -join ' | ')]"
-  Explain $first
   Stop-App; exit 5
 }
 Say "the app is in $first"
@@ -191,7 +209,7 @@ $second = "invite-$(Get-Random -Maximum 999999)"
 # that ended on its own — a microphone another application took, a transport
 # that dropped — would leave the client free to join, and blaming the link for
 # that would be the wrong bug written down.
-$before = Read-Window
+$before = Wait-For { param($it) In-Room $it $first } 10
 if (-not (In-Room $before $first)) {
   Write-Output "THE_CALL_ENDED_BEFORE_THE_TEST: [$($before -join ' | ')]"
   Stop-App; exit 12
@@ -200,8 +218,9 @@ Say "still in $first, so there is a call for the link to interrupt"
 
 Say "clicking goodvoice://join/$second while that call is running"
 Click "goodvoice://join/$second`?s=$Server"
-Start-Sleep -Seconds 4
-$said = Read-Window
+# The offer is what is being waited for; the second room appearing in the
+# masthead would be the failure, and it is checked for either way below.
+$said = Wait-For { param($it) (Offering $it $second) -or (In-Room $it $second) } 25
 if (In-Room $said $second) { Write-Output 'THE_LINK_TOOK_THE_CALL'; Stop-App; exit 6 }
 if (-not (In-Room $said $first)) {
   Write-Output "THE_CALL_WENT_SOMEWHERE_ELSE: [$($said -join ' | ')]"
@@ -220,7 +239,9 @@ Stop-App
 $third = "invite-$(Get-Random -Maximum 999999)"
 Say "clicking a link that claims to be for $Elsewhere"
 Click "goodvoice://join/$third`?s=$Elsewhere"
-$said = Wait-Window
+$said = Wait-For { param($it)
+  @($it | Where-Object { $_ -imatch 'that invite is for' }).Count -gt 0 -or (In-Room $it $third)
+} 30
 if ($said.Count -eq 0) { Write-Output 'NO_WINDOW_AFTER_CLICK'; Stop-App; exit 9 }
 if (In-Room $said $third) { Write-Output 'A_LINK_FOR_ANOTHER_SERVER_WAS_FOLLOWED'; Stop-App; exit 10 }
 $told = @($said | Where-Object { $_ -imatch 'that invite is for' }).Count -gt 0

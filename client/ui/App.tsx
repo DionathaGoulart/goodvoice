@@ -20,9 +20,11 @@ import { currentMode, currentTheme, pickPalette, prefs, update } from "./theme";
 
 /** Mirrors `ClientInfo` in `src-tauri/src/lib.rs`. */
 /**
- * A `goodvoice://join/<room>` link the client would not act on by itself
- * (plan.md task 6.2). `joinable` is false for an invite to another deploy —
- * a link is never allowed to move this client to somebody else's server.
+ * A `goodvoice://join/<room>` link the client would not act on by itself, or
+ * tried to and could not (plan.md task 6.2). `joinable` is false for an invite
+ * to another deploy — a link is never allowed to move this client to somebody
+ * else's server; it is true both for a link that arrived mid-call and for one
+ * whose join failed, which are the two the window can offer to act on.
  */
 interface InviteOffer {
   room: string;
@@ -130,6 +132,8 @@ interface Snapshot {
   speaking: Levels;
   audio: AudioSettings;
   share: ShareState;
+  /** A link the client would not act on, still waiting to be answered. */
+  invite: InviteOffer | null;
 }
 
 /** The event `push_roster` emits. Kept in step with `ROSTER_EVENT`. */
@@ -500,6 +504,15 @@ const App: Component = () => {
   void Promise.all(stopping)
     .then(() => invoke<Snapshot>("current_status"))
     .then((status) => {
+      // Before the call check below, and unconditionally: an invite is the one
+      // thing here that is routinely offered *before this window existed*.
+      // Windows starts the process for a `goodvoice://` link, so the client has
+      // usually already refused it — or tried to join and failed — while the
+      // webview was still being built, and the event that said so reached
+      // nobody. Without this, that link looks like a link that did nothing.
+      if (status.invite) {
+        setInvite(status.invite);
+      }
       if (call() !== null) {
         return;
       }
@@ -680,15 +693,18 @@ const App: Component = () => {
   };
 
   /**
-   * Takes up a link that arrived while a call was already running: leave the
-   * one you are in, join the one you were sent.
+   * Takes up a link the client handed back: one that arrived while a call was
+   * already running — leave the one you are in, join the one you were sent —
+   * or one whose own join failed, where there is nothing to leave and this is
+   * simply trying it again.
    *
-   * Only ever from a click. The client refuses to do this on its own, and the
-   * reason is the same one — somebody is mid-conversation, and a link is not
-   * grounds for ending it on their behalf.
+   * Only ever from a click. The client refuses to do the first on its own, and
+   * the reason is the same one — somebody is mid-conversation, and a link is
+   * not grounds for ending it on their behalf.
    */
   const acceptInvite = async (offer: InviteOffer) => {
     setInvite(null);
+    void invoke("dismiss_invite").catch(() => {});
     await leave();
     setRoom(offer.room);
     try {
@@ -1231,13 +1247,20 @@ const App: Component = () => {
                   type="button"
                   onClick={() => void acceptInvite(offer())}
                 >
-                  leave and join {offer().room}
+                  {call()
+                    ? `leave and join ${offer().room}`
+                    : `try ${offer().room} again`}
                 </button>
               </Show>
               <button
                 class="action"
                 type="button"
-                onClick={() => setInvite(null)}
+                onClick={() => {
+                  setInvite(null);
+                  // The client is holding this offer for whichever window asks
+                  // next; saying no here has to mean no there too.
+                  void invoke("dismiss_invite").catch(() => {});
+                }}
               >
                 dismiss
               </button>
