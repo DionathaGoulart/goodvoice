@@ -8,6 +8,7 @@
 pub mod audio;
 pub mod capture;
 pub mod home;
+pub mod invite;
 pub mod rtc;
 pub mod tray;
 
@@ -85,12 +86,33 @@ const CONTROLS_EVENT: &str = "goodvoice://controls";
 /// roster twenty times a second.
 const SPEAKING_EVENT: &str = "goodvoice://speaking";
 
+/// The event a `goodvoice://` link produces when the client cannot simply act
+/// on it: a room it is being asked to join while already in another, or a link
+/// for a server this client is not pointed at.
+///
+/// A link that *can* be acted on produces no event of its own — it joins, and
+/// the join tells the window through [`CALL_EVENT`] the same as any other.
+const INVITE_EVENT: &str = "goodvoice://invite";
+
 /// The event that says what this client's own screen share is doing.
 ///
 /// Separate from the roster, which says who is sharing: this one carries why a
 /// share failed, and what it went live as — including whether the encoder is
 /// in silicon, which prd.md §3 F3 requires be shown.
 const SHARE_EVENT: &str = "goodvoice://share";
+
+/// A link the window has to deal with, because the client would not.
+#[derive(Debug, Clone, Serialize)]
+pub struct InviteOffer {
+    /// The room the link names.
+    pub room: String,
+    /// Why it was not simply joined, in the words the window will show.
+    pub reason: String,
+    /// Whether the window may offer to act on it. False for a link belonging
+    /// to another deploy: acting on that would mean changing servers, which a
+    /// link is never allowed to do (`invite`).
+    pub joinable: bool,
+}
 
 /// Identity of the running client, surfaced to the UI on boot.
 #[derive(Debug, Clone, Serialize)]
@@ -801,6 +823,25 @@ async fn set_server(home: State<'_, Home>, url: String) -> Result<ClientInfo, St
     Ok(ClientInfo::of(&home))
 }
 
+/// The link that brings somebody else into this room.
+///
+/// Built here rather than in the window because the server half of it is the
+/// client's to know (DR-36), and a window that guessed would hand out invites
+/// to the wrong deploy.
+///
+/// # Errors
+///
+/// Returns an error when there is no call to invite anybody to.
+#[tauri::command]
+async fn invite_link(
+    home: State<'_, Home>,
+    state: State<'_, CurrentCall>,
+) -> Result<String, String> {
+    let call = state.call.lock().await;
+    let call = call.as_ref().ok_or_else(|| "not in a call".to_owned())?;
+    Ok(invite::format(call.room(), &home.server()))
+}
+
 /// The call as it stands right now, for a window that has just been built.
 ///
 /// Asked once, on mount. Everything after that arrives as events — see
@@ -871,6 +912,71 @@ async fn autojoin(app: AppHandle, room: String, since_start: Instant) {
             millis(since_start)
         ),
         Err(error) => eprintln!("autojoin failed: {error}"),
+    }
+}
+
+/// Acts on a `goodvoice://join/<room>` link, or tells the window why not.
+///
+/// Called for every link this client is handed: at startup when one launched
+/// it, and while it is running when Windows hands one to a second instance
+/// that `single_instance` then folds into this one.
+///
+/// Three answers, and the window only hears about the last two:
+///
+/// - **not in a call** — join, exactly as if the room had been typed. The
+///   window learns from [`CALL_EVENT`], which is how it learns about any join
+///   it did not ask for.
+/// - **already in one** — offer it. Dropping a call somebody is in because a
+///   link arrived is not something to do on their behalf.
+/// - **another deploy** — refuse it, with the address. A link must never move
+///   a client to a server of the sender's choosing (`invite`).
+async fn open_invite(app: AppHandle, url: String) {
+    let asked = match invite::parse(&url) {
+        Ok(asked) => asked,
+        Err(reason) => {
+            eprintln!("ignoring {url}: {reason}");
+            return;
+        }
+    };
+
+    let ours = app.state::<Home>().server();
+    if let Some(theirs) = asked.server.as_deref() {
+        if theirs != ours {
+            let _ = app.emit(
+                INVITE_EVENT,
+                InviteOffer {
+                    room: asked.room.clone(),
+                    reason: format!("that invite is for {theirs}, and this client is on {ours}"),
+                    joinable: false,
+                },
+            );
+            return;
+        }
+    }
+
+    if app.state::<CurrentCall>().call.lock().await.is_some() {
+        let _ = app.emit(
+            INVITE_EVENT,
+            InviteOffer {
+                room: asked.room.clone(),
+                reason: "you are already in a call".to_owned(),
+                joinable: true,
+            },
+        );
+        return;
+    }
+
+    let options = CallOptions {
+        base: ours,
+        room: asked.room,
+        // The window has a name in it and this path has no window to ask —
+        // the same position autojoin is in, and the same answer.
+        name: "anon".to_owned(),
+        mode: TransmitMode::Open,
+        prefs: Arc::clone(&app.state::<CurrentCall>().prefs),
+    };
+    if let Err(error) = join_call(&app, options).await {
+        eprintln!("could not join from a link: {error}");
     }
 }
 
@@ -994,6 +1100,18 @@ pub fn run() {
     let since_start = Instant::now();
 
     tauri::Builder::default()
+        // First, and before anything that could take time: Windows starts a
+        // *new process* for a `goodvoice://` link, and without this the second
+        // one would be a second client — its own tray icon, its own seat in
+        // the room, and the microphone opened twice. The `deep-link` feature
+        // is what turns that second process's command line into an
+        // `on_open_url` on this one instead of dropping it.
+        .plugin(tauri_plugin_single_instance::init(|app, _argv, _cwd| {
+            // A person who clicked a link expects to see the app, and it may
+            // have been in the tray for hours (task 4.6).
+            tray::show(app);
+        }))
+        .plugin(tauri_plugin_deep_link::init())
         .setup(move |app| {
             app.manage(CurrentCall::default());
             app.manage(tray::Tray::default());
@@ -1013,6 +1131,38 @@ pub fn run() {
             let controls = app.state::<CurrentCall>().controls.subscribe();
             tauri::async_runtime::spawn(push_controls(app.handle().clone(), controls));
 
+            // Every link this client is handed, whether it launched the app or
+            // arrived while it was running (task 6.2).
+            {
+                use tauri_plugin_deep_link::DeepLinkExt as _;
+                let handle = app.handle().clone();
+                app.deep_link().on_open_url(move |event| {
+                    for url in event.urls() {
+                        tauri::async_runtime::spawn(open_invite(handle.clone(), url.to_string()));
+                    }
+                });
+                // Only a bundled build has the scheme registered by its
+                // installer; a `cargo run` has to ask for it, and asking twice
+                // is harmless. Without this, testing a link means building an
+                // installer first.
+                #[cfg(debug_assertions)]
+                if let Err(error) = app.deep_link().register_all() {
+                    eprintln!("could not register {}: {error}", invite::SCHEME);
+                }
+
+                // **The link that started the app is not handled by anything
+                // else.** `single_instance` forwards a *second* process's
+                // arguments into the running one, which covers a link clicked
+                // while goodvoice is open; the first process has to read its
+                // own command line, and nothing in the plugin does that on its
+                // own. Without this line the app opens on the join form and
+                // the room in the link is simply lost — which is exactly what
+                // it did, measured, before the line existed.
+                //
+                // After the handler above, because this is what feeds it.
+                app.deep_link().handle_cli_arguments(std::env::args());
+            }
+
             if let Ok(room) = std::env::var(AUTOJOIN_ENV) {
                 // How much of a cold start is gone before any of this runs is
                 // the first thing to know about it: `setup` happens after the
@@ -1026,6 +1176,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             client_info,
             set_server,
+            invite_link,
             current_status,
             join_room,
             leave_room,

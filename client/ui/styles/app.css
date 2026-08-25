@@ -690,3 +690,15 @@ body {
     animation: none;
   }
 }
+
+/* --- an invite that arrived ------------------------------------------------ */
+
+/*
+ * A link (task 6.2) that the client would not act on by itself, sitting above
+ * whatever is on screen. Its own rule only because it is the one panel that
+ * appears without being asked for: everything else in this window is a
+ * response to a click.
+ */
+.invite {
+  gap: 8px;
+}

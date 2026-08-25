@@ -19,6 +19,17 @@ import {
 import { currentMode, currentTheme, pickPalette, prefs, update } from "./theme";
 
 /** Mirrors `ClientInfo` in `src-tauri/src/lib.rs`. */
+/**
+ * A `goodvoice://join/<room>` link the client would not act on by itself
+ * (plan.md task 6.2). `joinable` is false for an invite to another deploy —
+ * a link is never allowed to move this client to somebody else's server.
+ */
+interface InviteOffer {
+  room: string;
+  reason: string;
+  joinable: boolean;
+}
+
 interface ClientInfo {
   name: string;
   version: string;
@@ -150,6 +161,7 @@ const CONTROLS_EVENT = "goodvoice://controls";
 
 /** The event `push_share` emits. Kept in step with `SHARE_EVENT`. */
 const SHARE_EVENT = "goodvoice://share";
+const INVITE_EVENT = "goodvoice://invite";
 
 /** The two the picker offers, in the order prd.md §3 F3 names them. */
 const QUALITIES: { id: Quality; label: string; hint: string }[] = [
@@ -315,6 +327,11 @@ const App: Component = () => {
    * not the only thing that joins — so this signal is only what is being
    * typed, and `info()` is what is in force.
    */
+  /** A link that arrived while this window was open, and what to do with it. */
+  const [invite, setInvite] = createSignal<InviteOffer | null>(null);
+  /** What the *copy invite* button last did, so the click has an answer. */
+  const [copied, setCopied] = createSignal<string | null>(null);
+
   const [serverDraft, setServerDraft] = createSignal<string | null>(null);
   const [serverError, setServerError] = createSignal<string | null>(null);
   const [savingServer, setSavingServer] = createSignal(false);
@@ -437,6 +454,7 @@ const App: Component = () => {
       setMuted(event.payload.muted);
       setDeafened(event.payload.deafened);
     }),
+    listen<InviteOffer>(INVITE_EVENT, (event) => setInvite(event.payload)),
     listen<ShareState>(SHARE_EVENT, (event) => {
       setShare(event.payload);
       // A share that went live has answered the picker's question, so the
@@ -624,6 +642,68 @@ const App: Component = () => {
       setError(String(reason));
     } finally {
       setJoining(false);
+    }
+  };
+
+  /**
+   * Puts this room's invite link on the clipboard.
+   *
+   * The link is built by the client, not here: half of it is which server this
+   * client is on, and that is the client's to know (DR-36).
+   *
+   * `execCommand` is the fallback rather than the plan — WebView2 grants
+   * `navigator.clipboard` to a page it considers secure, and the custom
+   * protocol is one, but a build running against the Vite dev server over
+   * plain http is not.
+   */
+  const copyInvite = async () => {
+    try {
+      const link = await invoke<string>("invite_link");
+      try {
+        await navigator.clipboard.writeText(link);
+      } catch {
+        const box = document.createElement("textarea");
+        box.value = link;
+        box.setAttribute("readonly", "");
+        box.style.position = "fixed";
+        box.style.opacity = "0";
+        document.body.append(box);
+        box.select();
+        document.execCommand("copy");
+        box.remove();
+      }
+      setCopied("invite copied");
+    } catch (reason) {
+      setCopied(String(reason));
+    }
+    window.setTimeout(() => setCopied(null), 4000);
+  };
+
+  /**
+   * Takes up a link that arrived while a call was already running: leave the
+   * one you are in, join the one you were sent.
+   *
+   * Only ever from a click. The client refuses to do this on its own, and the
+   * reason is the same one — somebody is mid-conversation, and a link is not
+   * grounds for ending it on their behalf.
+   */
+  const acceptInvite = async (offer: InviteOffer) => {
+    setInvite(null);
+    await leave();
+    setRoom(offer.room);
+    try {
+      const status = await invoke<CallStatus>("join_room", {
+        server: info()?.server ?? "",
+        room: offer.room,
+        name: name().trim() || "anon",
+        mode: mode(),
+      });
+      setCall(status);
+      setRoster(status.participants);
+      setHealth({ state: "live" });
+      void bindTalkKey();
+    } catch (reason) {
+      setError(String(reason));
     }
   };
 
@@ -1135,6 +1215,37 @@ const App: Component = () => {
         </button>
       </header>
 
+      {/* A link that arrived and could not simply be acted on (task 6.2).
+          Above everything, because it is about something that just happened
+          rather than about what is on screen. */}
+      <Show when={invite()}>
+        {(offer) => (
+          <div class="panel invite animate-enter" role="status">
+            <p class="notice">
+              an invite to <strong>{offer().room}</strong> — {offer().reason}
+            </p>
+            <div class="modes">
+              <Show when={offer().joinable}>
+                <button
+                  class="action"
+                  type="button"
+                  onClick={() => void acceptInvite(offer())}
+                >
+                  leave and join {offer().room}
+                </button>
+              </Show>
+              <button
+                class="action"
+                type="button"
+                onClick={() => setInvite(null)}
+              >
+                dismiss
+              </button>
+            </div>
+          </div>
+        )}
+      </Show>
+
       <Show when={!settings()} fallback={<Settings />}>
         <Show
           when={call()}
@@ -1192,7 +1303,13 @@ const App: Component = () => {
         >
           {(joined) => (
             <section class="panel animate-enter">
-              <p class="tagline">{joined().room}</p>
+              {/* Named, not just shown: "sha-37539" on its own is a
+                  puzzle to a screen reader, and to anything else reading this
+                  window — docs/testing/invite.ps1 has to tell the room a
+                  client is *in* from a room an invite is *offering*. */}
+              <p class="tagline" aria-label={`room ${joined().room}`}>
+                {joined().room}
+              </p>
 
               <Show when={reconnecting()}>
                 {(attempt) => (
@@ -1264,6 +1381,14 @@ const App: Component = () => {
                   {deafened() ? "undeafen" : "deafen"}
                 </button>
               </div>
+
+              <button
+                class="action"
+                type="button"
+                onClick={() => void copyInvite()}
+              >
+                {copied() ?? "copy invite"}
+              </button>
 
               <Show when={sharer()}>
                 {(who) => (

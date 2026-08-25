@@ -97,6 +97,8 @@ webrtc-vad = "0.4"
 # packages, which is the only shape that ships in an installer. See DR-11.
 webrtc-audio-processing = { version = "~2.1", features = ["bundled"] }
 anyhow = "1"
+tauri-plugin-deep-link = "2.4.9"
+tauri-plugin-single-instance = { version = "2.4.3", features = ["deep-link"] }
 
 # Tests only. `#[tokio::test(start_paused = true)]` runs the clock instead of
 # waiting on it, so a wait written in whole seconds — the ICE gathering ones in
