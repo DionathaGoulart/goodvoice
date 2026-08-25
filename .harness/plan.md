@@ -13,8 +13,79 @@
 >   **Decision Record** (§DR below), propose alternatives, do NOT silently swap stack.
 > - Performance is the tiebreaker. Budgets (PRD §4): ≤80 ms voice latency, <2% idle
 >   CPU, ≤120 MB RAM, ~0 FPS impact sharing, <3 s cold start.
-> - **Phases 0–5 are closed. What is left is Phase 6 and Phase 7, and Phase 7
->   opens with the order to do all of it in.** Start there.
+> - **Read "Start here" below and nothing else first.** It says where the last
+>   session stopped and what the next thing to do is. Keep it true: update it
+>   in the same commit that changes what it says.
+
+---
+
+## Start here
+
+**Where this stopped:** 2026-08-25, mid-task-6.2. Phases 0–5 are closed, and so
+is §6.1. What is open is §6.2, §6.3, §6.4 and Phase 7 — and **Phase 7 opens with
+the order to do all of it in**. Nothing else in this file needs reading first.
+
+### The next three things, in this order
+
+1. **§6.2 — a link that cannot join has to say so.** `open_invite` in
+   `client/src-tauri/src/lib.rs` already emits `INVITE_EVENT` for the two
+   refusals it knows about (another deploy, already in a call); a `join_call`
+   that *fails* — a microphone another application is holding, most often —
+   returns to the window with nothing said and the join form showing. Give that
+   the same event, with the error as its reason and `joinable: true` so the
+   window can offer to try again.
+2. **§6.2 — `docs/testing/invite.ps1`, green twice in a row.** It is written
+   and its three checks have each passed; it has also failed twice for reasons
+   in itself rather than in the client (both fixed, both written down in its
+   own header). Until two consecutive clean runs exist, 6.2 stays unticked.
+   The drill needs an **installed** app: `cd client && npm run tauri build`,
+   then the NSIS installer with `/S`.
+3. **Phase 7 row 2 — decide DR-35**, because §6.4's README publishes that
+   number and cannot be written until somebody has chosen what it says.
+
+### What this machine needs
+
+- **Dot-source `$env:USERPROFILE\gv\env.ps1` before any cargo command.** It enters the MSVC dev
+  shell, puts LLVM after it (DR-30), and points `CARGO_TARGET_DIR` at a path
+  short enough for the vendored C++ (DR-30) and outside OneDrive.
+- **`--features custom-protocol` is not optional** for any binary that will be
+  looked at or measured: without it the webview points at the Vite dev server
+  and every number is about Edge's error page (DR-22).
+- **A `goodvoice://` link only reaches an installed client.** The scheme is
+  registered by the installer, so testing links means building the bundle and
+  installing it, not running from `target/release`.
+- The measurement tools are their own package: `cargo run -p goodvoice-harness
+  --bin <name>` (DR-29). `bin/listener` is the second person in the room that
+  most drills lean on (DR-26).
+
+### The gates, all green before a commit
+
+```powershell
+. $env:USERPROFILE\gv\env.ps1     # leaves you in client\src-tauri
+cargo fmt --all --check
+cargo clippy --workspace --all-targets -- -D warnings
+cargo test --workspace              # 163 tests
+cd ..;         npm run format:check; npm run typecheck
+cd ..\server;  npm run format:check; npm run typecheck; npm test   # 85 tests
+```
+
+Run them **unfiltered**. A formatting violation was committed once because the
+gate's output was piped through a filter that hid its diff.
+
+### How commits are written here
+
+Conventional Commits, English, imperative subject, and a body that says what
+was measured rather than what was intended. The author and committer are the
+repository owner: **no AI co-author, committer or session trailers.** Mark a
+task `[x]` in the same commit that completes it.
+
+### The remote
+
+`origin` is GitHub over SSH, and SSH works from **Windows git**, not from WSL —
+`git fetch` from WSL fails with a public-key error while the same command
+through `powershell.exe` succeeds. The two histories diverged once (the same
+work under different hashes) and were rebased onto `origin/main` on 2026-08-25;
+local has been ahead-only since, so a push is a fast-forward.
 
 ---
 
