@@ -21,19 +21,21 @@
 
 ## Start here
 
-**Where this stopped:** 2026-08-25, with §6.2 and §7.1 closed. Phases 0–5 are
-closed, and so are §6.1, §6.2 and §7.1. What is open is §6.3, §6.4 and the rest
-of Phase 7 — and **Phase 7 opens with the order to do all of it in**, whose
-first two rows are now done. Nothing else in this file needs reading first.
+**Where this stopped:** 2026-08-25, with §6.2, §7.1 and §7.4 closed. Phases 0–5
+are closed, and so are §6.1, §6.2, §7.1 and §7.4. What is open is §6.3, §6.4
+and the rest of Phase 7 — and **Phase 7 opens with the order to do all of it
+in**, whose rows 1, 2 and 5 are now done. Nothing else in this file needs
+reading first.
 
 ### The next three things, in this order
 
-1. **Phase 7 rows 3–7 — the five checklists a person has to walk** (§7.2 the
-   tray menu, §7.3 the rebuilt window's flicker, §7.4 the share picker under
-   `retro`, §7.5 the talk key over a fullscreen game, §7.6 a room hearing
-   itself). None of them can be run from a terminal — they are the ones that
-   need eyes, ears, a game and a second person — and all five block the
-   release. §7.3 and §7.4 are two minutes each and are the place to start.
+1. **Phase 7 rows 3, 4, 6 and 7 — the four checklists a person has to walk**
+   (§7.2 the tray menu, §7.3 the rebuilt window's flicker, §7.5 the talk key
+   over a fullscreen game, §7.6 a room hearing itself). None of them can be run
+   from a terminal — they need eyes, ears, a game and a second person — and all
+   four block the release. §7.3 is two minutes and is the place to start;
+   `docs/testing/share-picker-shot.ps1` is the pattern for driving this window
+   from a script if any of the rest turn out to be automatable after all.
 2. **§6.3 — the clean-VM install**, which needs a second Windows machine that
    has never had the toolchain on it. The bundle is built and installs here;
    what is unproven is that it carries everything a machine without MSVC needs.
@@ -746,10 +748,10 @@ Goal: two clients talking through the SFU. Riskiest phase — spikes first.
   monitor or window, and the panel says what is being shared and offers the way
   out. A software encoder would add a warning line there (prd.md §3 F3); this
   machine has NVENC, so the line is not in the shot.
-  **Not verified:** the picker under the `retro` skin — both screenshots are
-  `terminal`. The picker's CSS is the shared base plus a `terminal` block, so
-  retro is the unmodified base, but it has not been looked at.
-  **§7.4** owns this now.
+  **Since verified, by §7.4:** the picker under the `retro` skin is
+  `docs/ui/share-picker-retro.png`, driven through the installed app by
+  `docs/testing/share-picker-shot.ps1`. The shared base holds on its own —
+  nothing about the picker needed the `terminal` block to lay out.
 - [x] **5.4 Viewer window** — `ui`, new Tauri window. Opt-in subscribe on open,
   unsubscribe on close, resizable, aspect-correct; audio unaffected throughout.
   DoD: open/close viewer repeatedly during live share, voice never glitches.
@@ -978,7 +980,7 @@ knew about itself. The checkbox is here.
 | ~~2~~ | ~~§7.1 decide DR-35: what a screen share costs a game~~ — decided 2026-08-25, the budget moved to ≤ 6% | a decision | — |
 | 3 | §7.2 the tray menu checklist | a person, ten minutes | **yes** |
 | 4 | §7.3 the rebuilt window's flicker | a person, two minutes | **yes** |
-| 5 | §7.4 the share picker under the `retro` skin | a person, two minutes | **yes** |
+| ~~5~~ | ~~§7.4 the share picker under the `retro` skin~~ — shot and looked at 2026-08-25 | a person, two minutes | — |
 | 6 | §7.5 the talk key over a fullscreen game | a person and a game | **yes** — prd.md §3 F2 |
 | 7 | §7.6 a room hearing itself on loudspeakers | a person in a room | **yes** — prd.md §3 F4 |
 | 8 | §6.3 the clean-VM install | a second Windows machine | **yes** |
@@ -1022,12 +1024,30 @@ these were never run rather than let a reader assume all of them were.
   that is a flash is the one thing no counter can answer.
   DoD: a yes or a no in `docs/testing/tray.md`, and a DR if it is a yes.
   Verify: `docs\testing\tray-roundtrip.ps1 -Cycles 5`, watched rather than read.
-- [ ] **7.4 The share picker under `retro`** — task 5.3 shipped two screenshots
+- [x] **7.4 The share picker under `retro`** — task 5.3 shipped two screenshots
   and both are `terminal`. The picker's CSS is the shared base plus a
   `terminal` block, so `retro` is the unmodified base and has never been looked
   at.
   DoD: `docs/ui/share-picker-retro.png` committed, or a fix if it is wrong.
   Verify: open the picker with the `retro` skin selected.
+  **Looked at, and nothing is wrong with it.** `docs/ui/share-picker-retro.png`
+  is the picker under `neobrutal`, driven through the installed app by
+  `docs/testing/share-picker-shot.ps1` — joined to `pickershot` the same way
+  the `terminal` shot was, skin chosen by clicking it in the settings screen.
+  The base CSS holds: quality buttons side by side with 1080p selected, the
+  monitor and window list under *what to share* with its own scroll, and the
+  skin's hard shadow and thick frame on every control. Nothing overflows, and
+  the two shots differ only in the ways the two skins are meant to differ.
+  **Two traps for the next drill that drives this window**, both in the
+  script's header where the next person will hit them. `InvokePattern.Invoke()`
+  succeeds on every button here and does *nothing* — a WebView2 acts on input,
+  not on automation patterns — so a drill that trusts the return value walks
+  away believing it opened a screen it never opened. And UI Automation reports
+  bounding rectangles for elements *below the fold* as readily as for visible
+  ones: the skin buttons are at the bottom of a settings screen taller than its
+  window, so clicking where UIA said clicked the desktop behind the app. The
+  script scrolls the element into view and refuses to click a point outside the
+  window frame. Same family as DR-26.
 - [ ] **7.5 [WIN] The talk key over a fullscreen game** — task 4.3, steps 4–5 of
   `docs/testing/hotkey.md`. The hook is proven from a windowless process and
   while another app has focus; a *fullscreen exclusive* game is the case the
