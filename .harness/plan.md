@@ -12,7 +12,7 @@
 > - Hit an unknown (crate missing a feature, API changed, SFU quirk)? Write a
 >   **Decision Record** (§DR below), propose alternatives, do NOT silently swap stack.
 > - Performance is the tiebreaker. Budgets (PRD §4): ≤80 ms voice latency, <2% idle
->   CPU, ≤120 MB RAM, ~0 FPS impact sharing, <3 s cold start.
+>   CPU, ≤120 MB RAM, ≤6% FPS impact sharing 1080p30 (DR-35), <3 s cold start.
 > - **Read "Start here" below and nothing else first.** It says where the last
 >   session stopped and what the next thing to do is. Keep it true: update it
 >   in the same commit that changes what it says.
@@ -21,24 +21,25 @@
 
 ## Start here
 
-**Where this stopped:** 2026-08-25, with §6.2 closed. Phases 0–5 are closed,
-and so are §6.1 and §6.2. What is open is §6.3, §6.4 and Phase 7 — and
-**Phase 7 opens with the order to do all of it in**, whose row 1 is now done.
-Nothing else in this file needs reading first.
+**Where this stopped:** 2026-08-25, with §6.2 and §7.1 closed. Phases 0–5 are
+closed, and so are §6.1, §6.2 and §7.1. What is open is §6.3, §6.4 and the rest
+of Phase 7 — and **Phase 7 opens with the order to do all of it in**, whose
+first two rows are now done. Nothing else in this file needs reading first.
 
 ### The next three things, in this order
 
-1. **Phase 7 row 2 — decide §7.1, DR-35**, because §6.4's README publishes that
-   number and cannot be written until somebody has chosen what it says. It is a
-   decision, not a measurement: the three options are written up in DR-35 and
-   the one that matters is already measured.
-2. **Phase 7 rows 3–7 — the five checklists a person has to walk** (§7.2 the
+1. **Phase 7 rows 3–7 — the five checklists a person has to walk** (§7.2 the
    tray menu, §7.3 the rebuilt window's flicker, §7.4 the share picker under
    `retro`, §7.5 the talk key over a fullscreen game, §7.6 a room hearing
-   itself). None of them can be run from a terminal, and all five block the
-   release.
-3. **§6.3 — the clean-VM install**, which needs a second Windows machine that
-   has never had the toolchain on it.
+   itself). None of them can be run from a terminal — they are the ones that
+   need eyes, ears, a game and a second person — and all five block the
+   release. §7.3 and §7.4 are two minutes each and are the place to start.
+2. **§6.3 — the clean-VM install**, which needs a second Windows machine that
+   has never had the toolchain on it. The bundle is built and installs here;
+   what is unproven is that it carries everything a machine without MSVC needs.
+3. **§6.4 — the README, the tag, the release.** It prints the measured numbers,
+   §7.1's ≤ 6% among them, and it has to say which of rows 10–14 were never
+   run rather than let a reader assume all of them were.
 
 ### What this machine needs
 
@@ -974,7 +975,7 @@ knew about itself. The checkbox is here.
 | # | task | needs | blocks v0.1.0? |
 |---|---|---|---|
 | ~~1~~ | ~~§6.2 invite links — the silent failure, and a drill that passes twice~~ — done 2026-08-25, DR-37 | this machine | — |
-| 2 | §7.1 decide DR-35: what a screen share costs a game | a decision | **yes** — 6.4 prints the number |
+| ~~2~~ | ~~§7.1 decide DR-35: what a screen share costs a game~~ — decided 2026-08-25, the budget moved to ≤ 6% | a decision | — |
 | 3 | §7.2 the tray menu checklist | a person, ten minutes | **yes** |
 | 4 | §7.3 the rebuilt window's flicker | a person, two minutes | **yes** |
 | 5 | §7.4 the share picker under the `retro` skin | a person, two minutes | **yes** |
@@ -994,7 +995,7 @@ these were never run rather than let a reader assume all of them were.
 
 ### Before the release
 
-- [ ] **7.1 Decide DR-35 — the share's cost to a game.** A 1080p30 share costs
+- [x] **7.1 Decide DR-35 — the share's cost to a game.** A 1080p30 share costs
   a GPU-bound game 5.6% of its frame rate, against prd.md §4's "~0". Three
   options are written up and one is already measured: the rate is linear in the
   cost (0.93 ms → 0.48 ms of GPU a frame when it halves). Pick one — make the
@@ -1003,6 +1004,14 @@ these were never run rather than let a reader assume all of them were.
   DoD: the decision appended to DR-35, and prd.md §4 edited if the budget moved.
   Verify: `docs/perf/screenshare-bench.ps1` re-run if code changed; otherwise
   the record itself.
+  **Decided: the budget moves.** prd.md §4 and F3 now say **≤ 6% while sharing
+  1080p30**, with a paragraph under the table saying which number moved and
+  why; the README carries the same until 6.4 rewrites it. No code changed, so
+  there is nothing to re-measure — the record is the verification. The two
+  options that make the cost smaller are not refuted: the shader
+  scale-and-convert (DR-35 option 2) is where 1.4 of the 1.8 ms a shared frame
+  is, and it is left as its own post-release task with its own before-and-after
+  rather than as a change made against a release.
 - [ ] **7.2 The tray menu, seven rows** — `docs/testing/tray.md`, "The menu".
   Every item checked against the window and against a roommate: the ticks
   follow the call, leave leaves, quit quits.
@@ -3446,6 +3455,35 @@ in it whichever way the choice goes.
 an ETW session is not something a normal user opens — and the run is three
 captures rather than two: the third caught a two-fps drift in the 15 fps run
 that would otherwise have been read as the share costing nothing.
+
+---
+
+**Decision, 2026-08-25 (§7.1): option 3. The budget moves to the measurement.**
+
+prd.md §4 now reads **≤ 6% FPS impact on a running game while sharing 1080p30**,
+and F3's acceptance criterion with it; the README carries the same number until
+6.4 rewrites it. "~0" was written before anything measured it and was wrong by
+the whole of the cost, and a budget that is wrong is worse than a budget that is
+large: it is the line every later decision gets checked against.
+
+**Why not the two that make it smaller.** Neither is refuted — both are real,
+and (2) is the better engineering — but neither is a v0.1.0 change. Option 1
+buys 0.45 ms a frame by halving the rate, and the rule it needs is "is this a
+game", which nothing here can answer; a share that quietly went choppy on the
+content somebody most wants smooth would be a worse feature than a share that
+costs three frames a second. Option 2 replaces `VideoProcessorBlt` with a
+scale-and-convert shader pass at output resolution, which is where 1.4 of the
+1.8 ms a shared frame is, and its payoff is unmeasured — it is GPU work of a
+kind that wants its own measurement task, not a change made against a release.
+
+**What makes 5.6% payable.** It is one deliberate click, reversible in one
+more, on the worst case this hardware has: a GPU already 95% busy, at the
+highest of the two qualities offered. 720p30 is 4.4% on the same scene, and
+that choice is in the picker. What was never defensible was not knowing.
+
+**Left for after the release:** option 2, as its own task with its own
+before-and-after (`docs/perf/screenshare-bench.ps1` re-run against the same
+scene). If it lands, the budget comes down to what it then measures.
 
 ### DR-36: the client could not be pointed anywhere (2026-08-24)
 

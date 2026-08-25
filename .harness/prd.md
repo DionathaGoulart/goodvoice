@@ -55,7 +55,8 @@ Rooms are identified by a shareable code / `goodvoice://join/<room>` link. No ac
 - [ ] User-selectable 720p or 1080p
 - [ ] Hardware H.264 encode (NVENC / AMD AMF / Intel QuickSync via Media Foundation)
       is the default path; software fallback allowed but MUST warn the user
-- [ ] ~0 FPS impact on a running game while sharing 1080p (benchmarked)
+- [ ] ≤ 6% FPS impact on a running game while sharing 1080p30 (benchmarked;
+      measured at 5.6% — see plan.md DR-35 for where the milliseconds go)
 - [ ] Viewers opt in: only participants who open the viewer subscribe to the video
       track; audio is never blocked or degraded by video
 - [ ] One sharer at a time (v1 decision — see §8)
@@ -70,11 +71,23 @@ These are acceptance criteria, not aspirations. Each has a verification task in 
 | End-to-end voice latency | ≤ 80 ms typical |
 | Client CPU, idle in room | < 2% |
 | Client RAM | ≤ 120 MB |
-| FPS impact on running game, sharing 1080p | ~0 (hw encoder mandatory) |
+| FPS impact on running game, sharing 1080p30 | ≤ 6% (hw encoder mandatory) |
 | Cold start → in room and talking | < 3 s |
 
 **Performance is the tiebreaker for every technical decision.** When DX and runtime
 performance conflict, take the performance.
+
+**One of these numbers moved, and it is worth saying which and why.** The FPS
+budget read "~0" from the day this document was written until 2026-08-25, and
+nothing had measured it. When something did — three PresentMon captures of a
+GPU-bound game at 57 fps — a 1080p30 share cost **5.6%**, of which the hardware
+encoder is under a quarter; the rest is Windows.Graphics.Capture handing over a
+1920×1080 BGRA texture and the video processor making NV12 of it, which no
+encoder on this hardware can skip. The budget is now the measurement, rounded
+up, rather than an aspiration nobody had tested: a share is something somebody
+turns on deliberately and turns off in a click, and 5.6% is an honest price to
+print for it. plan.md DR-35 has the table, the two ways to make it smaller, and
+which one is worth doing after v0.1.0.
 
 ## 5. Core flows
 
@@ -128,7 +141,7 @@ mobile/macOS/Linux clients · reactions · moderation tooling · i18n (UI is Eng
 | Voice codec | Opus via `audiopus` | Best-in-class quality at 20–40 kbps, 20 ms frames |
 | Echo/noise/AGC | webrtc-audio-processing bindings | Battle-tested DSP; never hand-roll AEC |
 | Screen capture | Windows.Graphics.Capture via `windows-rs` | Modern, GPU-side, lowest-overhead capture API |
-| Video encode | NVENC / AMF / QuickSync via Media Foundation | Dedicated silicon → ~0 FPS cost; H.264 for universal decode |
+| Video encode | NVENC / AMF / QuickSync via Media Foundation | Dedicated silicon → 0.42 ms a shared frame, under a quarter of the cost (DR-35); H.264 for universal decode |
 | WebRTC | webrtc-rs (pure Rust) | No FFI/libwebrtc build burden; DTLS-SRTP, ICE, jitter buffer included. If a hard blocker vs Cloudflare SFU appears, evaluate libwebrtc FFI and record the decision |
 | Tray | Tauri tray plugin (`Shell_NotifyIcon`) | Native tray, no extra process |
 

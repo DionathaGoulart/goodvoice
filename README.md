@@ -7,7 +7,8 @@ Three features. Nothing more:
 
 1. **Voice chat** — rooms of 1–8, lowest possible latency, high audio quality
 2. **System tray** — minimize and forget it while you game
-3. **Screen share** — 720p/1080p, hardware-encoded, ~0 FPS cost
+3. **Screen share** — 720p/1080p, hardware-encoded, 5.6% FPS cost to a
+   GPU-bound game
 
 ## Performance budgets (hard requirements)
 
@@ -16,7 +17,7 @@ Three features. Nothing more:
 | End-to-end voice latency | ≤ 80 ms |
 | Idle CPU in a room | < 2% |
 | RAM | ≤ 120 MB |
-| FPS impact while sharing 1080p | ~0 |
+| FPS impact while sharing 1080p30 | ≤ 6% (measured: 5.6%) |
 | Cold start → talking | < 3 s |
 
 ## Stack

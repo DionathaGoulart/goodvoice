@@ -1,9 +1,12 @@
 # What sharing a screen costs the game on it
 
-plan.md task 5.5. prd.md §4 budgets **~0 FPS impact while sharing**, on the
+plan.md task 5.5. prd.md §4 budgeted **~0 FPS impact while sharing**, on the
 grounds that a voice client which costs a game frames is a voice client people
-turn off. This is that number, measured, and it is **not ~0**: a 1080p30
-hardware share costs a GPU-bound game **5.6% of its frame rate**.
+turn off. This is that number, measured, and it was **not ~0**: a 1080p30
+hardware share costs a GPU-bound game **5.6% of its frame rate**. The budget is
+that measurement now — **≤ 6% at 1080p30** — decided in plan.md §7.1 and
+recorded at the end of DR-35, along with the two ways to make it smaller and
+why neither is a v0.1.0 change.
 
 ## Methodology
 
