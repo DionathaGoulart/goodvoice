@@ -13,6 +13,8 @@
 >   **Decision Record** (§DR below), propose alternatives, do NOT silently swap stack.
 > - Performance is the tiebreaker. Budgets (PRD §4): ≤80 ms voice latency, <2% idle
 >   CPU, ≤120 MB RAM, ~0 FPS impact sharing, <3 s cold start.
+> - **Phases 0–5 are closed. What is left is Phase 6 and Phase 7, and Phase 7
+>   opens with the order to do all of it in.** Start there.
 
 ---
 
@@ -233,6 +235,7 @@ Goal: two clients talking through the SFU. Riskiest phase — spikes first.
   agnostic and `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings`
   and `cargo test` (70 tests) are green on Linux. Until the measurement exists,
   the room's CPU budget at four-plus clients is still an assumption.
+  **§7.8** owns this now.
 - [x] **3.2 Mute / deafen** — `audio/`, `ui`. Mute halts encoding+sending (packets
   stop, not zeroed — assert in test via packet counter); deafen halts playback;
   state visible in roster for everyone (signaling message).
@@ -317,6 +320,7 @@ Goal: two clients talking through the SFU. Riskiest phase — spikes first.
   **Not verified:** the DoD's own words — a speaker-echo *test call*. The echo
   test is synthetic and perfect, which is the hard case for a canceller but not
   the real one. A person on loudspeakers in a room is what is still owed.
+  **§7.6** owns this now.
 - [x] **3.5 Auto-reconnect** — `rtc/reconnect.rs`. Exponential backoff, rejoin same
   room, resubscribe all tracks; UI shows reconnecting state.
   DoD: kill network 10 s mid-call → call resumes without restart.
@@ -340,7 +344,7 @@ Goal: two clients talking through the SFU. Riskiest phase — spikes first.
   the *app* kept holding a call that had ended, so a client whose call dropped
   for good could not join anything again without being restarted. The drill
   drives `Call` directly and never went through `CurrentCall`, which is where
-  it was stuck.
+  it was stuck. **§7.7** owns this now.
 
 ## Phase 4 — Tray & polish
 
@@ -374,7 +378,7 @@ Goal: two clients talking through the SFU. Riskiest phase — spikes first.
   chevron, so it starts visible on this machine.
   **Not verified:** whether the rebuild flickers. That is one row of
   docs/testing/tray.md and the only one left, because it is about what an eye
-  catches between two frames.
+  catches between two frames. **§7.3** owns this now.
 - [x] **4.2 Tray menu** — `tray/menu.rs`. Mute/unmute, deafen, leave room, quit —
   all functional and state-synced with UI.
   DoD: each item verified against in-room state. Verify: manual checklist in PR.
@@ -404,6 +408,7 @@ Goal: two clients talking through the SFU. Riskiest phase — spikes first.
   two drills still pass on Windows after the refactor.
   **Not verified:** the checklist itself — docs/testing/tray.md, "The menu",
   seven rows, each one checked against the window and against a roommate.
+  **§7.2** owns this now.
 - [x] **4.3 [WIN] Global push-to-talk hotkey** — `tray/hotkey.rs`. Low-level
   keyboard hook (`WH_KEYBOARD_LL`); works while a fullscreen game has focus.
   Write the anti-cheat Decision Record (EAC/BattlEye/Vanguard stance, PRD open q3).
@@ -434,7 +439,7 @@ Goal: two clients talking through the SFU. Riskiest phase — spikes first.
   unconditionally after reporting, which is a stronger answer than watching a
   text field fill up.
   **Not verified — the DoD itself:** the key held over a running fullscreen
-  game, and the game still receiving it. Steps 4–5.
+  game, and the game still receiving it. Steps 4–5. **§7.5** owns this now.
 - [x] **4.4 [WIN] Cold-start budget** — measure app-launch → audible-in-room; must
   be <3 s. Optimize (lazy UI, parallel join+audio-init) until it is.
   DoD: measurement in DR, budget met. Verify: scripted timing run, 5-run median.
@@ -585,7 +590,7 @@ Goal: two clients talking through the SFU. Riskiest phase — spikes first.
   the panel and of a lit roster dot in `docs/ui/`.
   **Not verified:** whether the noise suppressor and the echo canceller sound
   better switched on than off, which is 3.4's outstanding row and needs the
-  same person on loudspeakers.
+  same person on loudspeakers. **§7.6** owns this now.
 
 ## Phase 5 — Screen share
 
@@ -675,6 +680,7 @@ Goal: two clients talking through the SFU. Riskiest phase — spikes first.
   **Not verified:** the picker under the `retro` skin — both screenshots are
   `terminal`. The picker's CSS is the shared base plus a `terminal` block, so
   retro is the unmodified base, but it has not been looked at.
+  **§7.4** owns this now.
 - [x] **5.4 Viewer window** — `ui`, new Tauri window. Opt-in subscribe on open,
   unsubscribe on close, resizable, aspect-correct; audio unaffected throughout.
   DoD: open/close viewer repeatedly during live share, voice never glitches.
@@ -736,6 +742,7 @@ Goal: two clients talking through the SFU. Riskiest phase — spikes first.
   closes. Windows' per-process IO counters do not see the media sockets
   (5.2 / 5.4 / 5.6 kB/s across never-opened, open and closed-again: the voice
   path and nothing else), so it needs an instrument this task did not have.
+  **§7.9** owns this now.
 - [x] **5.5 [WIN] FPS-impact benchmark** — `docs/perf/screenshare-bench.md`.
   Run a GPU-bound game (e.g. built-in benchmark), record FPS with/without 1080p
   share (hw encode). Target ~0 delta.
@@ -795,7 +802,7 @@ Goal: two clients talking through the SFU. Riskiest phase — spikes first.
   somebody with a fresh Cloudflare account. Steps 1 and 5 are dashboard
   journeys, and a dashboard is the one thing here that cannot be measured from
   a terminal. The guide says so in its own last section rather than pretending
-  otherwise.
+  otherwise. **§7.11** owns this now.
 - [ ] **6.2 Invite links** — `client` (deep link `goodvoice://join/<room>`),
   Windows protocol registration via Tauri config; UI "copy invite" button.
   DoD: clicking a link on a machine with the app installed joins the room.
@@ -866,6 +873,125 @@ Goal: two clients talking through the SFU. Riskiest phase — spikes first.
   installer artifact via CI.
   DoD: release page has installer + checksums; CI built it.
   Verify: download from release page, install, join call.
+
+---
+
+## Phase 7 — Closing out
+
+Goal: nothing left owed that is not a task somebody can tick.
+
+Everything here was a footnote inside a finished task — *not verified: …*, *left
+unmeasured: …* — and a footnote cannot be ticked, chased or scheduled. The
+footnotes stay where they are, because they are the record of what that task
+knew about itself. The checkbox is here.
+
+### The order
+
+| # | task | needs | blocks v0.1.0? |
+|---|---|---|---|
+| 1 | §6.2 invite links — the silent failure, and a drill that passes twice | this machine | **yes** |
+| 2 | §7.1 decide DR-35: what a screen share costs a game | a decision | **yes** — 6.4 prints the number |
+| 3 | §7.2 the tray menu checklist | a person, ten minutes | **yes** |
+| 4 | §7.3 the rebuilt window's flicker | a person, two minutes | **yes** |
+| 5 | §7.4 the share picker under the `retro` skin | a person, two minutes | **yes** |
+| 6 | §7.5 the talk key over a fullscreen game | a person and a game | **yes** — prd.md §3 F2 |
+| 7 | §7.6 a room hearing itself on loudspeakers | a person in a room | **yes** — prd.md §3 F4 |
+| 8 | §6.3 the clean-VM install | a second Windows machine | **yes** |
+| 9 | §6.4 README, tag, release | — | **it is the release** |
+| 10 | §7.7 the netdown run | a second machine, or a person and a cable | no |
+| 11 | §7.8 four clients conversing, with the CPU measured | four hosts | no |
+| 12 | §7.9 does Cloudflare stop sending video to a closed viewer | an instrument, then code | no |
+| 13 | §7.10 keyframe on demand, by PLI | code | no |
+| 14 | §7.11 the self-hosting walkthrough on a fresh account | a Cloudflare account nobody here has | no |
+
+Rows 10–14 do not block the release **as long as the README says so**: a
+measured number nobody has taken is not a promise, and 6.4 has to say which of
+these were never run rather than let a reader assume all of them were.
+
+### Before the release
+
+- [ ] **7.1 Decide DR-35 — the share's cost to a game.** A 1080p30 share costs
+  a GPU-bound game 5.6% of its frame rate, against prd.md §4's "~0". Three
+  options are written up and one is already measured: the rate is linear in the
+  cost (0.93 ms → 0.48 ms of GPU a frame when it halves). Pick one — make the
+  share rate follow what is being shared, cheapen the BGRA→NV12 convert, or
+  change the budget and say so.
+  DoD: the decision appended to DR-35, and prd.md §4 edited if the budget moved.
+  Verify: `docs/perf/screenshare-bench.ps1` re-run if code changed; otherwise
+  the record itself.
+- [ ] **7.2 The tray menu, seven rows** — `docs/testing/tray.md`, "The menu".
+  Every item checked against the window and against a roommate: the ticks
+  follow the call, leave leaves, quit quits.
+  DoD: seven rows checked off in the doc, with anything surprising written down.
+  Verify: manual, with `bin/listener` in the room as the second person.
+- [ ] **7.3 Does the rebuilt window flicker** — task 4.1's last row. The window
+  is destroyed into the tray and built again on the way back (DR-21); whether
+  that is a flash is the one thing no counter can answer.
+  DoD: a yes or a no in `docs/testing/tray.md`, and a DR if it is a yes.
+  Verify: `docs\testing\tray-roundtrip.ps1 -Cycles 5`, watched rather than read.
+- [ ] **7.4 The share picker under `retro`** — task 5.3 shipped two screenshots
+  and both are `terminal`. The picker's CSS is the shared base plus a
+  `terminal` block, so `retro` is the unmodified base and has never been looked
+  at.
+  DoD: `docs/ui/share-picker-retro.png` committed, or a fix if it is wrong.
+  Verify: open the picker with the `retro` skin selected.
+- [ ] **7.5 [WIN] The talk key over a fullscreen game** — task 4.3, steps 4–5 of
+  `docs/testing/hotkey.md`. The hook is proven from a windowless process and
+  while another app has focus; a *fullscreen exclusive* game is the case the
+  feature exists for (prd.md §3 F2) and the one nobody has tried.
+  DoD: the key opens the mic while the game has the screen, and the game still
+  receives it.
+  Verify: `bin/listener` in the room, a game in fullscreen, the key held.
+- [ ] **7.6 A room hearing itself** — tasks 3.4 and 4.7. The echo canceller is
+  measured against a synthetic loopback, which is the *hard* case and not the
+  real one; nobody has put a microphone and a loudspeaker in one room and
+  listened. Same run answers 4.7's question about whether noise suppression
+  sounds better on than off.
+  DoD: a paragraph in `docs/testing/` with what was heard, and the echo column
+  from `bin/listener --tone` beside it.
+  Verify: two people, or one person and a second machine on speakers.
+
+### After the release
+
+- [ ] **7.7 The netdown run** — task 3.5. `bin/reconnect-drill` kills the
+  session from the inside; only pulling the network checks that the client
+  *notices* — see `docs/testing/reconnect.md`.
+  DoD: the doc's netdown row filled in, on either host.
+  Verify: unplug it, or `Disable-NetAdapter`, mid-call.
+- [ ] **7.8 Four clients conversing** — task 3.1's own DoD, with the CPU
+  measured while they do. Everything else about N-party audio is tested; this
+  needs four hosts.
+  DoD: numbers in the task, or a DR saying why the budget cannot be met.
+  Verify: four machines, `bin/soak` on each.
+- [ ] **7.9 What a closed viewer still costs the room** — task 5.4's open
+  question. The client stops pulling the video and stops decoding it, but
+  nothing tells the SFU: `tracks/close` is allowlisted by the Worker and unused
+  by the client, so "Cloudflare is not sending video to a client with no
+  viewer" holds until the first viewer opens and is unproven after one closes.
+  Windows' per-process IO counters cannot see the media sockets — 5.2 / 5.4 /
+  5.6 kB/s across never-opened, open and closed-again — so this needs an
+  instrument first and code second.
+  DoD: the bandwidth measured on both sides of a close; `tracks/close`
+  implemented if it turns out the video keeps arriving.
+  Verify: an instrument that can see UDP per socket, then a repeat of the
+  measurement.
+- [ ] **7.10 Keyframe on demand** — DR-34's remaining half. A viewer opening
+  mid-share waits up to two seconds for the repeated keyframe, and the sharer
+  re-sends one every two seconds whether anybody is watching or not, because
+  the H.264 codec is registered with `rtcp_feedback: vec![]` and Cloudflare has
+  no way to ask. Negotiating `nack pli` / `ccm fir` and answering a PLI would
+  make both go away.
+  DoD: a viewer gets its first picture in well under a second on a still
+  screen, and a still share with nobody watching sends nothing.
+  Verify: `bin/rewatch --rounds 4`, and `bin/share-drill` under the drill's grey
+  sheet with no viewer open.
+- [ ] **7.11 The self-hosting walkthrough** — task 6.1's DoD. `docs/self-hosting.md`
+  is written and its client half is measured, but nobody has followed it from
+  the beginning on a fresh Cloudflare account, and steps 1 and 5 are dashboard
+  journeys that cannot be measured from a terminal.
+  DoD: somebody who has never deployed this reaches a working room using only
+  that document; whatever tripped them up is fixed in it.
+  Verify: a clean account, and a second pair of eyes.
 
 ---
 
