@@ -21,26 +21,28 @@
 
 ## Start here
 
-**Where this stopped:** 2026-08-25, with §6.2, §7.1, §7.3 and §7.4 closed.
-Phases 0–5 are closed, and so are §6.1, §6.2, §7.1, §7.3 and §7.4. What is open
-is §6.3, §6.4 and the rest of Phase 7 — and **Phase 7 opens with the order to
-do all of it in**, whose rows 1, 2, 4 and 5 are now done. Nothing else in this
+**Where this stopped:** 2026-08-25, with §7.2 closed by a drill.
+Phases 0–5 are closed, and so are §6.1, §6.2, §7.1, §7.2, §7.3 and §7.4. What
+is open is §6.3, §6.4 and the rest of Phase 7 — and **Phase 7 opens with the
+order to do all of it in**, whose rows 1–5 are now done. Nothing else in this
 file needs reading first.
 
 ### The next three things, in this order
 
-1. **Phase 7 rows 3, 6 and 7 — the three checklists a person has to walk**
-   (§7.2 the tray menu, §7.5 the talk key over a fullscreen game, §7.6 a room
-   hearing itself). They need eyes, ears, a game and a second person, and all
-   three block the release. §7.3 was the fourth and turned out to be
-   automatable after all — `docs/testing/tray-flicker.ps1` and DR-38 are what
-   that looked like, and `docs/testing/share-picker-shot.ps1` is the other
-   pattern for driving this window from a script. Try §7.2 that way before
-   walking it: everything in its table except the right-click menu is reachable
-   from UI Automation.
-   **The desktop has to be idle.** Windows returns false from `SetCursorPos`
-   while somebody is at the machine, and every drill that clicks — the tray
-   menu, the share picker — then fails for a reason that looks like the app.
+1. **Phase 7 rows 6 and 7 — the two checklists a person still has to walk**
+   (§7.5 the talk key over a fullscreen game, §7.6 a room hearing itself).
+   They need ears, a game and a second person, and both block the release.
+   Rows 3 and 4 looked like the same kind of thing and were not:
+   `docs/testing/tray-menu.ps1` and `tray-flicker.ps1` are what they turned
+   into. Ask of every remaining one whether an instrument can reach it before
+   scheduling a person — `tray-menu.ps1` reads a `TrackPopupMenu`'s ticks out
+   of its own `HMENU`, which `tray.md` had written off as unreadable.
+   **Injection is refused while an *elevated* program holds the foreground.**
+   Not, as this file said twice, while somebody is at the machine: measured
+   with the desktop idle 31 minutes and still refused, and a click on an
+   ordinary window cleared it (DR-39). This blocks every drill that clicks —
+   §7.5 and the share picker included — and the drills now name the program
+   in the way rather than blaming the app.
 2. **§6.3 — the clean-VM install**, which needs a second Windows machine that
    has never had the toolchain on it. The bundle is built and installs here;
    what is unproven is that it carries everything a machine without MSVC needs.
@@ -71,7 +73,7 @@ file needs reading first.
 . $env:USERPROFILE\gv\env.ps1     # leaves you in client\src-tauri
 cargo fmt --all --check
 cargo clippy --workspace --all-targets -- -D warnings
-cargo test --workspace              # 170 tests
+cargo test --workspace              # 174 tests
 cd ..;         npm run format:check; npm run typecheck
 cd ..\server;  npm run format:check; npm run typecheck; npm test   # 85 tests
 ```
@@ -985,7 +987,7 @@ knew about itself. The checkbox is here.
 |---|---|---|---|
 | ~~1~~ | ~~§6.2 invite links — the silent failure, and a drill that passes twice~~ — done 2026-08-25, DR-37 | this machine | — |
 | ~~2~~ | ~~§7.1 decide DR-35: what a screen share costs a game~~ — decided 2026-08-25, the budget moved to ≤ 6% | a decision | — |
-| 3 | §7.2 the tray menu checklist | a person, ten minutes | **yes** |
+| ~~3~~ | ~~§7.2 the tray menu checklist~~ — passed 2026-08-25, a drill after all; DR-39 | a drill | — |
 | ~~4~~ | ~~§7.3 the rebuilt window's flicker~~ — measured and fixed 2026-08-25, DR-38 | a drill, after all | — |
 | ~~5~~ | ~~§7.4 the share picker under the `retro` skin~~ — shot and looked at 2026-08-25 | a person, two minutes | — |
 | 6 | §7.5 the talk key over a fullscreen game | a person and a game | **yes** — prd.md §3 F2 |
@@ -1022,11 +1024,52 @@ these were never run rather than let a reader assume all of them were.
   scale-and-convert (DR-35 option 2) is where 1.4 of the 1.8 ms a shared frame
   is, and it is left as its own post-release task with its own before-and-after
   rather than as a change made against a release.
-- [ ] **7.2 The tray menu, seven rows** — `docs/testing/tray.md`, "The menu".
+- [x] **7.2 The tray menu, seven rows** — `docs/testing/tray.md`, "The menu".
   Every item checked against the window and against a roommate: the ticks
   follow the call, leave leaves, quit quits.
   DoD: seven rows checked off in the doc, with anything surprising written down.
-  Verify: manual, with `bin/listener` in the room as the second person.
+  Verify: `docs\testing\tray-menu.ps1`, or manual with `bin/listener` in the
+  room as the second person.
+  **It did not need a person after all. Seven rows, three columns, `PASS`.**
+  `docs/testing/tray-menu.ps1` walks the whole table against the live deploy:
+  the tray's ticks and greying, the window's buttons, and what an independent
+  client in the same room sees — `ROW5_ROOMMATE=coldstart muted deafened |
+  roommate (you)`, taken while the window said both buttons were lit and the
+  menu said `[x] Mute | [x] Deafen`. Both directions, which is what the table
+  is for: two of the rows are set from the tray and read in the window, two are
+  set in the window and read from the tray.
+  **It was blocked for most of the session, and by nothing in this repo.**
+  DR-39: an elevated program held the foreground, and UIPI stops a
+  medium-integrity drill injecting a mouse or a key while one does. Measured on
+  a desktop idle for 31 minutes, so the diagnosis this file carried twice —
+  *`SetCursorPos` fails while somebody is at the machine* — was wrong. A click
+  on an ordinary window cleared it and the drill passed on the next run. It
+  reports `POINTER=refused (UIPI: <program> holds the foreground and is
+  elevated)` and stops, rather than reporting a tray menu that does not work.
+  **The tick was the hard column, and it turned out to be readable.**
+  `tray.md` had it right that the popup is a `TrackPopupMenu` UIA reports as a
+  `#32768` pane with no children — but the pane answers `MN_GETHMENU` with the
+  `HMENU` it is drawing, and a menu handle is a USER object rather than a
+  pointer, so `GetMenuItemInfo` reads its text, `MFS_CHECKED` and `MFS_GRAYED`
+  from another process. Every "✔ next to Mute" and "all three greyed again" in
+  the table is a measurement, not a photograph. The photograph is taken anyway
+  (`MENU_SHOT_*`), because a menu right in its handle and wrong on the screen
+  is a thing that could happen and nothing else here would catch it.
+  **The third column is `bin/listener`, which can now see.** It prints a
+  `roster @ Ns` line whenever the room's flags change — `roster @ 7s
+  roommate (you) | coldstart muted` — so "someone else sees you go muted" is
+  read off an independent client rather than off the window that did the
+  muting. Flags only, so a level meter moving does not print. Four unit tests
+  pin the rendering, including that the order is arrival rather than the
+  broadcast's — two orderings of one room would otherwise read as somebody
+  muting.
+  **And one thing the drill found about the app, which is not a bug and would
+  have wasted the next session.** A client that arrived by `GOODVOICE_AUTOJOIN`
+  has an empty join form: `room` is a signal that starts empty and autojoin
+  never sets it. So after a tray → Leave the field is blank, `join` is
+  disabled, and the first version of this drill clicked it and reported the app
+  refusing to re-join — which is precisely the failure the last row exists to
+  catch, arriving from the instrument instead. It types the code now.
 - [x] **7.3 Does the rebuilt window flicker** — task 4.1's last row. The window
   is destroyed into the tray and built again on the way back (DR-21); whether
   that is a flash is the one thing no counter can answer.
@@ -3769,3 +3812,93 @@ needs a real mouse (UI Automation has no "invoke with the other button", and
 the popup is a `#32768` pane with no children — `tray.md`). The drill now says
 `QUIT_CLICKED=False (no-pointer (the desktop is in use))` and the answer is to
 leave the desktop alone and run it again, which is also what §7.2 needs.
+
+### DR-39: the drill was refused input by a program it was not testing (2026-08-25)
+
+**Context.** §7.2 is the last of the checklists that block the release, and the
+"Start here" note said to try automating it before walking it, because
+everything in its table except the right-click menu is reachable from UI
+Automation. The drill was written (`docs/testing/tray-menu.ps1`) and would not
+run: every step that needs a real mouse or a real key was refused by Windows.
+
+**What DR-38 and `tray.md` said was wrong.** Both recorded the cause as
+`SetCursorPos` failing *while somebody is at the machine*. Measured on this
+desktop with `GetLastInputInfo` reporting **31 minutes** since the last human
+input: still refused. Nobody was at the machine and it made no difference.
+
+**What it actually is: UIPI.** A medium-integrity process may not inject input
+into a desktop whose *foreground* window belongs to a higher-integrity one. The
+foreground window is a property of the desktop rather than of goodvoice, so one
+elevated program anywhere on screen blocks every drill in `docs/testing/` that
+clicks. Four measurements, all from a medium-integrity PowerShell:
+
+```text
+SetCursorPos          False, and GetLastError untouched (2 in one run, 203 in
+                      the next — stale values, not a reason, which is why two
+                      earlier sessions could not read anything out of it)
+SendInput             returns 1 — the event was accepted — and the cursor does
+                      not move
+AttachThreadInput     False, to the foreground window's thread
+OpenProcessToken      ERROR_ACCESS_DENIED on the foreground process, which a
+                      medium-integrity caller only gets from something above
+                      medium. Same call on explorer, firefox and the terminal
+                      succeeds.
+```
+
+Here the foreground was held by an **elevated Discord**, with a window that
+`IsWindowVisible` reported as `False`. So the desktop looked idle, looked
+normal in a screenshot, and refused everything.
+
+**Two things that do not fix it, both measured.** Starting goodvoice does not:
+its window comes up and the elevated window keeps the foreground, so
+`SetCursorPos` is refused with goodvoice on screen and focused as far as the
+app is concerned. And `Shell.Application.MinimizeAll()` does not: the
+foreground stayed where it was.
+
+**What does, confirmed.** A click on any ordinary window. The desktop was
+refusing injection for the whole session; somebody came back to the machine,
+clicked something, and the next `SetCursorPos` returned true — after which
+`tray-menu.ps1` ran end to end and passed. Closing the elevated program does
+the same. Running the drill elevated also works, and measures a slightly
+different desktop than the one a person uses, so it is the fallback rather than
+the default.
+
+**What still works with no pointer at all: UI Automation.** In exactly these
+conditions `tray-roundtrip.ps1` completed its whole round trip —
+`TRAY_CLICKED_1=True`, `REBUILT_IN_MS_1=2425`, `TREE_MB_IN_TRAY_1=34.7` — and
+only its final `QUIT_CLICKED` step failed, because that one step needs a real
+mouse. Reading the window, clicking the tray icon and measuring the rebuild are
+all available on a desktop that refuses injection; the right-click menu and
+every click into the webview are not.
+
+**Recorded where the next session will hit it.** `tray-menu.ps1` prints
+`POINTER=` before it starts anything and stops there if the answer is no,
+naming the program that holds the foreground and whether it is elevated:
+
+```text
+POINTER=refused (UIPI: Discord holds the foreground and is elevated)
+RESULT=BLOCKED
+```
+
+**And the trap this leaves behind.** A drill that reports `no-pointer` is
+reporting on the *desktop*, not on goodvoice. Nothing about the tray menu was
+learned in any of the three sessions that hit this, and two of them wrote the
+app down as the suspect.
+
+**The other half of the same session, kept here because it is what the block
+was hiding.** `tray.md` had recorded that the popup is a `TrackPopupMenu` that
+UIA reports as a `#32768` pane with no children — true, and taken to mean the
+ticks could only ever be photographed. They can be read: the pane answers
+`MN_GETHMENU` (`0x01E1`) with the `HMENU` it is drawing, and a menu handle is a
+USER object rather than a pointer, so `GetMenuItemCount` and `GetMenuItemInfo`
+walk it from another process and give back text, `MFS_CHECKED`, `MFS_GRAYED`
+and separators. That is what turned §7.2 from a checklist into a drill:
+
+```text
+MENU_ROW5_AFTER=Open goodvoice | -- | [x] Mute | [x] Deafen | Leave room | -- | Quit goodvoice
+MENU_ROW6_AFTER=Open goodvoice | -- | Mute (grey) | Deafen (grey) | Leave room (grey) | -- | Quit goodvoice
+```
+
+The photograph is still taken beside each one, because a menu right in its own
+handle and wrong on the screen is a thing that could happen and nothing else
+would catch it. Both agree.

@@ -24,6 +24,21 @@
 //! at that frequency in the tone as sent. That ratio in decibels is what task
 //! 3.4's definition of done is asking about, measured instead of judged.
 //!
+//! # Reading the roster lines
+//!
+//! Frames are what a second person *hears*; the roster is what they *see*.
+//! plan.md §7.2 checks the tray menu against both halves of the app and
+//! against a roommate, and that last column is this: whenever the room
+//! broadcasts a roster whose flags differ from the last one, a line goes out
+//! saying who is in it and what they are.
+//!
+//! ```text
+//! roster @ 4s   anon muted | listener (you)
+//! ```
+//!
+//! Only the flags are compared, so a level meter moving does not print and a
+//! mute does. A line for every second would drown the table it shares.
+//!
 //! # One slot
 //!
 //! Everything is read from slot 0, which is the first remote speaker the call
@@ -46,7 +61,10 @@ use goodvoice_client_lib::{
         prefs::AudioPrefs,
         vad::TransmitMode,
     },
-    rtc::session::{Call, CallOptions},
+    rtc::{
+        session::{Call, CallOptions},
+        signaling::Participant,
+    },
 };
 
 const DEFAULT_BASE: &str = "https://goodvoice.goodvoice-server.workers.dev";
@@ -102,12 +120,22 @@ async fn main() -> Result<()> {
     let started = Instant::now();
     let mut ticker = tokio::time::interval(Duration::from_secs(1));
     let mut previous = 0_usize;
+    let roster = call.roster();
+    let mut seen_roster = String::new();
 
     while started.elapsed() < Duration::from_secs(seconds) {
         ticker.tick().await;
         let record = ears.slot(0);
         let arrived = record.frames.saturating_sub(previous);
         previous = record.frames;
+
+        // Before the table row, because a mute is the reason the row after it
+        // reads zero and a line that explains a silence belongs above it.
+        let now = flags(&roster.borrow(), &call.self_id());
+        if now != seen_roster {
+            println!("  roster @ {}s   {now}", started.elapsed().as_secs());
+            seen_roster = now;
+        }
 
         println!(
             "  {:>4}s   {arrived:>8}   {:>4}   {}",
@@ -120,6 +148,36 @@ async fn main() -> Result<()> {
     call.leave().await;
     println!("\nleft the room.");
     Ok(())
+}
+
+/// The room as this second person sees it: everyone in it, and what each of
+/// them is.
+///
+/// Sorted by arrival rather than left in the order the broadcast happened to
+/// use, because the caller prints this only when it *changes* and two orderings
+/// of the same room would read as a change.
+fn flags(roster: &[Participant], me: &str) -> String {
+    let mut room: Vec<&Participant> = roster.iter().collect();
+    room.sort_unstable_by(|a, b| a.joined_at.cmp(&b.joined_at).then(a.id.cmp(&b.id)));
+    room.iter()
+        .map(|peer| {
+            let mut line = peer.name.clone();
+            if peer.muted {
+                line.push_str(" muted");
+            }
+            if peer.deafened {
+                line.push_str(" deafened");
+            }
+            if peer.sharing {
+                line.push_str(" sharing");
+            }
+            if peer.id == me {
+                line.push_str(" (you)");
+            }
+            line
+        })
+        .collect::<Vec<_>>()
+        .join(" | ")
 }
 
 fn header(tone: Option<f32>) -> &'static str {
@@ -215,5 +273,57 @@ fn args() -> Args {
         name,
         tone,
         seconds,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{flags, Participant};
+
+    fn peer(id: &str, name: &str, joined_at: u64) -> Participant {
+        Participant {
+            id: id.to_owned(),
+            name: name.to_owned(),
+            joined_at,
+            muted: false,
+            deafened: false,
+            sharing: false,
+            session_id: None,
+            tracks: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn a_quiet_room_is_just_names() {
+        let room = vec![peer("a", "anon", 1), peer("b", "listener", 2)];
+        assert_eq!(flags(&room, "b"), "anon | listener (you)");
+    }
+
+    #[test]
+    fn every_flag_the_tray_menu_can_set_is_named() {
+        // plan.md §7.2 walks mute, deafen and leave against a roommate. This
+        // is the roommate's half of that table, so all three have to show.
+        let mut room = vec![peer("a", "anon", 1)];
+        room[0].muted = true;
+        room[0].deafened = true;
+        room[0].sharing = true;
+        assert_eq!(flags(&room, "b"), "anon muted deafened sharing");
+    }
+
+    #[test]
+    fn the_order_is_arrival_and_not_the_broadcast_s() {
+        // The caller prints only on a change, so two orderings of one room
+        // would read as somebody muting.
+        let early = peer("z", "early", 1);
+        let late = peer("a", "late", 2);
+        assert_eq!(
+            flags(&[early.clone(), late.clone()], "?"),
+            flags(&[late, early], "?")
+        );
+    }
+
+    #[test]
+    fn an_empty_room_says_nothing_rather_than_something_wrong() {
+        assert_eq!(flags(&[], "b"), "");
     }
 }

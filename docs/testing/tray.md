@@ -5,8 +5,9 @@ not even *there*: closing or minimising destroys the window and its webview,
 and the tray icon builds a new one on the way back. The call carries on
 throughout — audio lives in Rust and never depended on a webview existing.
 
-`tray-roundtrip.ps1` checks that in about a minute, and `tray-flicker.ps1`
-checks what it looks like while it happens.
+`tray-roundtrip.ps1` checks that in about a minute, `tray-flicker.ps1` checks
+what it looks like while it happens, and `tray-menu.ps1` walks what the menu
+offers while the window is gone.
 
 | | scripted | by hand |
 |---|---|---|
@@ -17,6 +18,7 @@ checks what it looks like while it happens.
 | Nothing accumulates over repeated round trips | ✅ `-Cycles 12` | |
 | The tray can still quit an app with no window | ✅ | |
 | It does not flicker on the way back | ✅ `tray-flicker.ps1` | |
+| The menu's seven rows, against the window and a roommate | ✅ `tray-menu.ps1` | |
 | The icon is where a person can find it | | ✅ |
 
 ## Running it
@@ -137,12 +139,21 @@ And two more, both learned by chasing the app for something Windows was doing:
   is already rebuilt when it returns. Nothing is wrong; it is just not
   something to put a stopwatch around. `tray-flicker.ps1` uses a real mouse for
   that reason, and `tray-roundtrip.ps1` labels its two figures as bounds.
-- **`SetCursorPos` returns false while somebody is at the machine.** Windows
-  refuses injected pointer movement then, so every step that needs a real mouse
-  fails — and it fails looking exactly like a tray menu that does not work.
-  Two runs blamed the app before the return value was checked. It is checked
-  now: `QUIT_CLICKED=False (no-pointer (the desktop is in use))`. Leave the
-  desktop alone and run it again.
+- **`SetCursorPos` returns false when an *elevated* window holds the
+  foreground.** Windows refuses injected pointer movement then, so every step
+  that needs a real mouse fails — and it fails looking exactly like a tray menu
+  that does not work. Two runs blamed the app before the return value was
+  checked; it is checked now, and `tray-menu.ps1`'s `POINTER=` line names the
+  program rather than guessing at it.
+  **This was diagnosed wrong twice, as "somebody is at the machine".** It is
+  not that: measured on a desktop idle for 31 minutes, injection was still
+  refused, and the reason was an elevated Discord holding the foreground with
+  an invisible window. The rule is UIPI — a medium-integrity process may not
+  inject into a desktop whose foreground window belongs to something higher —
+  and the foreground window is a property of the *desktop*, so one elevated app
+  anywhere on screen blocks every drill here. DR-39 has the measurements and
+  the two things that do **not** fix it. What does: click any ordinary window,
+  or close the elevated one.
 
 ## Watching the rebuild, frame by frame
 
@@ -234,6 +245,31 @@ Join a room from the window and go through it. Every item is checked against
 the *other* half of the app, because state that is synced in one direction only
 looks fine until you use the other one:
 
+`tray-menu.ps1` walks this table (plan.md §7.2), and **it passes** — every row,
+every column, against the live deploy. It needs a desktop that will accept
+injected input; if it will not, the drill stops at `POINTER=` and says which
+program is in the way rather than blaming the app (see the `SetCursorPos` note
+above, and DR-39). The three columns come from three instruments, none of which
+is a pair of eyes:
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File docs\testing\tray-menu.ps1
+```
+
+- **Tray shows** — the real `HMENU`. The popup answers `MN_GETHMENU` with the
+  menu handle it is drawing, and a menu handle is a USER object rather than a
+  pointer, so `GetMenuItemInfo` reads text, `MFS_CHECKED` and `MFS_GRAYED` out
+  of it from another process. That is the tick and the greying, measured — the
+  one thing the `#32768`-with-no-children trap above had made unreadable. Each
+  opening is also photographed to `MENU_SHOT_*`, because a menu that is right
+  in its own handle and wrong on the screen is a thing that could happen.
+- **Window shows** — UI Automation. The buttons are named for what they will do
+  next, so `unmute` in the tree *is* "the mute button is lit".
+- **Someone else sees** — `bin/listener` in the same room, which since §7.2
+  prints a `roster @ Ns` line whenever the room's flags change:
+  `roster @ 7s   roommate (you) | coldstart muted`. Flags only, so a level
+  meter moving does not print and a mute does.
+
 | Do this | Tray shows | Window shows | Someone else sees |
 |---|---|---|---|
 | Join a room | all three items live | the room panel | you arrive |
@@ -243,6 +279,31 @@ looks fine until you use the other one:
 | Window → mute *and* deafen | both ticked | both lit | both tags |
 | Tray → Leave room | all three greyed again | back to the join panel | you leave |
 | Join again after that | live again | the room panel | you arrive |
+
+What that reads like when it passes — the tray column, straight out of the
+menu's own handle:
+
+```text
+MENU_ROW1_JOINED=Open goodvoice | -- | Mute | Deafen | Leave room | -- | Quit goodvoice
+MENU_ROW2_AFTER =Open goodvoice | -- | [x] Mute | Deafen | Leave room | -- | Quit goodvoice
+MENU_ROW5_AFTER =Open goodvoice | -- | [x] Mute | [x] Deafen | Leave room | -- | Quit goodvoice
+MENU_ROW6_AFTER =Open goodvoice | -- | Mute (grey) | Deafen (grey) | Leave room (grey) | -- | Quit goodvoice
+ROW5_ROOMMATE=coldstart muted deafened | roommate (you)
+RESULT=PASS
+```
+
+**Two things worth knowing before reading a failure.**
+
+A tray → Leave clears the ticks as well as greying the items: `ROW6_AFTER`
+shows three grey items and no `[x]`, from a call that was muted *and* deafened
+when it ended. The flags belong to the call, and the call is gone.
+
+And a client that arrived by `GOODVOICE_AUTOJOIN` has **an empty join form**:
+`room` is a signal that starts empty and autojoin never touches it, so after a
+tray → Leave the field is blank and `join` is disabled. The last row of the
+table has to *type* a room code, and a drill that only clicked the button read
+a disabled button as the app refusing to re-join — which is the exact shape of
+the bug that row exists to catch, arriving from the drill instead.
 
 Three of those rows exist because they used to be broken:
 
