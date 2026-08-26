@@ -21,25 +21,40 @@
 
 ## Start here
 
-**Where this stopped:** 2026-08-25, with §7.5 closed by a drill.
+**Where this stopped:** 2026-08-25, with §7.6's instrument built and its
+answer taken: this machine cannot host that test.
 Phases 0–5 are closed, and so are §6.1, §6.2, §7.1, §7.2, §7.3, §7.4 and §7.5.
 What is open is §6.3, §6.4 and the rest of Phase 7 — and **Phase 7 opens with
-the order to do all of it in**, whose rows 1–6 are now done. Nothing else in
-this file needs reading first.
+the order to do all of it in**, whose rows 1–6 are done and whose row 7 is now
+blocked on an object rather than on work. Nothing else in this file needs
+reading first.
+
+**Two of the three things below now wait on hardware nobody here has**, and
+that is the shape of the release rather than a thing to keep re-discovering:
+§7.6 wants a loudspeaker the microphone can hear, §6.3 wants a second Windows
+machine. Both were asked for on 2026-08-25 and neither was available. §6.4 is
+not blocked, and it is the row that decides what a release with those two
+unrun is allowed to claim.
 
 ### The next three things, in this order
 
-1. **Phase 7 row 7 — §7.6, a room hearing itself.** The last checklist here
-   that an instrument has not reached: the echo canceller is measured against a
-   synthetic loopback, and nobody has put a microphone and a loudspeaker in one
-   room and listened. It needs ears, and it blocks the release.
-   Four rows now have looked like they needed a person and did not:
-   `tray-menu.ps1`, `tray-flicker.ps1`, the `retro` shot, and
-   `hotkey-fullscreen.ps1`, which turned "a person and a game" into a D3D11
-   swap chain with `SetFullscreenState(TRUE)` on it (DR-40). **Ask of §7.6
-   whether an instrument can reach it before scheduling anybody** — what it is
-   short of is a loudspeaker in front of a microphone, which is the one thing
-   on that list that is a fact about a room rather than about Windows.
+1. **Phase 7 row 7 — §7.6, a room hearing itself. Blocked on a loudspeaker,
+   and on nothing else.** The question this file asked — *can an instrument
+   reach it before anybody is scheduled* — has been answered: yes, all of it
+   except the room. `bin/echo-room` makes the tone take the whole trip through
+   a real transducer and a real microphone, and it **refused twice**, at
+   0.4 dB and 2.0 dB of coupling against the 6 dB it needs (DR-41). The only
+   active render endpoint on this machine is a headset earphone; the analog
+   jack DR-23 measured through now reports `not present`. Lay an earcup
+   face-down against the fifine, or put a speaker back in the jack, and the
+   row is one command: `cargo run -p goodvoice-harness --bin echo-room --
+   --record <dir>`. **Do not re-derive this** — the drill's own control says
+   it in one line, and the canceller-off segment is there so that a room with
+   no loudspeaker in it can never be mistaken for a canceller that works.
+   4.7's other half — does the suppressor sound better on than off — needs no
+   loudspeaker at all: `--record` writes the WAVs even when the verdict is
+   refused, and `quiet.wav` against `suppressed.wav` is a listening test that
+   can be done today.
    **Injection is refused while an *elevated* program holds the foreground.**
    Not, as this file said twice, while somebody is at the machine: measured
    with the desktop idle 31 minutes and still refused, and a click on an
@@ -52,7 +67,9 @@ this file needs reading first.
    the installed app on this machine is older than both.
 3. **§6.4 — the README, the tag, the release.** It prints the measured numbers,
    §7.1's ≤ 6% among them, and it has to say which of rows 10–15 were never
-   run rather than let a reader assume all of them were.
+   run rather than let a reader assume all of them were. **It now also has to
+   say what §7.6 and §6.3 are**, which is not "untested" but "tested up to the
+   hardware the test needs, and here is the command that finishes it".
 
 ### What this machine needs
 
@@ -75,7 +92,7 @@ this file needs reading first.
 . $env:USERPROFILE\gv\env.ps1     # leaves you in client\src-tauri
 cargo fmt --all --check
 cargo clippy --workspace --all-targets -- -D warnings
-cargo test --workspace              # 174 tests
+cargo test --workspace              # 181 tests
 cd ..;         npm run format:check; npm run typecheck
 cd ..\server;  npm run format:check; npm run typecheck; npm test   # 85 tests
 ```
@@ -143,6 +160,9 @@ Goal: repo builds, CI green, hello-world client and worker exist and deploy.
   hardware, which is most of task 2.1's argument, and NVENC is present, which
   is task 5.2's. Off Windows the binary refuses and exits 2 rather than
   printing an empty report that would read like a machine with no devices.
+  It also lists the endpoints that are present and **not** active, with their
+  state — added for DR-41, where the question was not what the app would open
+  but whether this machine has a loudspeaker at all.
 - [x] **0.6 README + LICENSE + .gitignore checked in** — root. README states the
   three features, perf budgets, self-host one-liner; MIT LICENSE.
   DoD: files exist, README renders. Verify: `git ls-files | grep -E 'README|LICENSE'`.
@@ -993,7 +1013,7 @@ knew about itself. The checkbox is here.
 | ~~4~~ | ~~§7.3 the rebuilt window's flicker~~ — measured and fixed 2026-08-25, DR-38 | a drill, after all | — |
 | ~~5~~ | ~~§7.4 the share picker under the `retro` skin~~ — shot and looked at 2026-08-25 | a person, two minutes | — |
 | ~~6~~ | ~~§7.5 the talk key over a fullscreen game~~ — passed twice 2026-08-25, a drill; DR-40 | ~~a person and a game~~ a swap chain | — |
-| 7 | §7.6 a room hearing itself on loudspeakers | a person in a room | **yes** — prd.md §3 F4 |
+| 7 | §7.6 a room hearing itself on loudspeakers — **instrument built and refused: this machine has no loudspeaker** (DR-41) | ~~a person in a room~~ a loudspeaker the microphone can hear | **yes** — prd.md §3 F4 |
 | 8 | §6.3 the clean-VM install | a second Windows machine | **yes** |
 | 9 | §6.4 README, tag, release | — | **it is the release** |
 | 10 | §7.7 the netdown run | a second machine, or a person and a cable | no |
@@ -1178,7 +1198,40 @@ these were never run rather than let a reader assume all of them were.
   sounds better on than off.
   DoD: a paragraph in `docs/testing/` with what was heard, and the echo column
   from `bin/listener --tone` beside it.
-  Verify: two people, or one person and a second machine on speakers.
+  Verify: `cargo run -p goodvoice-harness --bin echo-room -- --record <dir>`,
+  with a loudspeaker in front of the microphone.
+  **The instrument exists and reaches everything but the room — DR-41.**
+  `bin/echo-room` puts two clients in one process the way `bin/latency` does:
+  the room holds the real devices through the same `hardware::open` the app
+  uses, the far end publishes a 1 200 Hz tone and keeps every frame that comes
+  back, and the tone makes the whole trip — SFU, transducer, air, microphone,
+  SFU. Four segments: the room silent, the room with the suppressor on, the
+  tone with the canceller **off**, the tone with it on. `docs/testing/echo.md`
+  is how to read it.
+  **It refuses, and the refusal is about this machine.** COUPLING **0.4 dB**
+  and then **2.0 dB** against the 6 dB it asks for before it will say anything
+  about a canceller — because the only active render endpoint here is a headset
+  earphone, and the analog jack DR-23 measured through at 84.7 ms now reports
+  `not present`. An earcup nobody is holding is not a room. The canceller-off
+  segment is the control and it is the whole point: a canceller that works and
+  a room with no loudspeaker in it produce the same number, which is §7.5's
+  silent capture device again.
+  **What is left is not "a person in a room" but one object.** A loudspeaker
+  the fifine can hear — an earcup laid face-down against it, or a speaker back
+  in the analog jack — and then the row is one command. Everything else is
+  built.
+  **4.7's half does not wait on that.** `--record` writes a WAV per segment
+  *even when the run refuses a verdict*, so `quiet.wav` against
+  `suppressed.wav` is a listening test that can be done today. The level cannot
+  answer it: `NOISE_SUPPRESSED` came out at −1.3, 0.1 and −0.4 dB across three
+  runs of the same room, because the gain controller sits after the suppressor
+  and answers a quieter frame by turning it up.
+  **One trap, in DR-41 and in the drill's header.** The obvious metric — the
+  tone's bin now against the tone's bin in the silent room — reported
+  `COUPLING=17.2 dB` on the first run and there was no coupling: the room got
+  louder between the two segments (median level 121.0 → 453.3) and the bin rose
+  with it. The tone is read against its own neighbours in the same 200 ms now,
+  which a chair or a gain change cannot move.
 
 ### After the release
 
@@ -4044,3 +4097,106 @@ driver setting on this machine is overriding the sync interval. It changes
 nothing here — the question is input — but a drill that reported 1 363 fps
 without saying why would be reporting a screen nobody was watching, so it says
 `VSYNC=off` when the two counts disagree by more than double.
+
+### DR-41: the room has no loudspeaker in it (2026-08-25)
+
+**Context.** §7.6, the last release-blocking row that had never been reached by
+an instrument. Every other row on §7's list that looked like it needed a person
+turned out not to — the tray menu, the flicker, the `retro` shot, the talk key
+over a fullscreen game — and this file's "Start here" said to ask the same
+question of this one before scheduling anybody. What it is short of is a
+loudspeaker in front of a microphone, which is the one thing on that list that
+is a fact about a room rather than about Windows.
+
+**The instrument.** `harness/src/bin/echo-room.rs`, and it reaches everything
+except that fact. Two clients in one process the way `bin/latency` does it: the
+room holds the real devices through the same `hardware::open` the app uses, the
+far end publishes a 1 200 Hz tone and keeps every frame that comes back. The
+tone makes the whole trip — SFU, transducer, air, microphone, SFU — and the
+walk is four twelve-second segments: the room silent, the room with the
+suppressor on, the tone playing with the canceller **off**, and the tone
+playing with it on. `docs/testing/echo.md` is how to read it.
+
+**The answer: no, this machine cannot host the test.** Two runs, and the
+coupling came out at **0.4 dB** and **2.0 dB** against the 6 dB the drill asks
+for before it will say anything about a canceller. The reason is in the
+endpoint list rather than in the numbers:
+
+```
+## render endpoints
+- **Headset Earphone (HyperX Virtual Surround Sound)** — 48000 Hz, 2 ch, 32-bit; …
+Present and not active:
+- Speakers (High Definition Audio Device) — not present (nothing in the jack)
+- Speakers (fifine Microphone) — disabled
+- Headphones (High Definition Audio Device) — not present (nothing in the jack)
+- … ten more, all `not present` or `disabled`
+## capture endpoints
+- **Microphone (fifine Microphone)** — 48000 Hz, 2 ch, 32-bit; …
+```
+
+That listing is `bin/probe`, which grew the second half for this: it had only
+ever printed `DEVICE_STATE_ACTIVE`, and a machine that had a loudspeaker last
+week and has none today is indistinguishable from one that never had one unless
+the inactive endpoints are printed with their state.
+
+The only thing on this machine that makes sound is a headset earcup. DR-23 got
+its acoustic round trip out of this same pair of devices and said how: *with
+the earcup held against the microphone*, by hand. An earcup that nobody is
+holding is not a room, and the onboard analog jack — which DR-23 also measured
+through, at 84.7 ms — now reports `not present`, so the speaker that was in it
+on 2026-08-22 has been unplugged since.
+
+**The first metric was wrong, and it said yes.** The obvious measurement is the
+tone's bin in the canceller-off segment against the same bin with the
+loudspeaker silent. On its first run that reported
+
+```
+COUPLING=17.2 dB over the silent room
+```
+
+and there was no coupling. The room got louder between the two segments — its
+median level went 121.0 → 453.3 — and a bin that rises with everything else
+rose with it. Fifteen seconds is long enough for a room to change, and the gain
+controller, which sits after both switches and is not one of them, moves the
+rest. **Reading the tone against its own neighbours in the same 200 ms** —
+960 Hz and 1 500 Hz, out of the same window — cannot be fooled that way: a
+chair or a gain change lifts all three bins together and the ratio does not
+move. The same run measured that way is 0.4 dB. Both columns are printed, the
+absolute one because it is what `bin/listener --tone` reports and the one
+comparable between machines; only the self-normalising one decides anything.
+
+**Two independent readings agree**, which is why this is recorded as a fact
+about the room rather than as a drill that needs more work. The drill's own
+per-window standout says 2.0 dB, and a whole-file spectrum of the recordings
+computed outside this repository puts the room's energy at 200–450 Hz and finds
+the 1 200 Hz bin *below* its neighbours in the very segment where the tone was
+playing.
+
+**The windows are 200 ms because the room is loud.** A tone adds to itself
+across consecutive frames and a room does not, so ten frames read as one window
+buy about ten decibels over reading one — the difference between seeing a quiet
+echo and reporting an empty room. The ceiling is the two device clocks: both
+nominally 48 kHz, not the same crystal, and once their drift reaches half a
+cycle the window stops adding up. At 200 ms and a hundred parts per million
+that is a fortieth of a cycle. `tone::bin_energy` takes a slice rather than a
+`Frame` for this, and a test pins the ten-decibel gain.
+
+**Consequences.** §7.6 stays open and stays release-blocking (prd.md §3 F4).
+What it needs is no longer "a person in a room" but one specific thing: a
+loudspeaker the fifine can hear — an earcup laid against it, a speaker back in
+the analog jack, or headphones in the fifine's *own* jack, which Windows
+carries as the disabled `Speakers (fifine Microphone)` and which would put a
+transducer a centimetre from the capsule — after which the whole row is one
+command. Task 4.7's other
+half is closer than that: `--record` writes a WAV per segment **even when the
+run refuses a verdict**, so `quiet.wav` against `suppressed.wav` is a listening
+test that can be done today. The level cannot answer it — `NOISE_SUPPRESSED`
+came out at −1.3, 0.1 and −0.4 dB across three runs of the same room, which is
+the sound of a measurement that is not measuring the thing, because the gain
+controller answers a quieter frame by turning it up.
+
+**Left unmeasured:** whether AEC3 handles a *real* delay at all. The synthetic
+test in `processing.rs` hands the reference back with no delay, which is the
+easy case for the estimator; DR-23 measured this hardware's acoustic round trip
+at 84.7 ms, which is not. Nothing here says which side of AEC3's search window
+that falls on, and nothing will until there is a loudspeaker.
