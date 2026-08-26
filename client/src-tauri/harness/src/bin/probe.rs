@@ -41,7 +41,9 @@ mod windows_probe {
             Media::{
                 Audio::{
                     eCapture, eRender, EDataFlow, IAudioClient, IAudioClient3, IMMDevice,
-                    IMMDeviceEnumerator, MMDeviceEnumerator, DEVICE_STATE_ACTIVE, WAVEFORMATEX,
+                    IMMDeviceEnumerator, MMDeviceEnumerator, DEVICE_STATE, DEVICE_STATEMASK_ALL,
+                    DEVICE_STATE_ACTIVE, DEVICE_STATE_DISABLED, DEVICE_STATE_NOTPRESENT,
+                    DEVICE_STATE_UNPLUGGED, WAVEFORMATEX,
                 },
                 MediaFoundation::{
                     IMFActivate, MFMediaType_Video, MFStartup, MFTEnumEx,
@@ -114,7 +116,58 @@ mod windows_probe {
                 Err(error) => println!("- **(unreadable)** — {error}"),
             }
         }
+        report_silent(enumerator, flow)
+    }
+
+    /// The endpoints this machine knows about and is not using.
+    ///
+    /// A list of what is *active* answers "what will the app open" and not
+    /// "what does this machine have" — and the second question is the one
+    /// DR-41 turned on. A jack with nothing in it reports `not present` rather
+    /// than disappearing, so a machine that had a loudspeaker last week and
+    /// has none today looks identical to one that never had one, unless this
+    /// is printed.
+    fn report_silent(enumerator: &IMMDeviceEnumerator, flow: EDataFlow) -> Result<()> {
+        // SAFETY: the enumerator is live and both arguments are valid.
+        let collection =
+            unsafe { enumerator.EnumAudioEndpoints(flow, DEVICE_STATE(DEVICE_STATEMASK_ALL)) }
+                .context("enumerating every endpoint")?;
+        let count = unsafe { collection.GetCount() }.context("counting endpoints")?;
+
+        let mut silent = Vec::new();
+        for index in 0..count {
+            let device = unsafe { collection.Item(index) }.context("opening an endpoint")?;
+            let state = unsafe { device.GetState() }.context("reading an endpoint's state")?;
+            if state == DEVICE_STATE_ACTIVE {
+                continue;
+            }
+            let name = friendly_name(&device).unwrap_or_else(|_| "(unnamed)".to_owned());
+            silent.push(format!("{name} — {}", state_name(state)));
+        }
+
+        if !silent.is_empty() {
+            println!();
+            println!("Present and not active:");
+            println!();
+            for line in silent {
+                println!("- {line}");
+            }
+        }
         Ok(())
+    }
+
+    /// A chain rather than a `match`: the states are associated constants of a
+    /// newtype and not patterns.
+    fn state_name(state: DEVICE_STATE) -> &'static str {
+        if state == DEVICE_STATE_DISABLED {
+            "disabled"
+        } else if state == DEVICE_STATE_NOTPRESENT {
+            "not present (nothing in the jack)"
+        } else if state == DEVICE_STATE_UNPLUGGED {
+            "unplugged"
+        } else {
+            "unknown state"
+        }
     }
 
     fn describe(device: &IMMDevice) -> Result<String> {
