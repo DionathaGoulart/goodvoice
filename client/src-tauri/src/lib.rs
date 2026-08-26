@@ -17,7 +17,7 @@ use std::{
         atomic::{self, AtomicU64},
         Arc, Mutex as StdMutex,
     },
-    time::Instant,
+    time::{Duration, Instant},
 };
 
 use serde::Serialize;
@@ -930,6 +930,68 @@ async fn dismiss_invite(state: State<'_, CurrentCall>) -> Result<(), String> {
     Ok(())
 }
 
+/// Reveals the window, called by the webview once it has painted a frame.
+///
+/// The window is built hidden (`tauri.conf.json`) and this is what shows it.
+/// Task 4.6 destroys the window and its webview on the way to the tray and
+/// builds a new one on the way back, and a new `WebView2` paints white for
+/// **394 ms** before the page reaches the screen — measured frame by frame in
+/// `docs/testing/tray-flicker.ps1`, and on a dark palette that is a full-window
+/// white flash on every trip back from the tray. DR-38.
+///
+/// Cheap to get wrong in one direction only: a window that is never shown is
+/// an app nobody can reach. [`reveal_after_grace`] is the other half.
+#[tauri::command]
+#[allow(
+    clippy::needless_pass_by_value,
+    reason = "a command argument is handed over by value; `&Window` is not a `CommandArg`"
+)]
+fn window_painted(window: tauri::Window) {
+    reveal(&window, "the webview");
+}
+
+/// How long the window waits to be told it has painted before showing itself
+/// anyway.
+///
+/// Long enough that the webview wins the race on this machine by a factor of
+/// three, short enough that a broken one costs a person a second rather than
+/// a window that never comes.
+const REVEAL_GRACE: Duration = Duration::from_millis(1500);
+
+/// Shows a window that was built hidden, once, whoever asks.
+///
+/// `is_visible` is the interlock rather than a flag of our own: `show` on a
+/// window already on screen is harmless, but `set_focus` is not — the fallback
+/// firing late would snatch focus back from whatever the person had moved on
+/// to.
+fn reveal(window: &tauri::Window, who: &str) {
+    if window.is_visible().unwrap_or(false) {
+        return;
+    }
+    if let Err(error) = window.show() {
+        eprintln!("the window could not be shown by {who}: {error}");
+        return;
+    }
+    let _ = window.set_focus();
+}
+
+/// Shows the window after [`REVEAL_GRACE`] whatever the webview does.
+///
+/// The window is hidden until it has something to show, and everything that
+/// could keep that promise from being kept lives outside this crate: a webview
+/// that fails to load, a bundle missing its assets, a `WebView2` runtime that is
+/// not there. None of them may cost a person their window.
+fn reveal_after_grace(window: &tauri::Window) {
+    let window = window.clone();
+    tauri::async_runtime::spawn(async move {
+        tokio::time::sleep(REVEAL_GRACE).await;
+        if !window.is_visible().unwrap_or(false) {
+            eprintln!("the webview never said it had painted; showing the window anyway");
+            reveal(&window, "the grace timer");
+        }
+    });
+}
+
 /// Joins the room named in [`AUTOJOIN_ENV`], if there is one.
 ///
 /// Deliberately not waiting for the webview: the microphone, the transport and
@@ -1211,6 +1273,13 @@ pub fn run() {
                 eprintln!("no tray icon: {error}; the window will close rather than hide");
             }
 
+            // The window this build declares is hidden until it has painted
+            // (DR-38); this is what shows it if the webview never says so.
+            // `tray::open` arms the same timer on every window it rebuilds.
+            if let Some(window) = app.get_webview_window("main") {
+                reveal_after_grace(&window.as_ref().window());
+            }
+
             let controls = app.state::<CurrentCall>().controls.subscribe();
             tauri::async_runtime::spawn(push_controls(app.handle().clone(), controls));
 
@@ -1262,6 +1331,7 @@ pub fn run() {
             invite_link,
             current_status,
             dismiss_invite,
+            window_painted,
             join_room,
             leave_room,
             set_muted,

@@ -131,8 +131,7 @@ function Show-TrayIcon([string] $name) {
 # icon, and open the chevron if it is not there" clicks the icon twice whenever
 # it *is* there — and two Opens in a row is a different test than the one this
 # is trying to run.
-function Invoke-TrayButton([string] $name) {
-  $button = Find-TrayButton $name
+function Invoke-TrayElement($button) {
   if (-not $button) { return $false }
   $pat = $null
   if (-not $button.TryGetCurrentPattern([System.Windows.Automation.InvokePattern]::Pattern, [ref] $pat)) {
@@ -140,6 +139,10 @@ function Invoke-TrayButton([string] $name) {
   }
   $pat.Invoke()
   return $true
+}
+
+function Invoke-TrayButton([string] $name) {
+  return Invoke-TrayElement (Find-TrayButton $name)
 }
 
 # The last item of the right-click menu — which is Quit goodvoice, and the only
@@ -154,10 +157,21 @@ function Invoke-TrayButton([string] $name) {
 # highlights the last item, and Return picks it.
 function Invoke-TrayMenuLast([string] $icon) {
   $button = Show-TrayIcon $icon
-  if (-not $button) { return $false }
+  # Which half failed, because "the tray could not quit the app" and "the
+  # script could not find the tray icon" are different findings and this used
+  # to report them as the same `False`.
+  if (-not $button) { $script:quitStep = 'no-icon'; return $false }
   $rect = $button.Current.BoundingRectangle
 
-  [Gv.Tray]::SetCursorPos([int]($rect.X + $rect.Width / 2), [int]($rect.Y + $rect.Height / 2)) | Out-Null
+  # **`SetCursorPos` returns false while somebody is at the machine.** Windows
+  # refuses injected pointer movement to a process that is not the one being
+  # interacted with, and every step after this then fails for a reason that
+  # looks like the tray menu being broken. It is the drill being run at the
+  # wrong moment; leave the desktop alone and run it again.
+  if (-not [Gv.Tray]::SetCursorPos([int]($rect.X + $rect.Width / 2), [int]($rect.Y + $rect.Height / 2))) {
+    $script:quitStep = 'no-pointer (the desktop is in use)'
+    return $false
+  }
   Start-Sleep -Milliseconds 300
   [Gv.Tray]::mouse_event(0x0008, 0, 0, 0, [UIntPtr]::Zero)   # RIGHTDOWN
   [Gv.Tray]::mouse_event(0x0010, 0, 0, 0, [UIntPtr]::Zero)   # RIGHTUP
@@ -165,7 +179,7 @@ function Invoke-TrayMenuLast([string] $icon) {
 
   $menu = $uiaRoot.FindAll([System.Windows.Automation.TreeScope]::Children, $uiaAny) |
     Where-Object { $_.Current.ClassName -eq '#32768' }
-  if (-not $menu) { return $false }
+  if (-not $menu) { $script:quitStep = 'no-menu'; return $false }
 
   [Gv.Tray]::keybd_event(0x26, 0, 0, [UIntPtr]::Zero)        # VK_UP down
   [Gv.Tray]::keybd_event(0x26, 0, 2, [UIntPtr]::Zero)        # VK_UP up
@@ -221,15 +235,33 @@ try {
     Check "PROCESSES_IN_TRAY_$cycle" ($away.Count -eq 1) $away.Count
     Check "TREE_MB_IN_TRAY_$cycle" ($away.MB -le 120) $away.MB
 
+    # The icon is found before the clock starts, and the click is on the
+    # element already in hand rather than a second search for it.
+    #
+    # **What is left inside the clock is still mostly Windows.**
+    # `InvokePattern.Invoke()` on a notification-area icon does not return for
+    # about **two seconds** on this desktop — measured, and the window already
+    # exists by the time it does. So the two numbers below are upper bounds
+    # that include the instrument. The rebuild's own figure is
+    # `tray-flicker.ps1`'s `GEOM_VISIBLE_AT_MS`, which clicks with a real mouse
+    # and is **427 ms** (DR-38). A real mouse is not used here because
+    # `SetCursorPos` is refused outright while somebody is at the machine, and
+    # this drill has to be runnable then.
     $icon = Show-TrayIcon 'goodvoice'
     $clock = [Diagnostics.Stopwatch]::StartNew()
-    $clicked = $null -ne $icon -and (Invoke-TrayButton 'goodvoice')
+    $clicked = Invoke-TrayElement $icon
     Check "TRAY_CLICKED_$cycle" $clicked $clicked
     $back = [IntPtr]::Zero
-    for ($i = 0; $i -lt 60 -and $back -eq [IntPtr]::Zero; $i++) { Start-Sleep -Milliseconds 100; $back = Find-Window $p.Id }
+    for ($i = 0; $i -lt 200 -and $back -eq [IntPtr]::Zero; $i++) { $back = Find-Window $p.Id }
+    $handleMs = $clock.ElapsedMilliseconds
+    # Until *visible*, not until a handle exists. Since DR-38 the window is
+    # built hidden and shows itself once the webview has painted, so a handle
+    # exists within milliseconds of the click and means nothing to a person.
+    for ($i = 0; $i -lt 300 -and -not [Gv.Tray]::IsWindowVisible($back); $i++) { Start-Sleep -Milliseconds 10 }
     $clock.Stop()
     Check "WINDOW_AFTER_TRAY_$cycle" ($back -ne [IntPtr]::Zero) ($back -ne [IntPtr]::Zero)
-    Check "REBUILT_IN_MS_$cycle" ($clock.ElapsedMilliseconds -lt 3000) $clock.ElapsedMilliseconds
+    Check "HANDLE_IN_MS_$cycle" ($handleMs -lt 4000) $handleMs
+    Check "REBUILT_IN_MS_$cycle" ($clock.ElapsedMilliseconds -lt 5000) $clock.ElapsedMilliseconds
     Start-Sleep -Seconds 3
     Check "VISIBLE_AFTER_TRAY_$cycle" ([Gv.Tray]::IsWindowVisible($back)) ([Gv.Tray]::IsWindowVisible($back))
   }
@@ -244,8 +276,9 @@ try {
   # through.
   [Gv.Tray]::PostMessage($back, 0x0010, [IntPtr]::Zero, [IntPtr]::Zero) | Out-Null
   Start-Sleep -Seconds 4
+  $script:quitStep = 'ok'
   $quit = Invoke-TrayMenuLast 'goodvoice'
-  Check 'QUIT_CLICKED' $quit $quit
+  Check 'QUIT_CLICKED' $quit ("{0} ({1})" -f $quit, $script:quitStep)
   for ($i = 0; $i -lt 60 -and -not $p.HasExited; $i++) { Start-Sleep -Milliseconds 250; $p.Refresh() }
   Check 'QUIT_ENDED_IT' $p.HasExited $p.HasExited
 }

@@ -5,7 +5,8 @@ not even *there*: closing or minimising destroys the window and its webview,
 and the tray icon builds a new one on the way back. The call carries on
 throughout — audio lives in Rust and never depended on a webview existing.
 
-`tray-roundtrip.ps1` checks that in about a minute.
+`tray-roundtrip.ps1` checks that in about a minute, and `tray-flicker.ps1`
+checks what it looks like while it happens.
 
 | | scripted | by hand |
 |---|---|---|
@@ -15,7 +16,8 @@ throughout — audio lives in Rust and never depended on a webview existing.
 | The new window comes back showing the call | ✅ *(screenshot)* | |
 | Nothing accumulates over repeated round trips | ✅ `-Cycles 12` | |
 | The tray can still quit an app with no window | ✅ | |
-| The icon is where a person can find it, and no flicker | | ✅ |
+| It does not flicker on the way back | ✅ `tray-flicker.ps1` | |
+| The icon is where a person can find it | | ✅ |
 
 ## Running it
 
@@ -43,8 +45,9 @@ PROCESSES_IN_TRAY_1=1        ...and WebView2 went with it
 TREE_MB_IN_TRAY_1=33.7       which is the 120 MB budget, met with room (task 4.6)
 TRAY_CLICKED_1=True          the notification-area icon was found and invoked
 WINDOW_AFTER_TRAY_1=True     a new window exists
-REBUILT_IN_MS_1=146          what "coming back is instant" costs now
-VISIBLE_AFTER_TRAY_1=True    and it is on screen
+HANDLE_IN_MS_1=2025          a window handle exists...
+REBUILT_IN_MS_1=2434         ...and it is on screen. Both include the instrument
+VISIBLE_AFTER_TRAY_1=True    still there three seconds later
    ... the same again for cycles 2 and 3 ...
 TREE_MB_BACK=338.6           back to a normal window's cost
 QUIT_CLICKED=True            right-click → the last menu item
@@ -52,6 +55,16 @@ QUIT_ENDED_IT=True           ...and the process ended, which is the whole trap
 LEFTOVER=0                   nothing was left running
 RESULT=PASS
 ```
+
+**Neither of those two milliseconds figures is the rebuild.** The stopwatch
+goes round `InvokePattern.Invoke()` on the notification-area icon, and that
+call does not return for about **two seconds** on this desktop — the window is
+already back when it does. They are upper bounds that include the instrument,
+kept because a wild one still means something went wrong. Their *difference*,
+~400 ms, is real, and it is the handle existing versus somebody seeing the
+window: since DR-38 the window is built hidden and shows itself once the
+webview has painted. The rebuild's own figure is `tray-flicker.ps1`'s
+`GEOM_VISIBLE_AT_MS`, which clicks with a real mouse and reads **427 ms**.
 
 `SHOT_BEFORE` and `SHOT_AFTER` name two PNGs. **Open `after.png`** — it is the
 only check no assertion here can make: the rebuilt window has to show the room
@@ -117,6 +130,77 @@ other button" — and then the keyboard, because the popup it opens is a
 all**. The items are on the screen and not in the tree, so there is nothing to
 `Invoke`. Up with nothing selected highlights the last item, which is Quit.
 
+And two more, both learned by chasing the app for something Windows was doing:
+
+- **`Invoke` does not come back.** On this icon `InvokePattern.Invoke()` holds
+  for **2008 ms**, measured, while the shell finishes with it — and the window
+  is already rebuilt when it returns. Nothing is wrong; it is just not
+  something to put a stopwatch around. `tray-flicker.ps1` uses a real mouse for
+  that reason, and `tray-roundtrip.ps1` labels its two figures as bounds.
+- **`SetCursorPos` returns false while somebody is at the machine.** Windows
+  refuses injected pointer movement then, so every step that needs a real mouse
+  fails — and it fails looking exactly like a tray menu that does not work.
+  Two runs blamed the app before the return value was checked. It is checked
+  now: `QUIT_CLICKED=False (no-pointer (the desktop is in use))`. Leave the
+  desktop alone and run it again.
+
+## Watching the rebuild, frame by frame
+
+`tray-flicker.ps1` answers plan.md §7.3, the one row here no counter could
+reach: **does the window flash on the way back?** It did — 394 ms of flat
+white — and since DR-38 it does not.
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File docs	esting	ray-flicker.ps1
+powershell -NoProfile -ExecutionPolicy Bypass -File docs	esting	ray-flicker.ps1 -Cycles 5
+```
+
+It clicks the tray icon and photographs the region the window arrives in at
+about **140 frames a second**, against a screen that changes 60 times a second,
+so anything a person could have seen is in at least two frames. That rate is
+why the capture loop is C# and not PowerShell: a rebuild is ~400 ms, and
+PowerShell's per-iteration cost spends the chances. `FRAME_RATE` is printed
+first for exactly that reason — below 60 the rest of the run is inadmissible.
+
+Each frame is scored over the window's own area, inset by twelve so the drop
+shadow and the invisible resize border are nobody's evidence:
+
+```
+DESKTOP_FRAMES_1=56       frames that match the bare desktop
+SETTLED_FRAMES_1=226      frames that match the window as it ends up
+BETWEEN_FRAMES_1=0        frames that are neither — the interesting ones
+FLAT_FILL_FRAMES_1=0      ...of which these are a solid colour, i.e. a flash
+MONOTONIC_1=last_desktop=55 first_settled=56
+```
+
+`BETWEEN_FRAMES=0` is the answer: the window goes from not-there to finished in
+one frame. Before DR-38 it was 55 frames, every one of them luma 248 with 3% of
+its pixels differing from that — a white rectangle — for 394 ms.
+
+`GEOM_VISIBLE_AT_MS` from the first pass is the honest "how long until the
+window is back" figure: **427 ms**, clicked with a real mouse, from a run that
+also confirms the window does not resize or move after somebody could see it.
+
+`FILMSTRIP_n` names a PNG of the transition, frame by frame with the
+millisecond on each. It stays in `%TEMP%` rather than in the repo: it is a
+photograph of the desktop the drill ran on, and whatever else was on it.
+
+### The window walks
+
+`WALK` prints the position of every window the run was given:
+
+```
+WALK=104,104 -> 208,208 -> 52,52 -> 130,130
+```
+
+**It is a different place every time.** `tauri.conf.json` gives the window a
+size and no position, so Windows picks one and cascades from the last. A person
+who puts goodvoice where they want it and closes it to the tray does not get it
+back there. Nobody had noticed because no drill had compared two rebuilds'
+rectangles. plan.md §7.12 owns it; it is also why this drill cannot be pointed
+at a fixed region and instead waits for the handle to exist — a few
+milliseconds, long before the first paint — and reads the rectangle off it.
+
 ## By hand, the part no script can sign off
 
 Build and run it, then:
@@ -125,11 +209,15 @@ Build and run it, then:
    chevron by default — drag it out before deciding it is missing.
 2. **Close the window.** It vanishes; the icon stays. Task Manager's memory
    column for goodvoice drops by about 300 MB within a second or two.
-3. **Left-click the icon.** The window comes back, focused, showing the room it
-   was in. It is a *new* window — same size and title, scrolled to the top,
-   whatever you had typed in the join form gone. That is the trade task 4.6
-   made: an eighth of a second and a fresh window, for 327 MB.
-4. **Watch for flicker.** The rebuild paints once, at its final size.
+3. **Left-click the icon.** Nothing happens for about four tenths of a second,
+   and then the window is there, focused, complete, showing the room it was in.
+   It is a *new* window — same size and title, scrolled to the top, whatever you
+   had typed in the join form gone, and **not where you left it** (see *the
+   window walks* above). That is the trade task 4.6 made: 427 ms and a fresh
+   window, for 327 MB.
+4. **Watch for flicker.** There is none, and `tray-flicker.ps1` above is the
+   reason to believe that rather than this paragraph. There was: 394 ms of
+   white, on every trip back, until DR-38.
 5. **With a call running**, close the window and keep talking. Audio does not
    pause, and the roster is still right when the window comes back.
 6. **Right-click → Quit goodvoice.** The process ends *and* the room stops

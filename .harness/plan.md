@@ -21,26 +21,33 @@
 
 ## Start here
 
-**Where this stopped:** 2026-08-25, with §6.2, §7.1 and §7.4 closed. Phases 0–5
-are closed, and so are §6.1, §6.2, §7.1 and §7.4. What is open is §6.3, §6.4
-and the rest of Phase 7 — and **Phase 7 opens with the order to do all of it
-in**, whose rows 1, 2 and 5 are now done. Nothing else in this file needs
-reading first.
+**Where this stopped:** 2026-08-25, with §6.2, §7.1, §7.3 and §7.4 closed.
+Phases 0–5 are closed, and so are §6.1, §6.2, §7.1, §7.3 and §7.4. What is open
+is §6.3, §6.4 and the rest of Phase 7 — and **Phase 7 opens with the order to
+do all of it in**, whose rows 1, 2, 4 and 5 are now done. Nothing else in this
+file needs reading first.
 
 ### The next three things, in this order
 
-1. **Phase 7 rows 3, 4, 6 and 7 — the four checklists a person has to walk**
-   (§7.2 the tray menu, §7.3 the rebuilt window's flicker, §7.5 the talk key
-   over a fullscreen game, §7.6 a room hearing itself). None of them can be run
-   from a terminal — they need eyes, ears, a game and a second person — and all
-   four block the release. §7.3 is two minutes and is the place to start;
-   `docs/testing/share-picker-shot.ps1` is the pattern for driving this window
-   from a script if any of the rest turn out to be automatable after all.
+1. **Phase 7 rows 3, 6 and 7 — the three checklists a person has to walk**
+   (§7.2 the tray menu, §7.5 the talk key over a fullscreen game, §7.6 a room
+   hearing itself). They need eyes, ears, a game and a second person, and all
+   three block the release. §7.3 was the fourth and turned out to be
+   automatable after all — `docs/testing/tray-flicker.ps1` and DR-38 are what
+   that looked like, and `docs/testing/share-picker-shot.ps1` is the other
+   pattern for driving this window from a script. Try §7.2 that way before
+   walking it: everything in its table except the right-click menu is reachable
+   from UI Automation.
+   **The desktop has to be idle.** Windows returns false from `SetCursorPos`
+   while somebody is at the machine, and every drill that clicks — the tray
+   menu, the share picker — then fails for a reason that looks like the app.
 2. **§6.3 — the clean-VM install**, which needs a second Windows machine that
    has never had the toolchain on it. The bundle is built and installs here;
    what is unproven is that it carries everything a machine without MSVC needs.
+   **Rebuild the bundle first:** DR-38 changed the window and the frontend, and
+   the installed app on this machine is older than both.
 3. **§6.4 — the README, the tag, the release.** It prints the measured numbers,
-   §7.1's ≤ 6% among them, and it has to say which of rows 10–14 were never
+   §7.1's ≤ 6% among them, and it has to say which of rows 10–15 were never
    run rather than let a reader assume all of them were.
 
 ### What this machine needs
@@ -64,7 +71,7 @@ reading first.
 . $env:USERPROFILE\gv\env.ps1     # leaves you in client\src-tauri
 cargo fmt --all --check
 cargo clippy --workspace --all-targets -- -D warnings
-cargo test --workspace              # 163 tests
+cargo test --workspace              # 170 tests
 cd ..;         npm run format:check; npm run typecheck
 cd ..\server;  npm run format:check; npm run typecheck; npm test   # 85 tests
 ```
@@ -979,7 +986,7 @@ knew about itself. The checkbox is here.
 | ~~1~~ | ~~§6.2 invite links — the silent failure, and a drill that passes twice~~ — done 2026-08-25, DR-37 | this machine | — |
 | ~~2~~ | ~~§7.1 decide DR-35: what a screen share costs a game~~ — decided 2026-08-25, the budget moved to ≤ 6% | a decision | — |
 | 3 | §7.2 the tray menu checklist | a person, ten minutes | **yes** |
-| 4 | §7.3 the rebuilt window's flicker | a person, two minutes | **yes** |
+| ~~4~~ | ~~§7.3 the rebuilt window's flicker~~ — measured and fixed 2026-08-25, DR-38 | a drill, after all | — |
 | ~~5~~ | ~~§7.4 the share picker under the `retro` skin~~ — shot and looked at 2026-08-25 | a person, two minutes | — |
 | 6 | §7.5 the talk key over a fullscreen game | a person and a game | **yes** — prd.md §3 F2 |
 | 7 | §7.6 a room hearing itself on loudspeakers | a person in a room | **yes** — prd.md §3 F4 |
@@ -990,8 +997,9 @@ knew about itself. The checkbox is here.
 | 12 | §7.9 does Cloudflare stop sending video to a closed viewer | an instrument, then code | no |
 | 13 | §7.10 keyframe on demand, by PLI | code | no |
 | 14 | §7.11 the self-hosting walkthrough on a fresh account | a Cloudflare account nobody here has | no |
+| 15 | §7.12 the rebuilt window comes back somewhere else | code | no |
 
-Rows 10–14 do not block the release **as long as the README says so**: a
+Rows 10–15 do not block the release **as long as the README says so**: a
 measured number nobody has taken is not a promise, and 6.4 has to say which of
 these were never run rather than let a reader assume all of them were.
 
@@ -1019,11 +1027,32 @@ these were never run rather than let a reader assume all of them were.
   follow the call, leave leaves, quit quits.
   DoD: seven rows checked off in the doc, with anything surprising written down.
   Verify: manual, with `bin/listener` in the room as the second person.
-- [ ] **7.3 Does the rebuilt window flicker** — task 4.1's last row. The window
+- [x] **7.3 Does the rebuilt window flicker** — task 4.1's last row. The window
   is destroyed into the tray and built again on the way back (DR-21); whether
   that is a flash is the one thing no counter can answer.
   DoD: a yes or a no in `docs/testing/tray.md`, and a DR if it is a yes.
   Verify: `docs\testing\tray-roundtrip.ps1 -Cycles 5`, watched rather than read.
+  **Yes, and it was white — 394 ms of it. It does not any more.** DR-38.
+  It turned out not to need eyes after all: `docs/testing/tray-flicker.ps1`
+  photographs the rebuild at **141 frames a second** against a 60 Hz screen, so
+  anything a person could have seen is in at least two frames, and scores each
+  one on whether it is the bare desktop, the finished window, or neither. The
+  answer was fifty-five consecutive frames of *neither* — a flat white
+  rectangle, luma 248 against a settled window's 33 — and then the whole app in
+  one frame. WebView2's own background, before the document exists.
+  The window is built hidden now and shows itself once it has painted, with a
+  1500 ms fallback in `lib.rs` because a window that never shows is an app
+  nobody can reach. Re-measured on the same build: **zero frames of neither**,
+  desktop to finished window in one frame, twice over, and the webview beat the
+  fallback by a factor of three. `bin/coldstart` unchanged at 2681 ms median of
+  five (2692 ms recorded, 3000 ms budget), 170 tests, all gates clean.
+  Two things about the *old* drill this found, both in DR-38: its
+  `REBUILT_IN_MS=146` was timing `InvokePattern.Invoke()`, which does not return
+  for 2008 ms on this desktop, and its `QUIT_CLICKED=False` was `SetCursorPos`
+  being refused because somebody was at the machine. Both now say so.
+  **A finding left open: the window walks.** It comes back somewhere else every
+  time — `104,104 → 208,208 → 52,52 → 130,130` — because the config names no
+  position and Windows cascades. **§7.12** owns it.
 - [x] **7.4 The share picker under `retro`** — task 5.3 shipped two screenshots
   and both are `terminal`. The picker's CSS is the shared base plus a
   `terminal` block, so `retro` is the unmodified base and has never been looked
@@ -1105,6 +1134,17 @@ these were never run rather than let a reader assume all of them were.
   DoD: somebody who has never deployed this reaches a working room using only
   that document; whatever tripped them up is fixed in it.
   Verify: a clean account, and a second pair of eyes.
+- [ ] **7.12 The rebuilt window comes back somewhere else** — DR-38's other
+  finding. `tauri.conf.json` gives the window a size and no position, so every
+  window Windows makes for this process is cascaded from the last one: four
+  rebuilds in one run landed at `104,104`, `208,208`, `52,52` and `130,130`. A
+  person who puts goodvoice where they want it and closes it to the tray does
+  not get it back there, and over a session it walks down the screen. Nobody
+  had noticed because no drill compared two rebuilds' rectangles.
+  DoD: the window comes back where it was left, across a close-and-reopen and
+  across a restart; `tray-flicker.ps1`'s `WALK` line repeats one position.
+  Verify: `docs\testing\tray-flicker.ps1 -Cycles 3`, whose `WALK` is exactly
+  this measurement.
 
 ---
 
@@ -3604,3 +3644,128 @@ its own window now, which is where a person reads it anyway.
 **Measurements.** `docs\testing\invite.ps1` against the installed
 `goodvoice_0.1.0_x64-setup.exe`: **PASS three times consecutively**, with the
 room heard by `bin/listener` at up to 51 frames a second on each run.
+
+### DR-38: the window came back white, for a quarter of a second (2026-08-25)
+
+**Context.** Task 7.3, and the last row of `docs/testing/tray.md`: does the
+rebuilt window flicker? Task 4.6 destroys the window and its webview on the way
+to the tray and builds a new one on the way back (DR-21), and every counter in
+`tray-roundtrip.ps1` says that goes well — the handle is gone, the tree drops
+to 34 MB, a new window exists, it is visible, it shows the call. None of them
+can see a flash, because a flash is a thing about pixels over milliseconds and
+the drill's finest instrument is a screenshot taken a second afterwards.
+
+**The instrument.** `docs/testing/tray-flicker.ps1`. It clicks the tray icon
+and photographs the region the window arrives in at **141 frames a second**,
+against a screen that changes 60 times a second — so anything a person could
+have seen is in at least two frames. The capture loop is C# rather than
+PowerShell for exactly that reason: a rebuild is ~400 ms and PowerShell's
+per-iteration cost spends the chances. Each frame is scored on three numbers
+over the window's own area: its mean luma, how much of it differs from that
+mean (a flat fill scores ~0, a painted window scores high), and its distance
+from the bare desktop and from the window as it ends up.
+
+Where to point it was the awkward part, and the answer is a finding of its own
+— see *the walk* below.
+
+**The finding: yes, and it is white.** Measured on the release build with
+`custom-protocol`, in a room, on a dark palette:
+
+```
+i=0    7.3 ms   luma 23.0  busy 0.154   the desktop; the handle exists, nothing on screen
+i=2   32.5 ms   luma 248.1 busy 0.031   white
+ ...            luma 248.1 busy 0.031   ...fifty-three more frames of exactly this
+i=56 427.1 ms   luma 248.1 busy 0.031   white
+i=57 434.6 ms   luma 33.3  busy 0.070   the finished window, in one frame
+```
+
+**394 ms of a flat white rectangle**, then the whole app at once. Twenty-four
+screen refreshes. `busy 0.031` is what says *flat*: 3% of the window's pixels
+differ from its own mean, which is the border and nothing else. It is not a
+half-drawn page — the page never partly draws, it arrives complete — it is
+WebView2's own background, before the document exists. The settled window is
+luma 33 and the desktop behind is luma 23, so the flash is brighter than
+anything on either side of it, which is why it reads as a flash rather than as
+a window opening.
+
+**Three ways out, and why the third.**
+
+1. **`backgroundColor` in the window config.** One line, and wrong: goodvoice
+   ships ten palettes, four light and six dark, chosen at runtime and stored in
+   the webview. A static colour turns a white flash into a wrong-coloured flash
+   for everyone not on the default.
+2. **Persist the palette's `--bg` and hand it to the builder.** Right colour,
+   always, but the window is still a solid rectangle for 394 ms. Better, and it
+   costs a stored value that can go stale against the CSS.
+3. **Do not show the window until it has painted.** Nothing to flash. Costs a
+   fallback, because a window that is never shown is an app nobody can reach.
+
+**Decision: the third.** The window is declared `"visible": false`; `main.tsx`
+calls a `window_painted` command after two `requestAnimationFrame` ticks — two,
+because a rAF callback runs *before* the paint it was queued for — and
+`lib.rs`'s `reveal` shows it and focuses it. `tray::open` no longer asks for
+focus itself; focus arrives with the window, rather than 400 ms before there is
+anything in it.
+
+The fallback is `reveal_after_grace`: 1500 ms after the window is built, if it
+is still hidden, show it anyway and say so on stderr. Everything that could
+break the promise lives outside this crate — a webview that fails to load, a
+bundle missing its assets, a WebView2 runtime that is not installed — and none
+of them may cost a person their window. `is_visible` is the interlock rather
+than a flag of ours: `show` twice is harmless, but a late `set_focus` snatching
+focus back from whatever somebody has moved on to is not.
+
+A command rather than `getCurrentWindow().show()` on purpose: this crate's own
+commands reach `invoke` without a permission, so nothing is added to
+`capabilities/default.json` — and DR-22 is the reason to care, where every
+`listen` was silently refused by an ACL nobody had written.
+
+**Measured after, same drill, same build flags:**
+
+```
+BETWEEN_FRAMES=0        no frame is neither the desktop nor the finished window
+FLAT_FILL_FRAMES=0
+i=55 411.0 ms  luma 22.1  the desktop
+i=56 421.7 ms  luma 33.3  the finished window
+GEOM_VISIBLE_AT_MS=427  and the webview did it, not the grace timer
+```
+
+Desktop to finished window in **one frame**, twice over. The window is now
+visible at 427 ms instead of 20 ms, which is the trade: nothing happens for
+four tenths of a second after the click, and then the window is there and
+complete. `HANDLE_AT_MS` is unchanged at ~6 ms — the handle was never what
+anybody was waiting for.
+
+Nothing else moved. `bin/coldstart`: **2681 ms median of five, all five heard**,
+against 2692 ms recorded in task 4.4 and a 3000 ms budget — the window was
+never on the audio path (DR-19 measured it up at 320 ms and idle). 170 tests,
+clippy and both format gates clean. `tray-roundtrip.ps1` still reports the
+window destroyed, 35 MB in the tray, a new window, visible, showing the room.
+
+**The walk.** The rebuilt window does not come back where it was. The config
+names no position, so Windows names one, and it is a different one every time:
+`104,104 → 208,208 → 52,52 → 130,130` over four rebuilds in one run, and
+`130,130 → 234,234 → 78,78 → 156,156` in another. It is Windows' cascade, it is
+not new, and nobody had noticed because no drill had ever compared two
+rebuilds' rectangles. It is why `tray-flicker.ps1` cannot be pointed at a fixed
+region and instead waits for the handle — a few milliseconds, long before the
+first paint — reads the rectangle off it and starts there. Left as a finding
+rather than fixed: **§7.12**.
+
+**Two things about the old drill this cost.** `tray-roundtrip.ps1`'s
+`REBUILT_IN_MS=146` was never the rebuild. The stopwatch was wrapped around
+`InvokePattern.Invoke()` on the notification-area icon, and that call does not
+return for **2008 ms** on this desktop — measured directly, with the window
+already back before it returns. The number is now printed as two, `HANDLE_IN_MS`
+and `REBUILT_IN_MS` (to *visible*, which is what DR-38 makes the meaningful
+one), both labelled as upper bounds that include the instrument; their
+**difference**, ~400 ms, is the real figure and agrees with `tray-flicker`'s
+427 ms.
+
+And `QUIT_CLICKED=False` for two runs, with the app blamed twice, was
+`SetCursorPos` **returning false**: Windows refuses injected pointer movement
+while somebody is at the machine, and the right-click menu is the one step that
+needs a real mouse (UI Automation has no "invoke with the other button", and
+the popup is a `#32768` pane with no children — `tray.md`). The drill now says
+`QUIT_CLICKED=False (no-pointer (the desktop is in use))` and the answer is to
+leave the desktop alone and run it again, which is also what §7.2 needs.

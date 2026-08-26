@@ -223,9 +223,13 @@ fn open(app: &AppHandle) -> Result<(), tauri::Error> {
         eprintln!("no window is declared in the app config; nothing to open");
         return Ok(());
     };
-    WebviewWindowBuilder::from_config(app, &config)?
-        .build()?
-        .set_focus()
+    let built = WebviewWindowBuilder::from_config(app, &config)?.build()?;
+    // No `set_focus` here: the window is built hidden and shows itself once
+    // the webview has painted (DR-38), and focus comes with that. Asking for
+    // it now would put an empty window in front of whatever the person is
+    // doing, ~400 ms before there is anything in it.
+    crate::reveal_after_grace(&built.as_ref().window());
+    Ok(())
 }
 
 /// Leaves the room and ends the process.
