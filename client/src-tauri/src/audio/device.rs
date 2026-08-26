@@ -77,7 +77,9 @@ impl ToneSource {
     pub fn new(frequency_hz: f32) -> Self {
         Self {
             frequency_hz,
-            amplitude: 8_000.0,
+            // From `tone`, because the harnesses that measure what came back
+            // of this build their reference frame from the same constant.
+            amplitude: super::tone::AMPLITUDE,
             phase: 0.0,
             ticker: tokio::time::interval(Duration::from_millis(u64::from(FRAME_MS))),
         }

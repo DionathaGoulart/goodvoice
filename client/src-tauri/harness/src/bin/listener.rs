@@ -47,7 +47,6 @@
 
 use std::{
     env,
-    f32::consts::TAU,
     sync::Arc,
     time::{Duration, Instant},
 };
@@ -57,8 +56,9 @@ use goodvoice_client_lib::{
     audio::{
         device::{AudioSink, RecordingSink, ToneSource},
         mixer::peak,
-        opus::{Frame, FRAME_SAMPLES, SAMPLE_RATE_HZ},
+        opus::Frame,
         prefs::AudioPrefs,
+        tone::{bin_energy, db_below, frame as tone_frame, DEFAULT_HZ},
         vad::TransmitMode,
     },
     rtc::{
@@ -69,14 +69,6 @@ use goodvoice_client_lib::{
 
 const DEFAULT_BASE: &str = "https://goodvoice.goodvoice-server.workers.dev";
 const DEFAULT_ROOM: &str = "goodvoice";
-
-/// A frequency far from anything a voice puts energy into, so the echo column
-/// measures the loudspeaker and not the person in front of it.
-const DEFAULT_TONE_HZ: f32 = 1_200.0;
-
-/// What [`ToneSource`] puts out, copied here because the reference frame has to
-/// be the same shape as what the room is actually being sent.
-const TONE_AMPLITUDE: f32 = 8_000.0;
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -200,44 +192,10 @@ fn column(frame: &Frame, tone: Option<f32>, reference: Option<f32>, arrived: usi
     }
 
     let returned = bin_energy(frame, hz);
-    if returned <= 0.0 {
+    let Some(db) = db_below(reference, returned) else {
         return ">60 (nothing came back)".to_owned();
-    }
-    format!("{:.1}", 10.0 * (reference / returned).log10())
-}
-
-/// One frame of the tone as [`ToneSource`] produces it, for the "as sent" half
-/// of the ratio. Its amplitude has to match, or the echo column is offset by
-/// the difference and says nothing useful.
-#[allow(
-    clippy::cast_precision_loss,
-    clippy::cast_possible_truncation,
-    reason = "8000 and 48000 are exact in f32, and the product is bounded by it"
-)]
-fn tone_frame(frequency_hz: f32) -> Frame {
-    let mut frame = [0_i16; FRAME_SAMPLES];
-    let mut phase = 0.0_f32;
-    for sample in &mut frame {
-        *sample = (phase.sin() * TONE_AMPLITUDE) as i16;
-        phase += TAU * frequency_hz / SAMPLE_RATE_HZ as f32;
-    }
-    frame
-}
-
-/// Goertzel: energy in one frequency bin, without pulling in an FFT.
-#[allow(
-    clippy::cast_precision_loss,
-    reason = "constants and sample values are exact in f32"
-)]
-fn bin_energy(frame: &Frame, frequency_hz: f32) -> f32 {
-    let coefficient = 2.0 * (TAU * frequency_hz / SAMPLE_RATE_HZ as f32).cos();
-    let (mut previous, mut previous2) = (0.0_f32, 0.0_f32);
-    for &sample in frame {
-        let current = f32::from(sample) + coefficient * previous - previous2;
-        previous2 = previous;
-        previous = current;
-    }
-    previous.mul_add(previous, previous2 * previous2) - coefficient * previous * previous2
+    };
+    format!("{db:.1}")
 }
 
 struct Args {
@@ -261,7 +219,7 @@ fn args() -> Args {
             ("--base", Some(value)) => base = value,
             ("--room", Some(value)) => room = value,
             ("--name", Some(value)) => name = value,
-            ("--tone", Some(value)) => tone = value.parse().ok().or(Some(DEFAULT_TONE_HZ)),
+            ("--tone", Some(value)) => tone = value.parse().ok().or(Some(DEFAULT_HZ)),
             ("--seconds", Some(value)) => seconds = value.parse().unwrap_or(seconds),
             (other, _) => eprintln!("ignoring unknown argument {other}"),
         }
