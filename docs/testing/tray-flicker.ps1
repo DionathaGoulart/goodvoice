@@ -12,7 +12,9 @@
 # per-iteration cost spends the ten chances a 150 ms rebuild gives you.
 #
 # What comes out is a filmstrip — every frame of a rebuild, at ~140 a second
-# against a screen that changes 60 times a second — plus the numbers that say
+# against a 144 Hz screen, so about one frame per refresh: a run that finds no
+# flash rules out one longer than about 7 ms rather than one at all. (This line
+# assumed 60 Hz; DR-40 measured the rate.) Plus the numbers that say
 # which frames are the bare desktop, which are the finished window, and which
 # are neither. A frame that is neither *and* is a flat fill is the flash. A
 # frame that is neither and is busy is a window part-way through its first

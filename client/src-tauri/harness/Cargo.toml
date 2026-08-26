@@ -27,19 +27,30 @@ tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "sync"
 async-trait = "0.1"
 
 # `bin/probe` asks WASAPI and Media Foundation what the machine offers (task
-# 0.5); `bin/soak` walks the process tree to size the idle client (4.5). Both
-# questions only have meaning on Windows.
+# 0.5); `bin/soak` walks the process tree to size the idle client (4.5);
+# `bin/fullscreen-drill` takes the display through DXGI and counts the keys
+# that still reach it (§7.5). All questions that only have meaning on Windows.
 [target.'cfg(windows)'.dependencies]
 windows = { version = "0.62", features = [
   "Win32_Foundation",
   "Win32_Devices_FunctionDiscovery",
+  # The fullscreen drill's swap chain: `SetFullscreenState` is the call that
+  # *is* "fullscreen exclusive", and it lives on IDXGISwapChain.
+  "Win32_Graphics_Direct3D",
+  "Win32_Graphics_Direct3D11",
+  "Win32_Graphics_Dxgi",
+  "Win32_Graphics_Dxgi_Common",
+  # HBRUSH, which WNDCLASSW has a field of whether or not one is set.
+  "Win32_Graphics_Gdi",
   "Win32_Media_Audio",
   "Win32_Media_MediaFoundation",
   "Win32_System_Com",
   "Win32_System_Com_StructuredStorage",
   "Win32_System_Diagnostics_ToolHelp",
+  "Win32_System_LibraryLoader",
   "Win32_System_ProcessStatus",
   "Win32_System_Threading",
   "Win32_System_Variant",
   "Win32_UI_Shell_PropertiesSystem",
+  "Win32_UI_WindowsAndMessaging",
 ] }

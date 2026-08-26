@@ -162,16 +162,18 @@ reach: **does the window flash on the way back?** It did — 394 ms of flat
 white — and since DR-38 it does not.
 
 ```powershell
-powershell -NoProfile -ExecutionPolicy Bypass -File docs	esting	ray-flicker.ps1
-powershell -NoProfile -ExecutionPolicy Bypass -File docs	esting	ray-flicker.ps1 -Cycles 5
+powershell -NoProfile -ExecutionPolicy Bypass -File docs\testing\tray-flicker.ps1
+powershell -NoProfile -ExecutionPolicy Bypass -File docs\testing\tray-flicker.ps1 -Cycles 5
 ```
 
 It clicks the tray icon and photographs the region the window arrives in at
-about **140 frames a second**, against a screen that changes 60 times a second,
-so anything a person could have seen is in at least two frames. That rate is
-why the capture loop is C# and not PowerShell: a rebuild is ~400 ms, and
-PowerShell's per-iteration cost spends the chances. `FRAME_RATE` is printed
-first for exactly that reason — below 60 the rest of the run is inadmissible.
+about **140 frames a second**, against a 144 Hz screen — so about one frame per
+refresh, and a run that finds none of a flash rules out one lasting longer than
+about 7 ms rather than one at all. (This said 60 Hz and "at least two frames";
+DR-40 measured the rate.) That is why the capture loop is C# and not
+PowerShell: a rebuild is ~400 ms, and PowerShell's per-iteration cost spends
+the chances. `FRAME_RATE` is printed first for exactly that reason — below 60
+the rest of the run is inadmissible.
 
 Each frame is scored over the window's own area, inset by twelve so the drop
 shadow and the invisible resize border are nobody's evidence:

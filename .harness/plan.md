@@ -21,28 +21,30 @@
 
 ## Start here
 
-**Where this stopped:** 2026-08-25, with §7.2 closed by a drill.
-Phases 0–5 are closed, and so are §6.1, §6.2, §7.1, §7.2, §7.3 and §7.4. What
-is open is §6.3, §6.4 and the rest of Phase 7 — and **Phase 7 opens with the
-order to do all of it in**, whose rows 1–5 are now done. Nothing else in this
-file needs reading first.
+**Where this stopped:** 2026-08-25, with §7.5 closed by a drill.
+Phases 0–5 are closed, and so are §6.1, §6.2, §7.1, §7.2, §7.3, §7.4 and §7.5.
+What is open is §6.3, §6.4 and the rest of Phase 7 — and **Phase 7 opens with
+the order to do all of it in**, whose rows 1–6 are now done. Nothing else in
+this file needs reading first.
 
 ### The next three things, in this order
 
-1. **Phase 7 rows 6 and 7 — the two checklists a person still has to walk**
-   (§7.5 the talk key over a fullscreen game, §7.6 a room hearing itself).
-   They need ears, a game and a second person, and both block the release.
-   Rows 3 and 4 looked like the same kind of thing and were not:
-   `docs/testing/tray-menu.ps1` and `tray-flicker.ps1` are what they turned
-   into. Ask of every remaining one whether an instrument can reach it before
-   scheduling a person — `tray-menu.ps1` reads a `TrackPopupMenu`'s ticks out
-   of its own `HMENU`, which `tray.md` had written off as unreadable.
+1. **Phase 7 row 7 — §7.6, a room hearing itself.** The last checklist here
+   that an instrument has not reached: the echo canceller is measured against a
+   synthetic loopback, and nobody has put a microphone and a loudspeaker in one
+   room and listened. It needs ears, and it blocks the release.
+   Four rows now have looked like they needed a person and did not:
+   `tray-menu.ps1`, `tray-flicker.ps1`, the `retro` shot, and
+   `hotkey-fullscreen.ps1`, which turned "a person and a game" into a D3D11
+   swap chain with `SetFullscreenState(TRUE)` on it (DR-40). **Ask of §7.6
+   whether an instrument can reach it before scheduling anybody** — what it is
+   short of is a loudspeaker in front of a microphone, which is the one thing
+   on that list that is a fact about a room rather than about Windows.
    **Injection is refused while an *elevated* program holds the foreground.**
    Not, as this file said twice, while somebody is at the machine: measured
    with the desktop idle 31 minutes and still refused, and a click on an
-   ordinary window cleared it (DR-39). This blocks every drill that clicks —
-   §7.5 and the share picker included — and the drills now name the program
-   in the way rather than blaming the app.
+   ordinary window cleared it (DR-39). This blocks every drill that clicks, and
+   the drills now name the program in the way rather than blaming the app.
 2. **§6.3 — the clean-VM install**, which needs a second Windows machine that
    has never had the toolchain on it. The bundle is built and installs here;
    what is unproven is that it carries everything a machine without MSVC needs.
@@ -990,7 +992,7 @@ knew about itself. The checkbox is here.
 | ~~3~~ | ~~§7.2 the tray menu checklist~~ — passed 2026-08-25, a drill after all; DR-39 | a drill | — |
 | ~~4~~ | ~~§7.3 the rebuilt window's flicker~~ — measured and fixed 2026-08-25, DR-38 | a drill, after all | — |
 | ~~5~~ | ~~§7.4 the share picker under the `retro` skin~~ — shot and looked at 2026-08-25 | a person, two minutes | — |
-| 6 | §7.5 the talk key over a fullscreen game | a person and a game | **yes** — prd.md §3 F2 |
+| ~~6~~ | ~~§7.5 the talk key over a fullscreen game~~ — passed twice 2026-08-25, a drill; DR-40 | ~~a person and a game~~ a swap chain | — |
 | 7 | §7.6 a room hearing itself on loudspeakers | a person in a room | **yes** — prd.md §3 F4 |
 | 8 | §6.3 the clean-VM install | a second Windows machine | **yes** |
 | 9 | §6.4 README, tag, release | — | **it is the release** |
@@ -1077,9 +1079,10 @@ these were never run rather than let a reader assume all of them were.
   Verify: `docs\testing\tray-roundtrip.ps1 -Cycles 5`, watched rather than read.
   **Yes, and it was white — 394 ms of it. It does not any more.** DR-38.
   It turned out not to need eyes after all: `docs/testing/tray-flicker.ps1`
-  photographs the rebuild at **141 frames a second** against a 60 Hz screen, so
-  anything a person could have seen is in at least two frames, and scores each
-  one on whether it is the bare desktop, the finished window, or neither. The
+  photographs the rebuild at **141 frames a second** — about one frame per
+  refresh on this 144 Hz screen (DR-40 corrects the 60 Hz this assumed) — and
+  scores each one on whether it is the bare desktop, the finished window, or
+  neither. The
   answer was fifty-five consecutive frames of *neither* — a flat white
   rectangle, luma 248 against a settled window's 33 — and then the whole app in
   one frame. WebView2's own background, before the document exists.
@@ -1120,13 +1123,54 @@ these were never run rather than let a reader assume all of them were.
   window, so clicking where UIA said clicked the desktop behind the app. The
   script scrolls the element into view and refuses to click a point outside the
   window frame. Same family as DR-26.
-- [ ] **7.5 [WIN] The talk key over a fullscreen game** — task 4.3, steps 4–5 of
+- [x] **7.5 [WIN] The talk key over a fullscreen game** — task 4.3, steps 4–5 of
   `docs/testing/hotkey.md`. The hook is proven from a windowless process and
   while another app has focus; a *fullscreen exclusive* game is the case the
   feature exists for (prd.md §3 F2) and the one nobody has tried.
   DoD: the key opens the mic while the game has the screen, and the game still
   receives it.
   Verify: `bin/listener` in the room, a game in fullscreen, the key held.
+  **It did not need a game, and it passed twice.** DR-40.
+  `docs/testing/hotkey-fullscreen.ps1` drives the real client into push to talk
+  on F13, joins a room `bin/listener` is already in, puts
+  `bin/fullscreen-drill` — a D3D11 swap chain with `SetFullscreenState(TRUE)`
+  on it, which is what the phrase *fullscreen exclusive* names — on the display,
+  and holds the key twice. All three halves are read off instruments rather
+  than judged:
+
+  ```
+  GLOBAL=heard from anywhere, including over a game
+    game MODE=exclusive     DISPLAY_REFRESHES=4810 (144 Hz)     DOWNS=2 UPS=2
+    room 0 ... 54 50 26 0 0 0 0 0 0 22 50 50 50 28 0 0 0 0 21 50 50 50 29 0 ... 0
+  HEARD_BURSTS=3 (one control, two over the game)
+  ```
+
+  The `room` line is the roommate's frames-a-second column, and it has three
+  bursts because the drill holds the key three times: **once before the display
+  is touched**, then twice with the game on it. A gated client sends *no
+  packets* rather than silent ones (3.2), so a row is either a stream or
+  nothing — and the first burst is what makes the others admissible. `DOWNS=2
+  UPS=2` is the fullscreen window's own `WM_KEYDOWN`, which is the half nobody
+  had a way to see: the hook passes every key on, and this is the count that
+  would fall to zero if it did not. `-Windowed` runs the same walk with the
+  display left alone, which is the third row of `hotkey.md`'s table and also
+  passed.
+  **The control hold is there because one run had none of it.** The room heard
+  nothing at all while everything else passed, which reads as a talk key that
+  stopped working over a game and is not: a capture device that will not open
+  gives exactly the same column of zeroes. That run is now `INCONCLUSIVE` with
+  the app's own stderr under it rather than a failure of the feature.
+  **What is left for a person is two lines, not five**, and neither is the DoD:
+  that the key still *types* where it is aimed, and that the hook comes off at
+  the end of a call. `hotkey.md`'s "By hand" now says so.
+  **Two traps found on the way, both in DR-40 and in the script's header.** A
+  key synthesised with `keybd_event(vk, 0, ...)` has no scan code, and a DOM
+  `KeyboardEvent.code` is derived from the scan code rather than the virtual
+  key — so it arrives in the webview as an empty string, is stored as the talk
+  key, and leaves the window honestly reporting *heard only while this window
+  has focus*. And that state survives a restart: the settings button then reads
+  `key:` with nothing after it, so a drill matching `key: ` walks away
+  reporting an app with no key button.
 - [ ] **7.6 A room hearing itself** — tasks 3.4 and 4.7. The echo canceller is
   measured against a synthetic loopback, which is the *hard* case and not the
   real one; nobody has put a microphone and a loudspeaker in one room and
@@ -3699,9 +3743,11 @@ can see a flash, because a flash is a thing about pixels over milliseconds and
 the drill's finest instrument is a screenshot taken a second afterwards.
 
 **The instrument.** `docs/testing/tray-flicker.ps1`. It clicks the tray icon
-and photographs the region the window arrives in at **141 frames a second**,
-against a screen that changes 60 times a second — so anything a person could
-have seen is in at least two frames. The capture loop is C# rather than
+and photographs the region the window arrives in at **141 frames a second**.
+That was written as "against a screen that changes 60 times a second, so
+anything a person could have seen is in at least two frames"; the screen is
+144 Hz (DR-40), so it is about one frame per refresh and the margin is a flash
+lasting longer than ~7 ms rather than one visible at all. The capture loop is C# rather than
 PowerShell for exactly that reason: a rebuild is ~400 ms and PowerShell's
 per-iteration cost spends the chances. Each frame is scored on three numbers
 over the window's own area: its mean luma, how much of it differs from that
@@ -3722,8 +3768,10 @@ i=56 427.1 ms   luma 248.1 busy 0.031   white
 i=57 434.6 ms   luma 33.3  busy 0.070   the finished window, in one frame
 ```
 
-**394 ms of a flat white rectangle**, then the whole app at once. Twenty-four
-screen refreshes. `busy 0.031` is what says *flat*: 3% of the window's pixels
+**394 ms of a flat white rectangle**, then the whole app at once. Fifty-seven
+screen refreshes at this display's 144 Hz (DR-40; this said twenty-four, from
+a 60 Hz that was never measured). `busy 0.031` is what says *flat*: 3% of its
+pixels
 differ from its own mean, which is the border and nothing else. It is not a
 half-drawn page — the page never partly draws, it arrives complete — it is
 WebView2's own background, before the document exists. The settled window is
@@ -3902,3 +3950,97 @@ MENU_ROW6_AFTER=Open goodvoice | -- | Mute (grey) | Deafen (grey) | Leave room (
 The photograph is still taken beside each one, because a menu right in its own
 handle and wrong on the screen is a thing that could happen and nothing else
 would catch it. Both agree.
+
+### DR-40: the game a drill can be (2026-08-25)
+
+**Context.** §7.5, and the last two rows of `docs/testing/hotkey.md`. Push to
+talk exists for one case — prd.md §3 F2, a key heard while a game has the
+screen — and that case had been "a person and a game" since task 4.3. The
+scripted half (`hotkey.ps1`) proves the `WH_KEYBOARD_LL` hook hears a key from
+a process with no window; what it cannot show is the same thing holding when
+something else owns the display, or that the thing owning it still gets the key.
+
+**The move.** A game in fullscreen exclusive is not a genre, it is a call:
+a D3D11 swap chain with `SetFullscreenState(TRUE)` on it. So
+`harness/src/bin/fullscreen-drill.rs` is one — a `WS_POPUP` window the size of
+the display, a swap chain that is allowed to change the mode, a colour that
+follows the key, and a `wndproc` that counts the edges of one virtual key. Run
+beside the real client and `bin/listener`, it answers all three halves of the
+definition of done at once, and `docs/testing/hotkey-fullscreen.ps1` is that
+run without a person in it.
+
+```
+GLOBAL=heard from anywhere, including over a game
+FOREGROUND=fullscreen-drill
+  game MODE=exclusive     DRIVER=hardware     DOWNS=2 UPS=2
+  game DISPLAY_REFRESHES=4810 (144 Hz)        PRESENTS=46453
+  room 0 0 ... 0 33 50 50 46 0 0 0 0 0 4 50 50 50 47 0 0 ... 0
+HEARD_BURSTS=2
+RESULT=PASS
+```
+
+**What each line is evidence of.** `MODE=exclusive` is DXGI's own
+`GetFullscreenState`, which is necessary and not sufficient — a swap chain can
+accept the call and drop straight back out. `DISPLAY_REFRESHES` is the
+sufficient half: `GetFrameStatistics` answers for a chain that owns an output
+and refuses one that does not, and `SyncRefreshCount` is the *display's* vblank
+counter, so 144 Hz there is the monitor saying who has it. The `room` line is
+the roommate's frames-a-second column — two bursts of fifty, four seconds each,
+where the key was held, and holes either side, because a gated client sends no
+packets rather than silent ones (task 3.2). And `DOWNS=2 UPS=2` is the
+fullscreen window's own `WM_KEYDOWN`: the hook passes every key on
+(`tray/hotkey.rs`), and that is the count that would be zero if it did not.
+
+**What it is not.** No game is loaded, so no anti-cheat is. DR-18 is where that
+argument lives and this does not move it. What is measured is Windows' input
+path and DXGI's display ownership, which is what "over a fullscreen game" means
+for every other claim in this repo.
+
+**A drill that measures a room needs a control in it.** One run had every
+other assertion green — the hook installed, the display taken, the fullscreen
+window counting both edges — and a room that heard nothing at all. Read
+literally that is a talk key which stops working over a game; it is not. A
+capture device that will not open produces the identical column of zeroes, and
+the drill had no way to tell the two apart. It holds the key once before the
+display is ever touched now, and a run that fails *that* hold prints
+`INCONCLUSIVE` with the app's stderr beneath it instead of a verdict on a
+feature it did not reach.
+
+**Two traps, and the second one hid the first.**
+
+*A synthesised key needs a scan code.* `hotkey.ps1` passes zero for it and
+works, because the Rust hook reads `vkCode` out of a `KBDLLHOOKSTRUCT`. A
+webview does not: a DOM `KeyboardEvent.code` is derived from the **physical
+scan code**, so `keybd_event(vk, 0, ...)` arrives in the window as an empty
+string. The rebind stores it, `vk_for_code` cannot name it, the hook never
+installs, and the window then says *heard only while this window has focus* —
+which is true, and reads exactly like a broken feature. `MapVirtualKey(vk,
+MAPVK_VK_TO_VSC)` is the missing byte. Two of the drill's assertions failed on
+it, in two different places, and neither pointed at the cause.
+
+*And that state survives a restart.* A talk key the window cannot name is
+stored anyway, so the settings button comes back reading `key:` with nothing
+after it. The next run of the drill matched `key: ` — with the space — found no
+key button at all, and reported an app that had lost its settings screen. The
+app is not wrong here, but it is not defensive either: nothing refuses to bind
+a key that `vk_for_code` will not accept, and the only symptom is a notice
+saying push to talk is window-only.
+
+**And one number about this machine that corrects DR-38.** The display is
+**144 Hz**, measured two ways: `DISPLAY_REFRESHES` above, and
+`Win32_VideoController.CurrentRefreshRate`. DR-38's instrument argument says
+"141 frames a second, against a screen that changes 60 times a second — so
+anything a person could have seen is in at least two frames". The margin is not
+there: at 141 fps against 144 Hz the camera takes about one frame per refresh.
+Its *findings* are untouched — 394 ms of white is 394 ms whatever the refresh,
+and fifty-five consecutive frames is 390 ms of it — but what "zero frames of
+neither" licenses afterwards is narrower than it was written: no flash longer
+than about 7 ms, rather than no flash at all. The two places that say 60 Hz now
+say this.
+
+**The frame rate is the GPU's, not the screen's.** `Present(1, ...)` asks to be
+held to the refresh and is not: 46 453 presents against 4 810 refreshes. Some
+driver setting on this machine is overriding the sync interval. It changes
+nothing here — the question is input — but a drill that reported 1 363 fps
+without saying why would be reporting a screen nobody was watching, so it says
+`VSYNC=off` when the two counts disagree by more than double.
