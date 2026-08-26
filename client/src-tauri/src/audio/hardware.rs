@@ -459,6 +459,18 @@ impl Microphone {
     pub fn queued(&self) -> usize {
         self.samples.occupied_len()
     }
+
+    /// What the canceller itself thinks it is looking at, `0.0`–`1.0`.
+    ///
+    /// The far end can measure how much of its own tone came back; only this
+    /// side can say whether WebRTC ever believed there was an echo to remove.
+    /// The two disagreeing is the interesting case — see §7.6. `None` when the
+    /// module refused to start, and meaningless until it has converged on a
+    /// second or two of real playback.
+    #[must_use]
+    pub fn echo_likelihood(&self) -> Option<f64> {
+        self.processing.as_ref()?.echo_likelihood()
+    }
 }
 
 #[async_trait::async_trait]
