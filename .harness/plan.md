@@ -65,19 +65,14 @@ unrun is allowed to claim.
    what is unproven is that it carries everything a machine without MSVC needs.
    **Rebuild the bundle first:** DR-38 changed the window and the frontend, and
    the installed app on this machine is older than both.
-3. **§6.4 — the README, the tag, the release. The README and the release CI
-   are written; what is left is `git tag v0.1.0` and a push.** The README
-   prints the measured numbers, §7.1's ≤ 6% among them, says which of rows
-   10–15 were never run, and writes §7.6 and §6.3 the way this file asked —
-   not "untested" but "tested up to the hardware the test needs, and here is
-   the command that finishes it". `.github/workflows/release.yml` builds both
-   bundles from the tagged commit, checks the tag against
-   `tauri.conf.json` before it builds anything, writes `SHA256SUMS.txt`, and
-   opens the release as a **draft**. Pushing the tag is therefore reversible up
-   to the moment somebody presses publish. **What the tag does not do is the
-   DoD's verification** — a download from the release page, an install, a
-   call — and on this machine that install proves only what §6.3 already
-   proved here.
+3. **§6.4 — the README is written, `v0.1.0` is tagged and pushed, and the
+   release page exists as a draft carrying both installers and their
+   checksums.** What is left is two things a person does: **press publish**,
+   and then the DoD's own verification — download from the page, install,
+   join a call. On this machine that install proves only what §6.3 already
+   proved here, so the verification worth having is §6.3's clean VM, and
+   **it should install the NSIS *and* the MSI**: only NSIS carries the WebView2
+   bootstrapper, the MSI downloads it.
 
 ### What this machine needs
 
@@ -1021,8 +1016,27 @@ Goal: two clients talking through the SFU. Riskiest phase — spikes first.
   as a run artifact whatever happens next, and opens the release **as a draft** —
   because what a release claims about untaken measurements is not a thing CI
   can know.
-  **Not done — the tag, the publish, and the DoD's own verification**, which is
-  a download from the release page onto a machine, an install, and a call. That
+  **The tag is pushed and the page exists, as a draft.** `v0.1.0` is annotated,
+  on `ca9c74c`, and the release run built the bundles in **12m33s** — NSIS
+  3 073 808 bytes, MSI 4 112 384 bytes, `SHA256SUMS.txt` 194 bytes. Both
+  checksums were verified the only way that proves anything: downloaded back
+  off the page and re-hashed, rather than read out of the log that wrote them.
+  A draft's page lives at an `untagged-…` URL until somebody publishes it.
+  **Two things the MSI's own tables settle**, read out of the bundle rather
+  than out of the build. DR-27's fix holds where it matters: the app cab
+  carries exactly one binary and it is `goodvoice-client.exe`. And §6.2's
+  protocol registration ships in the MSI too, not just in NSIS —
+  `Software\Classes\goodvoice`, `URL Protocol`, and
+  `shell\open\command` → `"[!Path]" "%1"`.
+  **One difference between the two bundles that §6.3 has to plan around.** NSIS
+  carries Microsoft's WebView2 bootstrapper; the **MSI downloads it** at install
+  time — its `DownloadAndInvokeBootstrapper` action fetches
+  `go.microsoft.com/fwlink/p/?LinkId=2124703` through PowerShell and runs it
+  `/silent /install`. So a clean VM with no network, or one behind something
+  that blocks that fwlink, fails the MSI path and passes the NSIS one, and a
+  clean-VM test that only tries one of them does not know which it proved.
+  **Not done — the publish, and the DoD's own verification**, which is a
+  download from the release page onto a machine, an install, and a call. That
   last one is §6.3's clean VM if it is to prove anything the install on this
   machine has not already proven.
 
