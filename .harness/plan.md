@@ -1076,7 +1076,11 @@ Goal: two clients talking through the SFU. Riskiest phase — spikes first.
   DoD: every string the window or the tray shows is in both languages; a third
   language is a type error until it is complete; `README.md` and
   `README.pt-BR.md` say the same things and link to each other.
-  Verify: the gates, and the app run in each language.
+  Verify: the gates, and `docs\testing\language.ps1` — which drives the real
+  installed app through the picker and reads the **real HMENU** behind the tray
+  popup, because the menu is the half of this no build can check. It goes both
+  ways and then restarts the app, so "it was stored" is told apart from "it was
+  detected again".
   **Done, and the type checker is what holds it.** `Strings` is an interface
   each language satisfies, so a missing key does not compile; `skinOr` and
   `lightPaletteOr` return `SkinId` / `PaletteId` rather than `string`, so a
@@ -1089,6 +1093,21 @@ Goal: two clients talking through the SFU. Riskiest phase — spikes first.
   own.
   Gates after it: `cargo test --workspace` **197**, clippy and fmt clean, `tsc`
   clean, server's 85 untouched.
+  **Measured on the installed bundle, 2026-08-27**, every row PASS: the window
+  goes to Portuguese and back, the tray reads
+  `Abrir o goodvoice | Silenciar | Desligar o áudio | Sair da sala | Fechar o
+  goodvoice` and then reads English again, and a restart comes up in the last
+  language chosen. `docs/ui/settings-language-ptbr.png` is the screenshot it
+  takes on the way through. The Portuguese is longer than the English
+  everywhere and nothing overflowed: the two server buttons wrap to three lines
+  inside 105×70 and stay legible.
+  **Two things the drill had to learn about this window**, both worth keeping
+  because both looked like the app was broken. WebView2 answers
+  `ScrollItemPattern` and does not scroll, so a control below the fold is only
+  reachable with a real wheel — and `.section` labels are
+  `text-transform: uppercase`, which reaches the *accessible name*, so the tree
+  says `APARÊNCIA` and a case-sensitive check for `aparência` fails against a
+  window that changed language perfectly well.
 
 ---
 

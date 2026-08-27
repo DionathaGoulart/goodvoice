@@ -24,10 +24,10 @@ Em **inglês e português do Brasil**, escolhido na tela de ajustes e seguido pe
 menu da bandeja. Ele começa no idioma em que a sua máquina está.
 
 ![A lista de participantes, com os níveis](docs/ui/roster-levels.png)
-![A tela de ajustes](docs/ui/settings-sensitivity.png)
+![A tela de ajustes em português](docs/ui/settings-language-ptbr.png)
 
-> As capturas de tela desta página são da interface em inglês. O que elas
-> mostram é o formato; as palavras mudam com o idioma escolhido.
+> A primeira captura acima é da interface em inglês, as outras desta página
+> também. O que elas mostram é o formato; as palavras mudam com o idioma.
 
 ## Instalação
 

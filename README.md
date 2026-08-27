@@ -108,6 +108,8 @@ English and Brazilian Portuguese. The window picks one from your machine on
 first run and remembers what you choose after that; the tray menu follows in
 the same click.
 
+![The settings screen in Portuguese](docs/ui/settings-language-ptbr.png)
+
 What is **not** translated is diagnostics — what comes back from a failed join,
 a refused share or a rejected Worker URL is the sentence written where the
 failure happened, and it is in English in both languages. The surface is every
