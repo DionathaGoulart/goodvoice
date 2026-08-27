@@ -69,6 +69,21 @@ const PACKET_QUEUE: usize = 8;
 /// anything: the picture has not changed, so the last IDR *is* the current
 /// picture. What it costs is one keyframe every two seconds while the screen
 /// is still, and nothing at all while it is not.
+///
+/// # It is load-bearing for more than the latency
+///
+/// DR-34 wrote this down as the thing that saves a viewer from waiting, and
+/// §7.10 then proposed replacing it with a keyframe sent on request. Removing
+/// it was tried and measured, and it does not merely make viewers wait: it
+/// makes the share **unsubscribable**. Cloudflare refuses a `tracks/new` for a
+/// track that has never carried a packet, in those words — *the publisher
+/// never started sending: Track not found on remote peer* — so a share of a
+/// still document that said nothing at all was one that four viewers out of
+/// four could not open (DR-44).
+///
+/// So this is not only a repeat for latecomers. It is the heartbeat that keeps
+/// the track a thing the SFU will let anybody subscribe to, and
+/// `docs\testing\keyframe.ps1` is what measures both halves of that.
 const STILL_KEYFRAME: Duration = Duration::from_secs(2);
 
 /// How long the capture thread waits on a frame before checking whether it has

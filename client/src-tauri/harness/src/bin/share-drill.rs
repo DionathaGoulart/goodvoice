@@ -16,11 +16,19 @@
 //! into "ana's screen, at bruno's end", which is the claim the task actually
 //! makes. `docs/perf/screenshare-encode.md` has the command.
 //!
+//! `--no-viewer` is plan.md §7.10's other half rather than task 5.3's: bruno
+//! joins and never opens anything, and what is reported is what **ana put on
+//! the wire**, counted between the encoder and the transport. Under a still
+//! screen that number should be nothing at all — a share of a document with
+//! nobody watching it costs the room no bytes (DR-44). It used to be a
+//! keyframe every two seconds forever (DR-34).
+//!
 //! ```text
 //! cargo run -p goodvoice-harness --bin share-drill
 //! cargo run -p goodvoice-harness --bin share-drill -- --seconds 20 --1080
 //! cargo run -p goodvoice-harness --bin share-drill -- --base http://localhost:8787
 //! cargo run -p goodvoice-harness --bin share-drill -- --room viewtest --seconds 90
+//! cargo run -p goodvoice-harness --bin share-drill -- --no-viewer --seconds 20
 //! ```
 
 #[cfg(not(windows))]
@@ -56,7 +64,7 @@ mod windows_drill {
         },
         capture::{encoder::Quality, share::ShareFactory, wgc},
         rtc::{
-            screen::{ScreenSink, ShareState},
+            screen::{ScreenSink, ScreenSource, ScreenSourceFactory, ShareState, VideoFrame},
             session::{Call, CallOptions},
         },
     };
@@ -90,10 +98,24 @@ mod windows_drill {
         // measuring that.
         let bruno = join(&args.base, &room, "bruno").await?;
         let watched = Arc::new(Watched::new(args.out.join("received.h264")));
-        let viewer = bruno.watch_screen(Arc::clone(&watched) as Arc<dyn ScreenSink>);
+        // `--no-viewer` is the whole of §7.10's second question: with nobody
+        // watching, nothing tells the sharer a picture is wanted, and a still
+        // screen should therefore cost the room nothing.
+        let viewer = (!args.no_viewer)
+            .then(|| bruno.watch_screen(Arc::clone(&watched) as Arc<dyn ScreenSink>));
+        if args.no_viewer {
+            println!("  bruno is in the room and is watching nothing\n");
+        }
 
         let ana = join(&args.base, &room, "ana").await?;
-        ana.start_share(Arc::new(ShareFactory::new(target, args.quality)));
+        // Counted between the encoder and the transport, which is the only
+        // place that sees what the *sharer* decided to send — bruno's end
+        // cannot tell "ana sent nothing" from "nobody was listening".
+        let published = Arc::new(Published::default());
+        ana.start_share(Arc::new(CountingFactory {
+            inner: ShareFactory::new(target, args.quality),
+            published: Arc::clone(&published),
+        }));
 
         let started = Instant::now();
         let live = wait_for_share(&ana).await?;
@@ -122,13 +144,21 @@ mod windows_drill {
         tokio::time::sleep(Duration::from_secs(args.seconds)).await;
 
         ana.stop_share();
-        bruno.unwatch_screen(viewer);
+        if let Some(viewer) = viewer {
+            bruno.unwatch_screen(viewer);
+        }
         let report = watched.report()?;
+        let (sent_units, sent_bytes, sent_keys) = published.counts();
 
         drop(carla);
         drop(ana);
         drop(bruno);
 
+        println!();
+        println!("### what ana put on the wire");
+        println!();
+        println!("- {sent_units} access units, {sent_bytes} bytes");
+        println!("- {sent_keys} of them keyframes");
         println!();
         println!("### what reached bruno");
         println!();
@@ -150,17 +180,100 @@ mod windows_drill {
             None => println!("- **carla was not refused** — the room let a second screen through"),
         }
 
+        if refused.is_none() {
+            bail!("the room allowed two sharers at once");
+        }
+        // With nobody watching there is nothing to receive, and the claim
+        // being checked is about the sharer instead: §7.10 wants a still
+        // screen to cost nothing, so anything ana sent after the picture it
+        // starts every share with is a failure of this row.
+        if args.no_viewer {
+            println!("\nthe one-sharer rule holds; the bytes above are the measurement.");
+            return Ok(());
+        }
         if report.units == 0 {
             bail!("no video reached the second client");
         }
         if report.keyframes == 0 {
             bail!("video reached the second client with no keyframe in it");
         }
-        if refused.is_none() {
-            bail!("the room allowed two sharers at once");
-        }
         println!("\nboth halves hold.");
         Ok(())
+    }
+
+    // --- what the sharer sent ----------------------------------------------
+
+    /// Every access unit that left the encoder for the transport.
+    ///
+    /// The sharer's own side of the wire. `bruno`'s counters cannot answer
+    /// §7.10's question — "did ana send anything?" and "did anybody hear it?"
+    /// are the same number at his end and different questions at hers.
+    #[derive(Default)]
+    struct Published {
+        units: AtomicU64,
+        bytes: AtomicU64,
+        keyframes: AtomicU64,
+    }
+
+    impl Published {
+        fn counts(&self) -> (u64, u64, u64) {
+            (
+                self.units.load(Ordering::Relaxed),
+                self.bytes.load(Ordering::Relaxed),
+                self.keyframes.load(Ordering::Relaxed),
+            )
+        }
+    }
+
+    /// A [`ShareFactory`] that counts what the capture hands over.
+    struct CountingFactory {
+        inner: ShareFactory,
+        published: Arc<Published>,
+    }
+
+    impl ScreenSourceFactory for CountingFactory {
+        fn open(&self) -> Result<Box<dyn ScreenSource>, String> {
+            Ok(Box::new(CountingSource {
+                inner: self.inner.open()?,
+                published: Arc::clone(&self.published),
+            }))
+        }
+
+        fn describe(&self) -> String {
+            self.inner.describe()
+        }
+    }
+
+    struct CountingSource {
+        inner: Box<dyn ScreenSource>,
+        published: Arc<Published>,
+    }
+
+    #[async_trait::async_trait]
+    impl ScreenSource for CountingSource {
+        async fn next_frame(&mut self) -> Option<VideoFrame> {
+            let frame = self.inner.next_frame().await?;
+            self.published.units.fetch_add(1, Ordering::Relaxed);
+            self.published
+                .bytes
+                .fetch_add(frame.bytes.len() as u64, Ordering::Relaxed);
+            if frame.keyframe {
+                self.published.keyframes.fetch_add(1, Ordering::Relaxed);
+            }
+            Some(frame)
+        }
+
+        fn size(&self) -> (u32, u32) {
+            self.inner.size()
+        }
+
+        fn request_keyframe(&self) {
+            self.inner.request_keyframe();
+        }
+
+        fn is_hardware(&self) -> bool {
+            self.inner.is_hardware()
+        }
     }
 
     // --- the viewer --------------------------------------------------------
@@ -332,6 +445,9 @@ mod windows_drill {
         seconds: u64,
         quality: Quality,
         out: PathBuf,
+        /// Nobody watches. §7.10: what a still share costs a room with no
+        /// viewer in it.
+        no_viewer: bool,
     }
 
     impl Args {
@@ -342,10 +458,12 @@ mod windows_drill {
                 seconds: DEFAULT_SECONDS,
                 quality: Quality::P720,
                 out: env::temp_dir().join("goodvoice-share"),
+                no_viewer: false,
             };
             let mut rest = env::args().skip(1);
             while let Some(flag) = rest.next() {
                 match flag.as_str() {
+                    "--no-viewer" => args.no_viewer = true,
                     "--720" => args.quality = Quality::P720,
                     "--1080" => args.quality = Quality::P1080,
                     "--base" => {

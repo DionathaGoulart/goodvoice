@@ -21,11 +21,15 @@
 
 ## Start here
 
-**Where this stopped:** 2026-08-26, with §7.12 fixed and closed — the window
-walking down the screen, which was the only open row that was code rather than
-a machine, a room or a person. It is `src/place.rs` and DR-43. Phases 0–5 are
-closed, and so are §6.1, §6.2, §7.1–§7.6 and §7.12. What is open is §6.3, §6.4
-and §7.7–§7.11 plus §7.13. Nothing else in this file needs reading first.
+**Where this stopped:** 2026-08-27, with §7.10 closed as **refused** — DR-44,
+and it is the more interesting of the two. Nothing on Cloudflare ever asks this
+client for a picture, `nack pli` was in the offer all along, and the
+two-second keyframe repeat §7.10 wanted to delete turns out to be what keeps
+the track subscribable at all. No code changed; a drill and a decision record
+came out of it. The day before, §7.12 fixed the window walking down the screen
+(`src/place.rs`, DR-43). Phases 0–5 are closed, and so are §6.1, §6.2,
+§7.1–§7.6, §7.10 and §7.12. What is open is §6.3, §6.4, §7.7, §7.8, §7.9,
+§7.11 and §7.13. Nothing else in this file needs reading first.
 
 **`main` is ahead of the `v0.1.0` tag now.** The draft release's installers were
 built from `ca9c74c` and do not carry §7.12's fix. That does not change the
@@ -1296,7 +1300,7 @@ these were never run rather than let a reader assume all of them were.
   implemented if it turns out the video keeps arriving.
   Verify: an instrument that can see UDP per socket, then a repeat of the
   measurement.
-- [ ] **7.10 Keyframe on demand** — DR-34's remaining half. A viewer opening
+- [x] **7.10 Keyframe on demand** — DR-34's remaining half. A viewer opening
   mid-share waits up to two seconds for the repeated keyframe, and the sharer
   re-sends one every two seconds whether anybody is watching or not, because
   the H.264 codec is registered with `rtcp_feedback: vec![]` and Cloudflare has
@@ -1306,6 +1310,51 @@ these were never run rather than let a reader assume all of them were.
   screen, and a still share with nobody watching sends nothing.
   Verify: `bin/rewatch --rounds 4`, and `bin/share-drill` under the drill's grey
   sheet with no viewer open.
+  **Refused, and the sentence above is wrong in its second half — DR-44.**
+  Measured 2026-08-27. No code changed; what came out of it is
+  `docs\testing\keyframe.ps1`, `share-drill --no-viewer`, and two facts that
+  between them close the row.
+
+  **`nack pli` was already in the offer, and always has been.** The premise —
+  *`rtcp_feedback: vec![]`, so Cloudflare has no way to ask* — is not true.
+  `webrtc`'s interceptor registry writes the line itself, whatever the codec
+  declares, and the SDP `GOODVOICE_TRACE_SDP` prints on **unmodified `main`**
+  carries `a=rtcp-fb:102 nack` and `a=rtcp-fb:102 nack pli`. Cloudflare has
+  been able to ask this client for a picture since task 5.3 shipped.
+
+  **It has never asked.** With the publisher's own outbound statistics read
+  five times a second through a whole run — four viewers opening and closing on
+  a still screen, video flowing throughout — `pli_count` and `fir_count` stayed
+  at **zero**. Adding `ccm fir` to the codec changed nothing; answering the
+  counter when it rose changed nothing, because it never rose; and making the
+  *viewer* send a `PictureLossIndication` on every subscription, eight times at
+  300 ms, changed nothing either. All three were built, measured and thrown
+  away. Nothing on this SFU delivers the ask.
+
+  **And the second half of the DoD is not something Cloudflare permits.** "A
+  still share with nobody watching sends nothing" was tried, by deleting the
+  two-second repeat. What happens is not that viewers wait: it is that they
+  cannot subscribe at all. `tracks/new` comes back *the publisher never started
+  sending: Track not found on remote peer* — **four viewers out of four
+  blind**, on a share that was live and had a picture to give. The repeat is
+  the heartbeat that keeps the track subscribable, which is a load-bearing job
+  DR-34 did not know it had given it. `capture::share::STILL_KEYFRAME` says so
+  now.
+
+  **What `keyframe.ps1` reads on `main`**, under `viewer.ps1`'s grey sheet,
+  which is the still screen both halves needed and no drill provided:
+
+  ```
+  BLIND_ROUNDS=0
+  FIRST_PICTURE_BEST_S=1.1   FIRST_PICTURE_MEDIAN_S=1.88   FIRST_PICTURE_WORST_S=2.51
+  SENT_UNITS=12  SENT_BYTES=89976  SENT_KB_PER_S=4.39   (20 s, nobody watching)
+  ```
+
+  The spread is the evidence, not the speed: a subscription is most of a second
+  on its own (§7.9), so a client whose ask worked would land just above that
+  every time. Landing anywhere in a two-second band is what waiting for a clock
+  looks like. And 4.39 kB/s is what a still share costs a room with nobody in
+  it — against DR-34's 3.5, at a different resolution.
 - [ ] **7.11 The self-hosting walkthrough** — task 6.1's DoD. `docs/self-hosting.md`
   is written and its client half is measured, but nobody has followed it from
   the beginning on a fresh Cloudflare account, and steps 1 and 5 are dashboard
@@ -4475,3 +4524,106 @@ tests. Seven new tests, 188 in the workspace.
 **The bundle on the draft release page does not have this.** `v0.1.0` is
 `ca9c74c` and this is later, so the README on `main` says so rather than
 quietly implying the installer behaves this way.
+
+
+### DR-44: nothing ever asks for a picture, and the repeat is why anybody can watch at all (2026-08-27)
+
+**Context.** §7.10, out of DR-34. A viewer opening onto a still share waits up
+to two seconds for the sharer's repeated keyframe, and the sharer sends one
+every two seconds whether or not the room has a viewer in it. DR-34 wrote down
+why and what to do: *the H.264 codec is registered with `rtcp_feedback:
+vec![]`, so no PLI is negotiated and Cloudflare has nothing to ask with*;
+negotiate `nack pli` / `ccm fir`, answer the PLI, and both problems go away.
+
+**Neither half of that survived measurement.**
+
+**The negotiation was already there.** `webrtc`'s interceptor registry writes
+the feedback lines itself, whatever `h264_codec()` declares. The screen offer
+from **unmodified `main`**, dumped with `GOODVOICE_TRACE_SDP`:
+
+```
+m=video 9 UDP/TLS/RTP/SAVPF 102
+a=rtpmap:102 H264/90000
+a=rtcp-fb:102 nack
+a=rtcp-fb:102 nack pli
+a=rtcp-fb:102 transport-cc
+```
+
+So DR-34's diagnosis was wrong about the one thing the fix was built on.
+Cloudflare has been able to ask this client for a picture since task 5.3.
+
+**It has never asked.** The publisher's own outbound statistics, read five
+times a second for a whole run — four viewers opening and closing on a still
+screen, video flowing the entire time:
+
+```
+[Audio ssrc=1578335284 pkts=2214 pli=0 fir=0 nack=0]
+[Video ssrc=2127975711 pkts=168  pli=0 fir=0 nack=0]
+```
+
+`pli=0 fir=0`, every poll, every round. Three things were built to change that
+number and all three were thrown away:
+
+1. **`ccm fir` added to the codec.** Produced a duplicate `nack pli` in the SDP
+   and no change in behaviour.
+2. **The sharer answering the counter.** A poll on `get_stats` every 200 ms
+   inside `screen_loop`, requesting a keyframe whenever `pli_count + fir_count`
+   rose. It never rose. Five `get_stats` a second for as long as somebody is
+   sharing, in exchange for nothing measurable, is not a thing to ship.
+3. **The viewer doing the asking.** `TrackRemote::write_rtcp` with a
+   `PictureLossIndication` on every fresh subscription, repeated eight times at
+   300 ms until a picture arrived. No error, no effect: first-picture times
+   unchanged and the publisher's counter still zero. Either the packet does not
+   reach the wire in this stack or Cloudflare does not relay it, and from here
+   those two look the same.
+
+**The other half of the DoD is refused outright.** "A still share with nobody
+watching sends nothing" was tried by deleting the two-second repeat. The result
+is not viewers waiting — it is viewers who cannot subscribe:
+
+```
+could not watch ana's screen: sfu refused: the publisher never started sending:
+Track not found on remote peer. Make sure the publisher peer is connected and
+sending packets for this track (not_found_track_error)
+```
+
+**Four viewers out of four blind**, on a share that was live, had a picture in
+hand and would have handed it over. Cloudflare will not set up a subscription
+to a track that has never carried a packet, so a share that sends nothing is a
+share nobody can open. The repeat is not only a courtesy to latecomers; it is
+the heartbeat that keeps the track subscribable, and DR-34 gave it that job
+without knowing.
+
+**Decision.** §7.10 closes with no code change. What it leaves behind is the
+instrument and the evidence:
+
+- `docs\testing\keyframe.ps1`, which runs both halves under `viewer.ps1`'s
+  grey sheet — **the still screen neither half could be measured without**, and
+  which no existing drill provided. `rewatch` on a desktop with a console
+  printing on it measures the console.
+- `share-drill --no-viewer`, and a count taken between the encoder and the
+  transport. Bruno's end cannot tell *she sent nothing* from *nobody was
+  listening*; ana's can.
+- `capture::share::STILL_KEYFRAME`'s doc comment, which now says what the
+  constant is actually for.
+
+**Measured on `main`, under the sheet:**
+
+| | |
+|---|---|
+| viewers that got a picture | 4 of 4 |
+| first picture, best / median / worst | 1.10 / 1.88 / **2.51 s** |
+| a still share, nobody watching, 20 s | 12 access units, 89 976 bytes, **4.39 kB/s** |
+
+The spread is the finding rather than the speed. A subscription is most of a
+second on its own (§7.9), so a client whose ask worked would land just above
+that every time; landing anywhere across a two-second band is what waiting for
+a clock looks like.
+
+**Consequences.** §7.10 closes as refused. prd.md's screen sharing is unchanged
+and was never wrong — a viewer does get a picture, within about two and a half
+seconds at worst. What a room pays for a still share with nobody in it is
+4.39 kB/s, and that is now a number rather than an assumption. If this is ever
+worth revisiting it is not from the client end: it needs an SFU that relays a
+subscriber's picture-loss request to the publisher, and `keyframe.ps1` is what
+would notice the day one does.

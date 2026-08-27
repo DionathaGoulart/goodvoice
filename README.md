@@ -103,7 +103,7 @@ Full guide: [docs/self-hosting.md](docs/self-hosting.md).
 ## What this release has not been through
 
 A measured number nobody has taken is not a promise. One thing this version
-claims is tested up to the hardware its test needs and no further, and six
+claims is tested up to the hardware its test needs and no further, and five
 more were never run at all.
 
 **Tested up to the hardware, with the command that finishes it:**
@@ -121,13 +121,20 @@ more were never run at all.
 | Pulling the network mid-call | `bin/reconnect-drill` kills the session from the inside; only a real netdown checks that the client *notices* |
 | Four clients conversing | N-party audio is tested; the CPU cost of four at once needs four hosts |
 | What a closed viewer still costs | `tracks/close` is unused, so the SFU is never told a viewer went away |
-| Keyframe on demand | no `nack pli` / `ccm fir`, so a viewer waits up to 2 s for a picture and a still share re-sends keyframes to nobody |
 | The self-hosting guide, followed by a stranger | written and half-measured; nobody has done it on a fresh Cloudflare account |
 | A loudspeaker a metre away | the canceller was measured with the transducer against the capsule, which is a shorter delay than a desk speaker |
 
 The plan tracks each of these as a task with a definition of done and the
 command that proves it: [.harness/plan.md](.harness/plan.md), §7.7 through
 §7.13.
+
+**A viewer opening onto a still share waits up to 2.5 s for its first picture,
+and a still share costs a room 4.4 kB/s with nobody watching.** That was on the
+list above as something to fix and it is not fixable from here: Cloudflare
+never asks this client for a picture — `nack pli` is in the offer and the
+publisher's request counter has never left zero — and a share that sends
+nothing is a share nobody can subscribe to at all. Measured, with the drill
+that measures it, in [.harness/plan.md](.harness/plan.md) §7.10 and DR-44.
 
 One row has left this table since the `v0.1.0` bundle was built, and **the
 bundle does not have the fix**: the window used to come back somewhere else

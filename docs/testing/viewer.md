@@ -121,3 +121,15 @@ cargo run -p goodvoice-harness --bin share-drill -- --seconds 20
 Before DR-34 that was **0 access units in 20 seconds** — a share that published
 nothing at all because WGC announces changes and there were none. It is now 11
 keyframes and 69 kB, which is 3.5 kB/s for a screen that is doing nothing.
+
+**Touching nothing is harder than it reads**, and `docs\testing\keyframe.ps1`
+is what stopped relying on it: it puts this file's grey sheet over the monitor,
+runs the drills hidden with their output redirected to files, and takes the
+sheet down. It also runs `share-drill --no-viewer`, which counts what the
+*sharer* put on the wire rather than what reached anybody — the two are the
+same number at the receiving end and different questions at the sending one.
+
+That 3.5 kB/s is what a still share costs a room with nobody in it, and DR-44
+is why it is not zero: Cloudflare refuses a subscription to a track that has
+never carried a packet, so the repeat is the heartbeat that keeps the share
+openable, not merely a courtesy to whoever opens late.
