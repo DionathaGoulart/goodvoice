@@ -21,74 +21,80 @@
 
 ## Start here
 
-**Where this stopped:** 2026-08-27, with §7.14 closed — DR-46. `viewer.ps1`'s
-"as opened" rows had stopped finding a picture, and the cause was the
-measurement rather than the viewer: `Measure-Picture` read its reference colour
-from pixel (0,0), and the corner is only letterbox when there *is* letterbox.
-The viewer opens at 960×540 onto a 16:9 monitor, so `object-fit: contain`
-produces none at all and the comparison became the picture against its own
-top-left pixel. The reference is now the mode of the four edges, and the
-backdrop is a chequer so that a picture filling the window has variation to be
-found by. The grey-on-grey guess this file used to carry was wrong: the
-letterbox is near-black and the sheet is grey.
+**Where this stopped:** 2026-08-27, with **§6.5 closed — DR-47**: goodvoice
+speaks English and Brazilian Portuguese now. The half of it that was not a
+dictionary is the **tray menu**, which is built inside `setup`, before any
+webview exists, and therefore cannot ask one what language it is in. The window
+is the authority and the client is told: `i18n.ts` calls `set_language` on
+every mount, `home.rs` writes the tag beside the server and the window's
+rectangle, and `TrayMenu::relabel` rewrites all five items. Two consequences
+are in DR-47 rather than in a bug report later — a fresh install's tray is
+English until its first window mounts, and diagnostics are English in both
+languages on purpose. `README.md` and `README.pt-BR.md` are the same document
+twice and link to each other.
 
-Earlier the same day, §7.9 closed with DR-45 — a viewer that closed kept
-receiving the whole share, 62.7 of 62.9 kB/s, because giving up the viewer
-aborted a playback task and told Cloudflare nothing. `rtc::wire` is the
-instrument that made it visible and `close_pull` in `rtc::session` is the fix.
-And §7.10 closed as **refused** (DR-44): nothing on Cloudflare ever asks this
-client for a picture. Phases 0–5 are closed, and so are §6.1, §6.2, §7.1–§7.6,
-§7.9, §7.10, §7.12 and §7.14. What is open is §6.3, §6.4, §7.7, §7.8, §7.11 and
-§7.13. Nothing else in this file needs reading first.
+Earlier the same day, §7.14 closed — DR-46. `viewer.ps1`'s "as opened" rows had
+stopped finding a picture, and the cause was the measurement rather than the
+viewer: `Measure-Picture` read its reference colour from pixel (0,0), and the
+corner is only letterbox when there *is* letterbox. The reference is now the
+mode of the four edges, and the backdrop is a chequer. And §7.9 closed with
+DR-45 — a viewer that closed kept receiving the whole share, 62.7 of 62.9 kB/s,
+because giving up the viewer aborted a playback task and told Cloudflare
+nothing. §7.10 closed as **refused** (DR-44): nothing on Cloudflare ever asks
+this client for a picture.
 
-**`main` is ahead of the `v0.1.0` tag now.** The draft release's installers were
-built from `ca9c74c` and carry neither §7.12's fix nor §7.9's. That does not
-change the plan below — both were always *after the release* rows — but it does
-mean the clean-VM install in §6.3 is testing a bundle whose window walks down
-the screen and which keeps pulling a share after its viewer closes. The README
-on `main` says as much about the first.
+Phases 0–5 are closed, and so are §6.1, §6.2, §6.5, §7.1–§7.6, §7.9, §7.10,
+§7.12 and §7.14. What is open is §6.3, §6.4, §7.7, §7.8, §7.11 and §7.13.
+Nothing else in this file needs reading first.
+
+**`main` is well ahead of the `v0.1.0` tag, and the tag's bundle is now two
+features behind.** The draft release's installers were built from `ca9c74c` and
+carry neither §7.12's fix, nor §7.9's, nor §6.5's two languages at all. A
+clean-VM test against *those* bundles is testing an app that only speaks
+English and whose window walks down the screen. **§6.3 should be run against a
+rebuilt bundle**, which means the tag has to move or the release has to take
+locally-built installers — that decision is §6.4's, and it is not made in this
+file yet.
 
 **Only one thing still blocks v0.1.0, and it is a second Windows machine.**
 §6.3 and §6.4's verification are the same act — install on a machine that has
 never had the toolchain, and join a call — and §6.4's other half is a person
-pressing publish on a draft that is already built. Nothing left *for the
-release* is code.
+pressing publish on a draft. Nothing left *for the release* is code.
 
 ### The next two things, in this order
 
 1. **§6.3 — the clean-VM install**, which needs a second Windows machine that
    has never had the toolchain on it. The bundle is built and installs here;
    what is unproven is that it carries everything a machine without MSVC needs.
-   **Take the bundle off the release page, not out of `target`** — the draft's
-   installers were built by CI from the `v0.1.0` tag, which is `ca9c74c` and
-   therefore already carries DR-38's window and frontend. Downloading them is
-   also §6.4's own verification, so one trip does both rows.
    **Install the NSIS *and* the MSI**: only NSIS carries the WebView2
    bootstrapper, the MSI downloads it from `go.microsoft.com/fwlink` at install
    time, so a VM behind something that blocks that fwlink fails one path and
    passes the other — and a test that tries one does not know which it proved.
-2. **§6.4 — press publish.** The README is written, `v0.1.0` is tagged and
-   pushed, and the release page exists as a draft carrying both installers and
-   their checksums. What is left is a person pressing publish, and then the
-   DoD's own verification, which is row 1 above.
+   **Take a bundle that has §6.5 in it**, not the one on the draft page: the
+   draft's were built from `ca9c74c` and predate both languages.
+2. **§6.4 — press publish.** The README is written in two languages, `v0.1.0`
+   is tagged, and the release page exists as a draft carrying both installers
+   and their checksums. What is left is deciding which bundle the page should
+   carry, a person pressing publish, and then the DoD's own verification, which
+   is row 1 above.
 
 **There is no longer an open row that is not blocked on hardware or a person.**
-§7.14 was the last of them. §7.7 and §7.8 want a second machine, §7.11 wants a
+§6.5 was the last of them. §7.7 and §7.8 want a second machine, §7.11 wants a
 Cloudflare account nobody here has, and §7.13 wants a click in `mmsys.cpl` and
 a monitor with speakers — the table in Phase 7 says which is which.
 
 **What no longer needs re-discovering.** Three things this file used to open
 with are settled and should not be re-derived. **Windows' per-process IO
 counters cannot see the media sockets** — 5.2 / 5.4 / 5.6 kB/s was never about
-video, and `rtc::wire` is what to reach for instead (DR-45). §7.6 is not waiting on a room: it was
-measured twice at 31.7 dB of cancellation (DR-42), and the far-field version of
-it is §7.13, which blocks nothing. **The grey sheet is not the reason
-`viewer.ps1` could not find a picture** — the letterbox is near-black and the
-sheet is grey 176 (DR-46); the corner pixel it read its reference from was.
-And **injection is refused while an
-*elevated* program holds the foreground** — not, as this file once said, while
-somebody is at the machine: measured with the desktop idle 31 minutes and still
-refused, and a click on an ordinary window cleared it (DR-39).
+video, and `rtc::wire` is what to reach for instead (DR-45). §7.6 is not
+waiting on a room: it was measured twice at 31.7 dB of cancellation (DR-42),
+and the far-field version of it is §7.13, which blocks nothing. **The grey
+sheet is not the reason `viewer.ps1` could not find a picture** — the letterbox
+is near-black and the sheet is grey 176 (DR-46); the corner pixel it read its
+reference from was. And **injection is refused while an *elevated* program
+holds the foreground** — not, as this file once said, while somebody is at the
+machine: measured with the desktop idle 31 minutes and still refused, and a
+click on an ordinary window cleared it (DR-39).
 
 ### What this machine needs
 
@@ -111,7 +117,7 @@ refused, and a click on an ordinary window cleared it (DR-39).
 . $env:USERPROFILE\gv\env.ps1     # leaves you in client\src-tauri
 cargo fmt --all --check
 cargo clippy --workspace --all-targets -- -D warnings
-cargo test --workspace              # 192 tests
+cargo test --workspace              # 197 tests
 cd ..;         npm run format:check; npm run typecheck
 cd ..\server;  npm run format:check; npm run typecheck; npm test   # 85 tests
 ```
@@ -1059,6 +1065,30 @@ Goal: two clients talking through the SFU. Riskiest phase — spikes first.
   download from the release page onto a machine, an install, and a call. That
   last one is §6.3's clean VM if it is to prove anything the install on this
   machine has not already proven.
+
+- [x] **6.5 Two languages** — `client/ui/strings.ts`, `client/ui/i18n.ts`,
+  `client/src-tauri/src/lang.rs`, both READMEs. English and Brazilian
+  Portuguese, picked in the settings screen, detected from the machine on a
+  fresh install, and **followed by the tray menu** — which is the half of this
+  that is not a dictionary, because the menu is built before any webview
+  exists and cannot ask one. **DR-47** is the design and the two consequences
+  worth knowing.
+  DoD: every string the window or the tray shows is in both languages; a third
+  language is a type error until it is complete; `README.md` and
+  `README.pt-BR.md` say the same things and link to each other.
+  Verify: the gates, and the app run in each language.
+  **Done, and the type checker is what holds it.** `Strings` is an interface
+  each language satisfies, so a missing key does not compile; `skinOr` and
+  `lightPaletteOr` return `SkinId` / `PaletteId` rather than `string`, so a
+  palette added and not named is a build error rather than a blank swatch; and
+  a string taking an argument is a function, so a translation that loses the
+  room name out of "leave and join {room}" does not compile either.
+  **Diagnostics are English in both languages, on purpose** — the surface is
+  every failure path in the client, and the half left untranslated would be the
+  half somebody pastes into an issue. Both READMEs say so in a section of their
+  own.
+  Gates after it: `cargo test --workspace` **197**, clippy and fmt clean, `tsc`
+  clean, server's 85 untouched.
 
 ---
 
@@ -4848,3 +4878,70 @@ printed `audio device error: A buffer underrun or overrun occurred` while the
 voice held throughout and the gate passed on both — noted here because §7.14
 asked for it to be read together with the aspect table, and it is unrelated to
 it.
+
+### DR-47: the window is the only thing that knows what language it is in (2026-08-27)
+
+**Context.** goodvoice had to speak Brazilian Portuguese as well as English,
+and "the client" is two things that show words to a person: the webview, and
+the **tray menu**, which is the whole app for as long as goodvoice is hidden
+(task 4.2, and task 4.6 destroys the webview to get under the RAM budget). The
+two have to agree — a menu in English hanging off a window in Portuguese is
+worse than either alone — and they are built at different times by different
+languages.
+
+**The thing that forces the design.** The tray is built inside `setup`, which
+runs *before* any webview exists. So at the moment the menu needs its words,
+there is nothing to ask. Three ways out were considered:
+
+1. **Read the OS locale in Rust** — `GetUserDefaultUILanguage`. Correct at
+   first paint with nothing to store, and it is a Windows call: it would have
+   to be `#[cfg]`-ed away for the tests, which run everywhere, and it answers a
+   *different question* from the one the window answers (`navigator.language`),
+   so the two could disagree on the same machine.
+2. **Store it, and let the window be the authority.** The window already
+   detects, already remembers, and already has a catalog; `home.rs` already
+   holds two settings the window is not the only reader of. Chosen.
+3. **A catalog in Rust that the window reads.** Moves every string across the
+   IPC to solve a problem five menu items have.
+
+**Decision — option 2, and the shape of it is one function.** `Home` gains a
+third field beside the server and the window's rectangle, and `set_language`
+is what the window calls: on every *mount*, not only on every change, because
+a fresh install has never been told and the window is the only thing that can
+say. `Home::choose_language` returns whether anything actually moved, so the
+common case — a window rebuilt from the tray, saying the same thing as last
+time — touches neither the disk nor the menu.
+
+**Consequences, both worth knowing before somebody reports them as bugs.**
+
+- **A fresh install's tray is English until the first window has mounted**, and
+  right from the second run onwards. Nothing can do better without option 1.
+- **The menu is relabelled, never rebuilt.** `TrayMenu` now holds all five
+  items rather than the three that change with the call, and `relabel` writes
+  every one of them unconditionally. Rebuilding the tray icon under an open
+  menu takes the menu down with it, and a diff of which items differ between
+  two languages is a table that has to stay right for every pair a third
+  language would add.
+
+**What is deliberately not translated, and why it is not laziness.**
+Diagnostics. What comes back from `join_room`, `start_share` or `set_server` is
+the sentence written where the failure happened, often with a Windows or an SFU
+error inside it. Translating them means translating every failure path in the
+client — and the half left in English would be exactly the half somebody has to
+paste into an issue. Both READMEs say so in a section of their own rather than
+in a footnote.
+
+**Two things the type checker now refuses**, which is the whole reason the
+catalogs are shaped the way they are. `Strings` is an interface and each
+language is a value satisfying it, so a missing key does not compile; and
+`skinOr` / `lightPaletteOr` return `SkinId` / `PaletteId` rather than `string`,
+so a palette added to `appearance.ts` and not named in `strings.ts` is a build
+error rather than a blank swatch. A string that takes an argument is a
+*function* in the catalog, so a translation that drops the room name out of
+"leave and join {room}" does not compile either.
+
+**Measurements.** None to take: nothing here is on a hot path. The gates:
+`cargo test --workspace` 192 → **197** (four in `lang.rs` for the tag
+fall-backs, one in `home.rs` for the language surviving beside the server in a
+file that is rewritten whole), clippy and fmt clean, `tsc --noEmit` clean, the
+server's 85 untouched.

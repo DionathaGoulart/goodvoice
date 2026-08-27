@@ -32,7 +32,7 @@ use tauri::{
 };
 use thiserror::Error;
 
-use crate::Controls;
+use crate::{lang::Language, Controls};
 use menu::{Action, TrayMenu};
 
 /// How long the call gets to hand its seat back when quitting from the tray.
@@ -93,6 +93,19 @@ pub fn apply_controls(app: &AppHandle, controls: Controls) {
     }
 }
 
+/// Puts the tray menu in the language the window is in.
+///
+/// Called from [`crate::set_language`]. Does nothing at all on a host that
+/// gave us no tray, which is the same thing every other function here does
+/// about it — there is no menu to write in any language.
+pub fn apply_language(app: &AppHandle, language: Language) {
+    if let Ok(menu) = app.state::<Tray>().menu.lock() {
+        if let Some(menu) = menu.as_ref() {
+            menu.relabel(language);
+        }
+    }
+}
+
 /// Puts goodvoice in the notification area.
 ///
 /// # Errors
@@ -101,8 +114,8 @@ pub fn apply_controls(app: &AppHandle, controls: Controls) {
 /// [`TrayError::Unavailable`] when the host refuses the icon — a Linux desktop
 /// with no status-notifier host, most often. Neither is fatal: the caller is
 /// expected to carry on with a window that closes normally.
-pub fn install(app: &AppHandle) -> Result<(), TrayError> {
-    let menu = TrayMenu::build(app)?;
+pub fn install(app: &AppHandle, language: Language) -> Result<(), TrayError> {
+    let menu = TrayMenu::build(app, language)?;
 
     let icon = app
         .default_window_icon()

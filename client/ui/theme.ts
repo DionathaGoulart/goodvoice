@@ -29,14 +29,16 @@ import {
   skinOr,
   type Mode,
   type ModePreference,
+  type PaletteId,
+  type SkinId,
 } from "./appearance";
 
 export interface ThemePrefs {
   mode: ModePreference;
-  light: string;
-  dark: string;
+  light: PaletteId;
+  dark: PaletteId;
   /** Skin id — the geometry the palette is painted on. */
-  skin: string;
+  skin: SkinId;
 }
 
 const STORAGE_KEY = "goodvoice-theme";
@@ -89,7 +91,7 @@ export function currentMode(): Mode {
 }
 
 /** The theme id the current preferences resolve to. */
-export function currentTheme(): string {
+export function currentTheme(): PaletteId {
   const current = prefs();
   return (current.mode ?? systemMode()) === "dark"
     ? current.dark
@@ -140,6 +142,6 @@ export function update(patch: Partial<ThemePrefs>): void {
  * ever offers the palettes of the current mode, so a click means "this one,
  * for this mode" and never silently rewrites the other.
  */
-export function pickPalette(id: string): void {
+export function pickPalette(id: PaletteId): void {
   update(currentMode() === "dark" ? { dark: id } : { light: id });
 }

@@ -1,7 +1,15 @@
 # goodvoice
 
+**English** · [Português (Brasil)](README.pt-BR.md)
+
 Lightweight, open-source voice chat for Windows gamers. **Mumble-simple,
 Discord-quality, near-zero performance cost.**
+
+> **v0.1.0 is a test release.** Everything below was measured, and the list of
+> what has _not_ been through a test is in
+> [What this release has not been through](#what-this-release-has-not-been-through)
+> — it is a real list, not a disclaimer. The largest item on it: **no machine
+> without a Rust toolchain on it has ever installed this.**
 
 Three features. Nothing more:
 
@@ -10,6 +18,9 @@ Three features. Nothing more:
 2. **System tray** — minimize and forget it while you game; global push-to-talk
    works over a fullscreen game
 3. **Screen share** — 720p/1080p, hardware H.264, viewers opt in
+
+In **English and Brazilian Portuguese**, picked in the settings screen and
+followed by the tray menu. It starts in whatever your machine is set to.
 
 ![The roster, with levels](docs/ui/roster-levels.png)
 ![The settings screen](docs/ui/settings-sensitivity.png)
@@ -22,7 +33,10 @@ Windows 10/11, x64. Download from the
 - `goodvoice_0.1.0_x64-setup.exe` — NSIS, installs per-user into
   `%LOCALAPPDATA%\goodvoice` with no admin prompt, and carries Microsoft's
   WebView2 bootstrapper
-- `goodvoice_0.1.0_x64_en-US.msi` — the same app for anyone who deploys by MSI
+- `goodvoice_0.1.0_x64_en-US.msi` — the same app for anyone who deploys by MSI.
+  **It does not carry WebView2**: it fetches the bootstrapper from
+  `go.microsoft.com/fwlink` at install time, so it needs the network the NSIS
+  installer does not.
 
 Verify what you downloaded against `SHA256SUMS.txt` on the same page:
 
@@ -30,7 +44,7 @@ Verify what you downloaded against `SHA256SUMS.txt` on the same page:
 Get-FileHash .\goodvoice_0.1.0_x64-setup.exe -Algorithm SHA256
 ```
 
-The one prerequisite the installer does not carry is the **VC++ 2015–2022 x64
+The one prerequisite neither installer carries is the **VC++ 2015–2022 x64
 runtime** — the exe imports `VCRUNTIME140.dll`, `VCRUNTIME140_1.dll` and
 `MSVCP140.dll`. Most machines with a game on them already have it.
 
@@ -84,7 +98,24 @@ the device pipeline's and not a metre of air on top of it. DR-42 and
 Monitor or window, 720p or 1080p, encoded by NVENC / AMF / QuickSync through
 Media Foundation with a software fallback that warns you. Viewers opt in: audio
 is never blocked or degraded by video, and a participant who does not open the
-viewer subscribes to no video track at all.
+viewer subscribes to no video track at all — **and a viewer that closes gives
+the subscription back**, which is a thing this client did not do until the
+wire was read rather than the process's IO counters (DR-45).
+
+## Language
+
+English and Brazilian Portuguese. The window picks one from your machine on
+first run and remembers what you choose after that; the tray menu follows in
+the same click.
+
+What is **not** translated is diagnostics — what comes back from a failed join,
+a refused share or a rejected Worker URL is the sentence written where the
+failure happened, and it is in English in both languages. The surface is every
+failure path in the client, and a half-translated one would leave exactly the
+half somebody needs to paste into an issue.
+
+Adding a third language is `client/ui/strings.ts` and `client/src-tauri/src/lang.rs`,
+and the type checker fails the build on any string either one forgets.
 
 ## Stack
 
@@ -103,8 +134,9 @@ Full guide: [docs/self-hosting.md](docs/self-hosting.md).
 ## What this release has not been through
 
 A measured number nobody has taken is not a promise. One thing this version
-claims is tested up to the hardware its test needs and no further, and five
-more were never run at all.
+claims is tested up to the hardware its test needs and no further, and four
+more were never run at all. **This is what makes v0.1.0 a test release rather
+than a 1.0.**
 
 **Tested up to the hardware, with the command that finishes it:**
 
@@ -112,36 +144,29 @@ more were never run at all.
   build, and the installed client was heard by an independent client in the
   same room at 50 frames a second against the live deploy — from an install,
   not from `target\release`. What is unproven is that the bundle carries
-  everything a Windows machine that has never had MSVC on it needs.
+  everything a Windows machine that has never had MSVC on it needs. This is the
+  one item on this page most likely to bite you, and the one worth telling us
+  about.
 
 **Never run, and none of them block this release:**
 
-| What                                           | Why it is still open                                                                                                  |
-| ---------------------------------------------- | --------------------------------------------------------------------------------------------------------------------- |
-| Pulling the network mid-call | `bin/reconnect-drill` kills the session from the inside; only a real netdown checks that the client *notices* |
-| Four clients conversing | N-party audio is tested; the CPU cost of four at once needs four hosts |
-| What a closed viewer still costs | `tracks/close` is unused, so the SFU is never told a viewer went away |
-| The self-hosting guide, followed by a stranger | written and half-measured; nobody has done it on a fresh Cloudflare account |
-| A loudspeaker a metre away | the canceller was measured with the transducer against the capsule, which is a shorter delay than a desk speaker |
+| What                                           | Why it is still open                                                                                             |
+| ---------------------------------------------- | ---------------------------------------------------------------------------------------------------------------- |
+| Pulling the network mid-call                   | `bin/reconnect-drill` kills the session from the inside; only a real netdown checks that the client _notices_    |
+| Four clients conversing                        | N-party audio is tested; the CPU cost of four at once needs four hosts                                           |
+| The self-hosting guide, followed by a stranger | written and half-measured; nobody has done it on a fresh Cloudflare account                                      |
+| A loudspeaker a metre away                     | the canceller was measured with the transducer against the capsule, which is a shorter delay than a desk speaker |
 
 The plan tracks each of these as a task with a definition of done and the
-command that proves it: [.harness/plan.md](.harness/plan.md), §7.7 through
-§7.13.
+command that proves it: [.harness/plan.md](.harness/plan.md), §7.7, §7.8, §7.11
+and §7.13.
 
-**A viewer opening onto a still share waits up to 2.5 s for its first picture,
-and a still share costs a room 4.4 kB/s with nobody watching.** That was on the
-list above as something to fix and it is not fixable from here: Cloudflare
-never asks this client for a picture — `nack pli` is in the offer and the
-publisher's request counter has never left zero — and a share that sends
-nothing is a share nobody can subscribe to at all. Measured, with the drill
-that measures it, in [.harness/plan.md](.harness/plan.md) §7.10 and DR-44.
-
-One row has left this table since the `v0.1.0` bundle was built, and **the
-bundle does not have the fix**: the window used to come back somewhere else
-every time it was reopened, cascading down the screen over a session (§7.12,
-DR-43). It is fixed on `main` — the rectangle is remembered across a close, a
-reopen and a restart, and refused if the screen it names has gone away — and
-`docs/testing/window-place.ps1` is what says so. It ships in the next build.
+**A viewer opening onto a still share waits up to 2.5 s for its first picture.**
+That was on the list above as something to fix and it is not fixable from here:
+Cloudflare never asks this client for a picture — `nack pli` is in the offer and
+the publisher's request counter has never left zero — and a share that sends
+nothing is a share nobody can subscribe to at all. Measured, with the drill that
+measures it, in [.harness/plan.md](.harness/plan.md) §7.10 and DR-44.
 
 ## Building it yourself
 
@@ -162,7 +187,7 @@ The gates, all of which CI runs on every push:
 cd client\src-tauri
 cargo fmt --all --check
 cargo clippy --workspace --all-targets -- -D warnings
-cargo test --workspace          # 181 tests
+cargo test --workspace          # 197 tests
 cd ..;        npm run format:check; npm run typecheck
 cd ..\server; npm run format:check; npm run typecheck; npm test   # 85 tests
 ```
@@ -170,12 +195,13 @@ cd ..\server; npm run format:check; npm run typecheck; npm test   # 85 tests
 ## How this was built
 
 Every non-obvious decision is a numbered record in
-[.harness/plan.md](.harness/plan.md) — 41 of them, each with what was measured
+[.harness/plan.md](.harness/plan.md) — 46 of them, each with what was measured
 and what it refuted. A few worth reading on their own: DR-14 (one unreachable
 STUN URL hung every join), DR-22 (the release build was a different app than
 the one being measured), DR-27 (the installer packaged the wrong binary because
 nothing said which of twelve was the app), DR-33 (only the first viewer ever
-got a picture).
+got a picture), DR-45 (a closed viewer kept being sent the whole share, and
+Windows' own IO counters could not see it).
 
 ## License
 

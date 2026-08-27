@@ -11,20 +11,47 @@
  * palette it previews — and no hex value leaks outside that file
  * (styleguide.md §2.1).
  *
- * Adding a palette: declare it in styles/themes.css and add it here. Adding a
- * skin: declare its `[data-skin='<id>']` block in styles/skins.css and add it
- * here — and if it invents rules an implementer would otherwise guess, it owes
- * a style guide of its own (§5).
+ * **What is not here any more is the words.** A palette's name and a skin's
+ * one-line hint are shown to a person, and this client speaks two languages
+ * (i18n.ts), so they live in strings.ts keyed by the ids below. That is what
+ * `PaletteId` and `SkinId` are for: adding a palette without naming it in both
+ * languages is a type error rather than a blank swatch.
+ *
+ * Adding a palette: declare it in styles/themes.css, add it here, and name it
+ * in strings.ts. Adding a skin: declare its `[data-skin='<id>']` block in
+ * styles/skins.css, add it here, name it in strings.ts — and if it invents
+ * rules an implementer would otherwise guess, it owes a style guide of its
+ * own (§5).
  */
 
 export type Mode = "light" | "dark";
 /** null is a real choice: "follow the operating system". */
 export type ModePreference = Mode | null;
 
+/**
+ * Every palette this build has, as a type.
+ *
+ * Written out rather than derived from the arrays below because it is the
+ * thing strings.ts is checked against: a union inferred from the catalog would
+ * widen the moment somebody typed `as string`, and the missing translation
+ * would ship as a blank name.
+ */
+export type PaletteId =
+  | "goodvoice-crimson"
+  | "goodvoice-frost"
+  | "goodvoice-forest"
+  | "goodvoice-sand"
+  | "goodvoice-rose"
+  | "goodvoice-gold"
+  | "goodvoice-ember"
+  | "goodvoice-cyan"
+  | "goodvoice-violet"
+  | "goodvoice-matrix";
+
+export type SkinId = "retro" | "terminal";
+
 export interface PaletteOption {
-  id: string;
-  /** Shown in the appearance screen. */
-  label: string;
+  id: PaletteId;
   /** Swatch: page background, accent, foreground. */
   bg: string;
   acc: string;
@@ -34,28 +61,24 @@ export interface PaletteOption {
 export const LIGHT_PALETTES: readonly PaletteOption[] = [
   {
     id: "goodvoice-crimson",
-    label: "crimson chalk",
     bg: "var(--palette-cream)",
     acc: "var(--palette-crimson)",
     fg: "var(--palette-ink)",
   },
   {
     id: "goodvoice-frost",
-    label: "abyss frost",
     bg: "var(--palette-frost-bg)",
     acc: "var(--palette-abyss)",
     fg: "var(--palette-frost-ink)",
   },
   {
     id: "goodvoice-forest",
-    label: "forest mist",
     bg: "var(--palette-forest-bg)",
     acc: "var(--palette-forest-green)",
     fg: "var(--palette-forest-ink)",
   },
   {
     id: "goodvoice-sand",
-    label: "sand dusk",
     bg: "var(--palette-sand-bg)",
     acc: "var(--palette-copper)",
     fg: "var(--palette-sand-ink)",
@@ -65,81 +88,71 @@ export const LIGHT_PALETTES: readonly PaletteOption[] = [
 export const DARK_PALETTES: readonly PaletteOption[] = [
   {
     id: "goodvoice-rose",
-    label: "noir rose",
     bg: "var(--palette-noir)",
     acc: "var(--palette-rose)",
     fg: "var(--palette-cream)",
   },
   {
     id: "goodvoice-gold",
-    label: "vault gold",
     bg: "var(--palette-graphite)",
     acc: "var(--palette-gold)",
     fg: "var(--palette-silver)",
   },
   {
     id: "goodvoice-ember",
-    label: "midnight ember",
     bg: "var(--palette-midnight)",
     acc: "var(--palette-ember)",
     fg: "var(--palette-mint)",
   },
   {
     id: "goodvoice-cyan",
-    label: "cyber teal",
     bg: "var(--palette-cyan-bg)",
     acc: "var(--palette-cyan)",
     fg: "var(--palette-cyan-mist)",
   },
   {
     id: "goodvoice-violet",
-    label: "velvet purple",
     bg: "var(--palette-violet-bg)",
     acc: "var(--palette-violet)",
     fg: "var(--palette-violet-mist)",
   },
   {
     id: "goodvoice-matrix",
-    label: "neon matrix",
     bg: "var(--palette-black)",
     acc: "var(--palette-matrix-green)",
     fg: "var(--palette-matrix-mist)",
   },
 ] as const;
 
-export interface SkinOption {
-  id: string;
-  label: string;
-  /** One line on what changes — the colours never do. */
-  hint: string;
-}
+export const SKINS: readonly SkinId[] = ["retro", "terminal"] as const;
 
-export const SKINS: readonly SkinOption[] = [
-  { id: "retro", label: "neobrutal", hint: "thick frame, hard shadow" },
-  { id: "terminal", label: "terminal", hint: "crt, prompts, phosphor" },
-] as const;
+export const DEFAULT_LIGHT: PaletteId = "goodvoice-crimson";
+export const DEFAULT_DARK: PaletteId = "goodvoice-rose";
+export const DEFAULT_SKIN: SkinId = "retro";
 
-export const DEFAULT_LIGHT = "goodvoice-crimson";
-export const DEFAULT_DARK = "goodvoice-rose";
-export const DEFAULT_SKIN = "retro";
-
-const LIGHT_IDS = LIGHT_PALETTES.map((palette) => palette.id);
-const DARK_IDS = DARK_PALETTES.map((palette) => palette.id);
-const SKIN_IDS = SKINS.map((skin) => skin.id);
+const LIGHT_IDS: readonly string[] = LIGHT_PALETTES.map(
+  (palette) => palette.id,
+);
+const DARK_IDS: readonly string[] = DARK_PALETTES.map((palette) => palette.id);
+const SKIN_IDS: readonly string[] = SKINS;
 
 /*
  * Each falls back to the default whenever the stored value is unknown — a
  * palette dropped from the catalog, or a hand-edited storage entry, must not
  * leave the document with a `data-theme` no stylesheet answers to.
+ *
+ * They return the *narrow* type rather than `string`, which is what makes an
+ * unnamed palette a build error: the value goes on to index strings.ts, and a
+ * `string` there would index a `Record<PaletteId, …>` with anything at all.
  */
-export function lightPaletteOr(id: string | null | undefined): string {
-  return id && LIGHT_IDS.includes(id) ? id : DEFAULT_LIGHT;
+export function lightPaletteOr(id: string | null | undefined): PaletteId {
+  return id && LIGHT_IDS.includes(id) ? (id as PaletteId) : DEFAULT_LIGHT;
 }
 
-export function darkPaletteOr(id: string | null | undefined): string {
-  return id && DARK_IDS.includes(id) ? id : DEFAULT_DARK;
+export function darkPaletteOr(id: string | null | undefined): PaletteId {
+  return id && DARK_IDS.includes(id) ? (id as PaletteId) : DEFAULT_DARK;
 }
 
-export function skinOr(id: string | null | undefined): string {
-  return id && SKIN_IDS.includes(id) ? id : DEFAULT_SKIN;
+export function skinOr(id: string | null | undefined): SkinId {
+  return id && SKIN_IDS.includes(id) ? (id as SkinId) : DEFAULT_SKIN;
 }

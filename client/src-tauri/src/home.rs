@@ -16,8 +16,9 @@
 //!
 //! # Why a file rather than a plugin
 //!
-//! Two small things, read once at startup and written when they change — the
-//! server, and the rectangle the window was last left at ([`crate::place`]).
+//! Three small things, read once at startup and written when they change — the
+//! server, the rectangle the window was last left at ([`crate::place`]), and
+//! the language the tray menu is in ([`crate::lang`]).
 //! `tauri-plugin-store` would bring a dependency, an ACL entry per window and
 //! a second source of truth for the one setting the window is *not* the
 //! authority on. The window's own position is the second, and it is written
@@ -31,13 +32,13 @@ use std::{
 
 use serde::{Deserialize, Serialize};
 
-use crate::place::Placement;
+use crate::{lang::Language, place::Placement};
 
 /// What is stored, and all that is stored.
 ///
 /// A struct rather than a bare string so that the next thing a self-hoster has
 /// to set does not need a second file or a migration. The window's rectangle
-/// is the second thing, and it needed neither.
+/// was the second thing and the language is the third; neither needed either.
 #[derive(Debug, Default, Clone, Serialize, Deserialize)]
 pub struct Stored {
     /// The Worker origin this client joins rooms on. `None` means "whatever
@@ -49,6 +50,11 @@ pub struct Stored {
     /// window did before [`crate::place`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub window: Option<Placement>,
+    /// What language the tray menu is in. `None` is a client no window has
+    /// ever mounted on — a fresh install, whose first window tells it within
+    /// the second it takes to paint (`ui/i18n.ts`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub language: Option<Language>,
 }
 
 /// The file name inside the app's config directory.
@@ -111,6 +117,37 @@ impl Home {
     #[must_use]
     pub const fn fallback(&self) -> &'static str {
         self.fallback
+    }
+
+    /// The language the client's own words are in, or English until a window
+    /// has said otherwise.
+    #[must_use]
+    pub fn language(&self) -> Language {
+        self.stored
+            .read()
+            .ok()
+            .and_then(|stored| stored.language)
+            .unwrap_or_default()
+    }
+
+    /// Records the language and writes the file.
+    ///
+    /// Returns whether this actually changed anything, so the caller can skip
+    /// rewriting a menu that already says the right thing — `i18n.ts` sends
+    /// this on **every** window mount, and a window is rebuilt on every trip
+    /// back from the tray (task 4.6), so the unchanged case is the common one.
+    pub fn choose_language(&self, language: Language) -> bool {
+        {
+            let Ok(mut stored) = self.stored.write() else {
+                return false;
+            };
+            if stored.language == Some(language) {
+                return false;
+            }
+            stored.language = Some(language);
+        }
+        self.save();
+        true
     }
 
     /// Where the window was last seen, as it was written.
@@ -231,6 +268,7 @@ pub fn normalise(url: &str) -> Result<String, String> {
 #[cfg(test)]
 mod tests {
     use super::{normalise, Home};
+    use crate::lang::Language;
 
     const FALLBACK: &str = "https://goodvoice.example.workers.dev";
 
@@ -292,6 +330,18 @@ mod tests {
     }
 
     #[test]
+    fn a_fresh_client_is_english_until_a_window_says_otherwise() {
+        let home = Home::open(None, FALLBACK);
+        assert_eq!(home.language(), Language::English);
+
+        // The answer a window's every mount gets: nothing changed, so nothing
+        // is rewritten.
+        assert!(home.choose_language(Language::BrazilianPortuguese));
+        assert_eq!(home.language(), Language::BrazilianPortuguese);
+        assert!(!home.choose_language(Language::BrazilianPortuguese));
+    }
+
+    #[test]
     fn what_was_written_is_read_back() {
         let directory = std::env::temp_dir().join(format!(
             "goodvoice-home-{}",
@@ -303,10 +353,14 @@ mod tests {
 
         let first = Home::open(Some(&directory), FALLBACK);
         first.choose("https://squad.workers.dev").expect("chosen");
+        first.choose_language(Language::BrazilianPortuguese);
 
         let second = Home::open(Some(&directory), FALLBACK);
         assert_eq!(second.server(), "https://squad.workers.dev");
         assert!(second.is_chosen());
+        // The whole file is rewritten on every change, so the thing to check
+        // is that the *other* settings survived the language being written.
+        assert_eq!(second.language(), Language::BrazilianPortuguese);
 
         let _ = std::fs::remove_dir_all(&directory);
     }

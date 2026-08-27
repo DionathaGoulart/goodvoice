@@ -9,6 +9,7 @@ pub mod audio;
 pub mod capture;
 pub mod home;
 pub mod invite;
+pub mod lang;
 pub mod place;
 pub mod rtc;
 pub mod tray;
@@ -26,6 +27,7 @@ use tauri::{AppHandle, Emitter as _, Manager as _, State};
 use tokio::sync::{watch, Mutex};
 
 use home::Home;
+use lang::Language;
 
 use audio::{
     device::AudioSink,
@@ -846,6 +848,31 @@ async fn set_server(home: State<'_, Home>, url: String) -> Result<ClientInfo, St
     Ok(ClientInfo::of(&home))
 }
 
+/// Tells the client what language the window is in, so the tray menu is in it
+/// too (`ui/i18n.ts`, [`lang`]).
+///
+/// Sent on every window mount as well as on every change, because a fresh
+/// install has never been told and the window is the only thing that knows.
+/// The unchanged case is therefore the common one, and it does not touch the
+/// disk: [`Home::choose_language`] says whether anything moved.
+///
+/// A tag this build does not speak is not an error. `navigator.language` is
+/// whatever the machine is set to, the window has already fallen back to
+/// English for its own strings, and the menu agreeing with it is the right
+/// answer rather than a failed command nobody can act on.
+///
+/// # Errors
+///
+/// Never. The `Result` is what an async command owes its caller.
+#[tauri::command]
+async fn set_language(app: AppHandle, home: State<'_, Home>, tag: String) -> Result<(), String> {
+    let language = Language::of(&tag);
+    if home.choose_language(language) {
+        tray::apply_language(&app, language);
+    }
+    Ok(())
+}
+
 /// The link that brings somebody else into this room.
 ///
 /// Built here rather than in the window because the server half of it is the
@@ -1275,7 +1302,7 @@ pub fn run() {
             // A host that will not give us a tray is not a reason to refuse to
             // run — it is a reason to keep a window that closes normally, which
             // is what `Tray` staying uninstalled means (task 4.1).
-            if let Err(error) = tray::install(app.handle()) {
+            if let Err(error) = tray::install(app.handle(), app.state::<Home>().language()) {
                 eprintln!("no tray icon: {error}; the window will close rather than hide");
             }
 
@@ -1340,6 +1367,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             client_info,
             set_server,
+            set_language,
             invite_link,
             current_status,
             dismiss_invite,

@@ -5,6 +5,14 @@
 //! neither is the source of truth — the call is. Both are told what it says by
 //! [`crate::Controls`], which is why a mute from the tray lights the window's
 //! button up and a mute from the window ticks the tray's box.
+//!
+//! # Two things are told to it, not one
+//!
+//! What is *ticked* comes from the call ([`TrayMenu::apply`]). What it is
+//! *written in* comes from the window ([`TrayMenu::relabel`]), because the
+//! menu exists before any webview does and cannot ask — see [`crate::lang`].
+//! Both arrive after the menu is built, and neither may rebuild it: a tray
+//! icon rebuilt under an open menu takes the menu down with it.
 
 use tauri::{
     menu::{CheckMenuItem, Menu, MenuItem, PredefinedMenuItem},
@@ -12,7 +20,7 @@ use tauri::{
 };
 
 use super::TrayError;
-use crate::Controls;
+use crate::{lang::Language, Controls};
 
 /// What a click on the tray menu means.
 ///
@@ -58,24 +66,31 @@ impl Action {
 /// a hidden client most needs to know.
 pub(super) struct TrayMenu {
     menu: Menu<Wry>,
+    /// Held only so [`TrayMenu::relabel`] can rewrite them. `open` and `quit`
+    /// never change for any other reason, which is why they were not kept
+    /// before there was a second language.
+    open: MenuItem<Wry>,
     mute: CheckMenuItem<Wry>,
     deafen: CheckMenuItem<Wry>,
     leave: MenuItem<Wry>,
+    quit: MenuItem<Wry>,
 }
 
 impl TrayMenu {
     /// # Errors
     ///
     /// [`TrayError::Unavailable`] when the host will not build a menu.
-    pub(super) fn build(app: &AppHandle) -> Result<Self, TrayError> {
-        let open = MenuItem::with_id(app, Action::Show.id(), "Open goodvoice", true, NO_KEY)?;
+    pub(super) fn build(app: &AppHandle, language: Language) -> Result<Self, TrayError> {
+        let words = language.tray();
+        let open = MenuItem::with_id(app, Action::Show.id(), words.open, true, NO_KEY)?;
         // Unchecked and disabled until a call says otherwise: the tray is up
         // before anyone has joined anything.
-        let mute = CheckMenuItem::with_id(app, Action::Mute.id(), "Mute", false, false, NO_KEY)?;
+        let mute =
+            CheckMenuItem::with_id(app, Action::Mute.id(), words.mute, false, false, NO_KEY)?;
         let deafen =
-            CheckMenuItem::with_id(app, Action::Deafen.id(), "Deafen", false, false, NO_KEY)?;
-        let leave = MenuItem::with_id(app, Action::Leave.id(), "Leave room", false, NO_KEY)?;
-        let quit = MenuItem::with_id(app, Action::Quit.id(), "Quit goodvoice", true, NO_KEY)?;
+            CheckMenuItem::with_id(app, Action::Deafen.id(), words.deafen, false, false, NO_KEY)?;
+        let leave = MenuItem::with_id(app, Action::Leave.id(), words.leave, false, NO_KEY)?;
+        let quit = MenuItem::with_id(app, Action::Quit.id(), words.quit, true, NO_KEY)?;
 
         // Separated into what the window does, what the call does, and the
         // way out: three groups of one thought each.
@@ -94,9 +109,11 @@ impl TrayMenu {
 
         Ok(Self {
             menu,
+            open,
             mute,
             deafen,
             leave,
+            quit,
         })
     }
 
@@ -114,6 +131,25 @@ impl TrayMenu {
         let _ = self.deafen.set_checked(controls.deafened);
         let _ = self.deafen.set_enabled(controls.in_call);
         let _ = self.leave.set_enabled(controls.in_call);
+    }
+
+    /// Rewrites every item in `language`.
+    ///
+    /// Every item, unconditionally, rather than a diff: five `set_text` calls
+    /// cost nothing next to the click that caused them, and the alternative is
+    /// a table of which items differ between two languages that has to be
+    /// right for every pair a later language adds.
+    ///
+    /// Failures are dropped for the same reason [`TrayMenu::apply`] drops
+    /// them: a menu item still in the last language is not worth a dialog, and
+    /// there is nothing useful to do about it from here.
+    pub(super) fn relabel(&self, language: Language) {
+        let words = language.tray();
+        let _ = self.open.set_text(words.open);
+        let _ = self.mute.set_text(words.mute);
+        let _ = self.deafen.set_text(words.deafen);
+        let _ = self.leave.set_text(words.leave);
+        let _ = self.quit.set_text(words.quit);
     }
 }
 

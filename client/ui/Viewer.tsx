@@ -1,6 +1,8 @@
 import { createSignal, onCleanup, Show, type Component } from "solid-js";
 import { Channel, invoke } from "@tauri-apps/api/core";
 
+import { t } from "./i18n";
+
 /**
  * The screen-share viewer window (plan.md task 5.4).
  *
@@ -41,10 +43,39 @@ const CODEC = "avc1.42e01f";
  */
 const PATIENCE_MS = 4_000;
 
+/**
+ * What the window has to say for itself, as a state rather than as a sentence.
+ *
+ * A signal holding finished text is a signal that keeps the language it was
+ * written in: this window can be open across a language change (the picker is
+ * in the other one, and both are alive at once), and "waiting for a picture…"
+ * stored at mount would still be in English afterwards. So what is held is
+ * which of four things is true, and the words are read from `t()` where they
+ * are drawn.
+ */
+type Status =
+  | { kind: "waiting" }
+  | { kind: "nobody" }
+  | { kind: "no-decoder" }
+  /** Whatever went wrong, in the prose it arrived in. */
+  | { kind: "failed"; detail: string };
+
 const Viewer: Component = () => {
-  const [status, setStatus] = createSignal<string | null>(
-    "waiting for a picture…",
-  );
+  const [status, setStatus] = createSignal<Status | null>({ kind: "waiting" });
+
+  /** One status as the sentence for it, in the language in force right now. */
+  const sentence = (current: Status): string => {
+    switch (current.kind) {
+      case "waiting":
+        return t().waitingForPicture;
+      case "nobody":
+        return t().nobodyIsSharing;
+      case "no-decoder":
+        return t().noDecoder;
+      case "failed":
+        return current.detail;
+    }
+  };
   let canvas: HTMLCanvasElement | undefined;
   let decoder: VideoDecoder | undefined;
   let patience: number | undefined;
@@ -78,12 +109,16 @@ const Viewer: Component = () => {
 
   const build = () => {
     if (typeof VideoDecoder === "undefined") {
-      setStatus("this webview cannot decode video");
+      setStatus({ kind: "no-decoder" });
       return undefined;
     }
     const built = new VideoDecoder({
       output: paint,
-      error: (failure) => setStatus(`the decoder stopped: ${failure.message}`),
+      error: (failure) =>
+        setStatus({
+          kind: "failed",
+          detail: t().decoderStopped(failure.message),
+        }),
     });
     // No `description`: that is what tells WebCodecs the chunks are Annex B
     // rather than length-prefixed AVCC, and Annex B is what comes off the
@@ -101,7 +136,7 @@ const Viewer: Component = () => {
    */
   const onMessage = (message: ArrayBuffer) => {
     if (message.byteLength === 0) {
-      setStatus("nobody is sharing");
+      setStatus({ kind: "nobody" });
       // The next share starts a new sequence with its own parameter sets, and
       // a decoder holding the last one's state would reject it.
       decoder?.close();
@@ -143,11 +178,11 @@ const Viewer: Component = () => {
   frames.onmessage = onMessage;
 
   void invoke("watch_screen", { frames }).catch((failure) => {
-    setStatus(String(failure));
+    setStatus({ kind: "failed", detail: String(failure) });
   });
 
   patience = window.setTimeout(() => {
-    setStatus((current) => (current === null ? null : "nobody is sharing"));
+    setStatus((current) => (current === null ? null : { kind: "nobody" }));
   }, PATIENCE_MS);
 
   onCleanup(() => {
@@ -165,9 +200,9 @@ const Viewer: Component = () => {
     <main class="crt viewer">
       <canvas ref={canvas} class="screen" />
       <Show when={status()}>
-        {(message) => (
+        {(current) => (
           <p class="screen-status" role="status">
-            {message()}
+            {sentence(current())}
           </p>
         )}
       </Show>

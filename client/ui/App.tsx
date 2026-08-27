@@ -16,6 +16,8 @@ import {
   type ModePreference,
   type PaletteOption,
 } from "./appearance";
+import { choose as chooseLanguage, lang, t } from "./i18n";
+import { LANG_NAMES, LANGS } from "./strings";
 import { currentMode, currentTheme, pickPalette, prefs, update } from "./theme";
 
 /** Mirrors `ClientInfo` in `src-tauri/src/lib.rs`. */
@@ -168,10 +170,16 @@ const SHARE_EVENT = "goodvoice://share";
 const INVITE_EVENT = "goodvoice://invite";
 
 /** The two the picker offers, in the order prd.md §3 F3 names them. */
-const QUALITIES: { id: Quality; label: string; hint: string }[] = [
-  { id: "p720", label: "720p", hint: "lighter on the network" },
-  { id: "p1080", label: "1080p", hint: "sharper, and what the budget is for" },
-];
+const QUALITIES: readonly Quality[] = ["p720", "p1080"] as const;
+
+/**
+ * A resolution is digits in every language, so this is not in strings.ts and
+ * the hint beside it is (`t().qualityHint`).
+ */
+const QUALITY_LABEL: Record<Quality, string> = {
+  p720: "720p",
+  p1080: "1080p",
+};
 
 /**
  * The room code the server will accept: `roomCodeSchema` in
@@ -184,34 +192,23 @@ const ROOM_CODE = /^[a-zA-Z0-9-]{4,24}$/;
 type TransmitMode = "open" | "push-to-talk" | "voice-activity";
 
 /** The modes, in the order they take control away from the microphone. */
-const MODES: { id: TransmitMode; label: string; hint: string }[] = [
-  {
-    id: "open",
-    label: "open",
-    hint: "the microphone is live until you mute",
-  },
-  {
-    id: "push-to-talk",
-    label: "push to talk",
-    hint: "heard only while the key below is held",
-  },
-  {
-    id: "voice-activity",
-    label: "voice",
-    hint: "heard only while you are talking",
-  },
-];
+const MODES: readonly TransmitMode[] = [
+  "open",
+  "push-to-talk",
+  "voice-activity",
+] as const;
 
 /**
  * The three answers to "which palette", in the order they give up control:
  * two that pin it and one that hands it to the operating system. `null` is a
  * real choice, not a missing one — see theme.ts.
  */
-const MODE_CHOICES: { id: ModePreference; label: string }[] = [
-  { id: "light", label: "light" },
-  { id: "dark", label: "dark" },
-  { id: null, label: "system" },
-];
+const MODE_CHOICES: { id: ModePreference; key: "light" | "dark" | "system" }[] =
+  [
+    { id: "light", key: "light" },
+    { id: "dark", key: "dark" },
+    { id: null, key: "system" },
+  ];
 
 /**
  * Where the transmit settings live between runs.
@@ -305,10 +302,10 @@ const storedAudio = (): AudioSettings | null => {
 const DEFAULT_TALK_KEY = "Space";
 
 const isMode = (value: string | null): value is TransmitMode =>
-  MODES.some((mode) => mode.id === value);
+  (MODES as readonly string[]).includes(value ?? "");
 
 const isQuality = (value: string | null): value is Quality =>
-  QUALITIES.some((option) => option.id === value);
+  (QUALITIES as readonly string[]).includes(value ?? "");
 
 /** `KeyboardEvent.code` as something a person would recognise on a keycap. */
 const keyName = (code: string) =>
@@ -333,8 +330,16 @@ const App: Component = () => {
    */
   /** A link that arrived while this window was open, and what to do with it. */
   const [invite, setInvite] = createSignal<InviteOffer | null>(null);
-  /** What the *copy invite* button last did, so the click has an answer. */
-  const [copied, setCopied] = createSignal<string | null>(null);
+  /**
+   * What the *copy invite* button last did, so the click has an answer.
+   *
+   * Which of two things happened, not the words for it: the button can still
+   * be showing its answer when somebody changes language, and a stored
+   * sentence would stay in the language it was written in.
+   */
+  const [copied, setCopied] = createSignal<
+    { ok: true } | { ok: false; detail: string } | null
+  >(null);
 
   const [serverDraft, setServerDraft] = createSignal<string | null>(null);
   const [serverError, setServerError] = createSignal<string | null>(null);
@@ -685,9 +690,9 @@ const App: Component = () => {
         document.execCommand("copy");
         box.remove();
       }
-      setCopied("invite copied");
+      setCopied({ ok: true });
     } catch (reason) {
-      setCopied(String(reason));
+      setCopied({ ok: false, detail: String(reason) });
     }
     window.setTimeout(() => setCopied(null), 4000);
   };
@@ -926,7 +931,7 @@ const App: Component = () => {
    */
   const Sensitivity = () => (
     <div class="field">
-      <span class="field-label">sensitivity</span>
+      <span class="field-label">{t().sensitivity}</span>
       <div class="modes">
         <button
           class="action"
@@ -935,7 +940,7 @@ const App: Component = () => {
           aria-pressed={audio().automaticSensitivity}
           onClick={() => changeAudio({ automaticSensitivity: true })}
         >
-          automatic
+          {t().automatic}
         </button>
         <button
           class="action"
@@ -944,18 +949,13 @@ const App: Component = () => {
           aria-pressed={!audio().automaticSensitivity}
           onClick={() => changeAudio({ automaticSensitivity: false })}
         >
-          manual
+          {t().manual}
         </button>
       </div>
 
       <Show
         when={!audio().automaticSensitivity}
-        fallback={
-          <p class="notice">
-            a detector decides what is a voice. it ignores a keyboard at any
-            volume, and lets a quiet room through at almost none
-          </p>
-        }
+        fallback={<p class="notice">{t().automaticHint}</p>}
       >
         <Meter level={inputLevel()} threshold={audio().threshold} />
         <input
@@ -965,7 +965,7 @@ const App: Component = () => {
           max={decibels(MAX_THRESHOLD)}
           step={0.5}
           value={decibels(audio().threshold)}
-          aria-label="input threshold in decibels"
+          aria-label={t().thresholdAria}
           onInput={(event) =>
             changeAudio({
               threshold: levelFromDecibels(event.currentTarget.valueAsNumber),
@@ -973,11 +973,8 @@ const App: Component = () => {
           }
         />
         <p class="notice">
-          {Math.round(decibels(audio().threshold))} dB — the room hears you past
-          the mark.{" "}
-          {call()
-            ? "talk, and put the mark just under where the bar sits."
-            : "the meter is live once you are in a room."}
+          {t().thresholdHint(Math.round(decibels(audio().threshold)))}{" "}
+          {call() ? t().thresholdInCall : t().thresholdBeforeCall}
         </p>
       </Show>
     </div>
@@ -994,7 +991,7 @@ const App: Component = () => {
    */
   const Settings = () => (
     <section class="panel animate-enter">
-      <h2 class="section">audio</h2>
+      <h2 class="section">{t().audio}</h2>
 
       <TransmitSettings />
 
@@ -1003,23 +1000,23 @@ const App: Component = () => {
       </Show>
 
       <Toggle
-        label="noise suppression"
-        hint="takes a fan and a room's hum out from under your voice, and a little of the consonants with them"
+        label={t().noiseSuppression}
+        hint={t().noiseSuppressionHint}
         on={audio().noiseSuppression}
         onChange={(on) => changeAudio({ noiseSuppression: on })}
       />
 
       <Toggle
-        label="echo cancellation"
-        hint="stops the room hearing itself back. pointless on a headset, and the difference between a call and a howl on speakers"
+        label={t().echoCancellation}
+        hint={t().echoCancellationHint}
         on={audio().echoCancellation}
         onChange={(on) => changeAudio({ echoCancellation: on })}
       />
 
-      <h2 class="section">server</h2>
+      <h2 class="section">{t().server}</h2>
 
       <label class="field">
-        <span class="field-label">worker url</span>
+        <span class="field-label">{t().workerUrl}</span>
         <input
           class="field-input"
           value={serverText()}
@@ -1039,7 +1036,7 @@ const App: Component = () => {
           disabled={savingServer() || serverText().trim() === info()?.server}
           onClick={() => void saveServer(serverText())}
         >
-          use this server
+          {t().useThisServer}
         </button>
         <Show when={info()?.serverChosen}>
           <button
@@ -1048,7 +1045,7 @@ const App: Component = () => {
             disabled={savingServer()}
             onClick={() => void saveServer("")}
           >
-            back to the bundled one
+            {t().backToBundled}
           </button>
         </Show>
       </div>
@@ -1057,9 +1054,7 @@ const App: Component = () => {
         when={serverError()}
         fallback={
           <p class="notice">
-            {call()
-              ? "the next call joins here; this one stays where it is"
-              : "your own deploy goes here — docs/self-hosting.md"}
+            {call() ? t().serverNextCall : t().serverYourOwn}
           </p>
         }
       >
@@ -1070,10 +1065,10 @@ const App: Component = () => {
         )}
       </Show>
 
-      <h2 class="section">appearance</h2>
+      <h2 class="section">{t().appearance}</h2>
 
       <div class="field">
-        <span class="field-label appearance-label">mode</span>
+        <span class="field-label appearance-label">{t().mode}</span>
         <div class="modes">
           <For each={MODE_CHOICES}>
             {(choice) => (
@@ -1084,7 +1079,7 @@ const App: Component = () => {
                 aria-pressed={prefs().mode === choice.id}
                 onClick={() => update({ mode: choice.id })}
               >
-                {choice.label}
+                {t().modeChoice[choice.key]}
               </button>
             )}
           </For>
@@ -1092,7 +1087,7 @@ const App: Component = () => {
       </div>
 
       <div class="field">
-        <span class="field-label appearance-label">palette</span>
+        <span class="field-label appearance-label">{t().palette}</span>
         <div class="swatches">
           <For each={currentMode() === "dark" ? DARK_PALETTES : LIGHT_PALETTES}>
             {(palette) => <Swatch palette={palette} />}
@@ -1101,25 +1096,46 @@ const App: Component = () => {
       </div>
 
       <div class="field">
-        <span class="field-label appearance-label">skin</span>
+        <span class="field-label appearance-label">{t().skin}</span>
         <div class="controls">
           <For each={SKINS}>
             {(skin) => (
               <button
                 class="action"
-                classList={{ "action-picked": prefs().skin === skin.id }}
+                classList={{ "action-picked": prefs().skin === skin }}
                 type="button"
-                aria-pressed={prefs().skin === skin.id}
-                onClick={() => update({ skin: skin.id })}
+                aria-pressed={prefs().skin === skin}
+                onClick={() => update({ skin })}
               >
-                {skin.label}
+                {t().skins[skin].label}
               </button>
             )}
           </For>
         </div>
-        <p class="notice">
-          {SKINS.find((skin) => skin.id === prefs().skin)?.hint}
-        </p>
+        <p class="notice">{t().skins[prefs().skin].hint}</p>
+      </div>
+
+      {/* Last of the three, and its own field rather than a row inside
+          appearance: it is not a look, it changes every other word on this
+          screen — and the tray menu with them (i18n.ts). */}
+      <div class="field">
+        <span class="field-label appearance-label">{t().language}</span>
+        <div class="controls">
+          <For each={LANGS}>
+            {(option) => (
+              <button
+                class="action"
+                classList={{ "action-picked": lang() === option }}
+                type="button"
+                lang={option}
+                aria-pressed={lang() === option}
+                onClick={() => chooseLanguage(option)}
+              >
+                {LANG_NAMES[option]}
+              </button>
+            )}
+          </For>
+        </div>
       </div>
 
       <button
@@ -1127,7 +1143,7 @@ const App: Component = () => {
         type="button"
         onClick={() => setSettings(false)}
       >
-        done
+        {t().done}
       </button>
     </section>
   );
@@ -1142,8 +1158,8 @@ const App: Component = () => {
       class="swatch"
       classList={{ "swatch-picked": currentTheme() === props.palette.id }}
       type="button"
-      title={props.palette.label}
-      aria-label={props.palette.label}
+      title={t().palettes[props.palette.id]}
+      aria-label={t().palettes[props.palette.id]}
       aria-pressed={currentTheme() === props.palette.id}
       style={{
         "--swatch-bg": props.palette.bg,
@@ -1153,7 +1169,7 @@ const App: Component = () => {
       onClick={() => pickPalette(props.palette.id)}
     >
       <span class="swatch-acc" aria-hidden="true" />
-      <span class="swatch-name">{props.palette.label}</span>
+      <span class="swatch-name">{t().palettes[props.palette.id]}</span>
     </button>
   );
 
@@ -1168,23 +1184,23 @@ const App: Component = () => {
    */
   const TransmitSettings = () => (
     <div class="field">
-      <span class="field-label">transmit</span>
+      <span class="field-label">{t().transmit}</span>
       <div class="modes">
         <For each={MODES}>
           {(option) => (
             <button
               class="action"
-              classList={{ "action-picked": mode() === option.id }}
+              classList={{ "action-picked": mode() === option }}
               type="button"
-              aria-pressed={mode() === option.id}
-              onClick={() => chooseMode(option.id)}
+              aria-pressed={mode() === option}
+              onClick={() => chooseMode(option)}
             >
-              {option.label}
+              {t().transmitMode[option].label}
             </button>
           )}
         </For>
       </div>
-      <p class="notice">{MODES.find((it) => it.id === mode())?.hint}</p>
+      <p class="notice">{t().transmitMode[mode()].hint}</p>
       <Show when={mode() === "push-to-talk"}>
         <button
           class="action"
@@ -1192,15 +1208,11 @@ const App: Component = () => {
           type="button"
           onClick={() => setRebinding(true)}
         >
-          {rebinding()
-            ? "press a key, or escape"
-            : `key: ${keyName(talkKey())}`}
+          {rebinding() ? t().pressAKey : t().talkKeyIs(keyName(talkKey()))}
         </button>
         <Show when={call()}>
           <p class="notice">
-            {globalKey()
-              ? "heard from anywhere, including over a game"
-              : "heard only while this window has focus"}
+            {globalKey() ? t().keyHeardAnywhere : t().keyHeardHereOnly}
           </p>
         </Show>
       </Show>
@@ -1218,7 +1230,7 @@ const App: Component = () => {
         <h1 class="wordmark">
           good<span class="wordmark-accent">voice</span>
         </h1>
-        <Show when={info()} fallback={<p class="tagline">starting…</p>}>
+        <Show when={info()} fallback={<p class="tagline">{t().starting}</p>}>
           {(loaded) => <p class="tagline">v{loaded().version}</p>}
         </Show>
         <button
@@ -1227,7 +1239,7 @@ const App: Component = () => {
           aria-pressed={settings()}
           onClick={() => setSettings(!settings())}
         >
-          {settings() ? "back" : "settings"}
+          {settings() ? t().back : t().settings}
         </button>
       </header>
 
@@ -1237,8 +1249,12 @@ const App: Component = () => {
       <Show when={invite()}>
         {(offer) => (
           <div class="panel invite animate-enter" role="status">
+            {/* The room in bold and the client's own reason after it. The
+                reason is Rust's prose and arrives in English in both
+                languages — see strings.ts on diagnostics. */}
             <p class="notice">
-              an invite to <strong>{offer().room}</strong> — {offer().reason}
+              {t().inviteLead} <strong>{offer().room}</strong> —{" "}
+              {offer().reason}
             </p>
             <div class="modes">
               <Show when={offer().joinable}>
@@ -1248,8 +1264,8 @@ const App: Component = () => {
                   onClick={() => void acceptInvite(offer())}
                 >
                   {call()
-                    ? `leave and join ${offer().room}`
-                    : `try ${offer().room} again`}
+                    ? t().leaveAndJoin(offer().room)
+                    : t().tryAgain(offer().room)}
                 </button>
               </Show>
               <button
@@ -1262,7 +1278,7 @@ const App: Component = () => {
                   void invoke("dismiss_invite").catch(() => {});
                 }}
               >
-                dismiss
+                {t().dismiss}
               </button>
             </div>
           </div>
@@ -1275,12 +1291,12 @@ const App: Component = () => {
           fallback={
             <form class="panel animate-enter" onSubmit={join}>
               <label class="field">
-                <span class="field-label">room</span>
+                <span class="field-label">{t().room}</span>
                 <input
                   class="field-input"
                   value={room()}
                   onInput={(event) => setRoom(event.currentTarget.value)}
-                  placeholder="squad-night"
+                  placeholder={t().roomPlaceholder}
                   autocapitalize="none"
                   autocomplete="off"
                   spellcheck={false}
@@ -1289,12 +1305,12 @@ const App: Component = () => {
               </label>
 
               <label class="field">
-                <span class="field-label">name</span>
+                <span class="field-label">{t().name}</span>
                 <input
                   class="field-input"
                   value={name()}
                   onInput={(event) => setName(event.currentTarget.value)}
-                  placeholder="anon"
+                  placeholder={t().namePlaceholder}
                   autocomplete="off"
                   maxlength={32}
                   disabled={joining()}
@@ -1306,7 +1322,7 @@ const App: Component = () => {
                 type="submit"
                 disabled={!canJoin()}
               >
-                {joining() ? "joining…" : "join"}
+                {joining() ? t().joining : t().join}
               </button>
 
               <Show when={error()}>
@@ -1317,9 +1333,7 @@ const App: Component = () => {
                   !error() && room() !== "" && !ROOM_CODE.test(room().trim())
                 }
               >
-                <p class="notice">
-                  4–24 characters, letters, numbers and hyphens only
-                </p>
+                <p class="notice">{t().roomCodeRule}</p>
               </Show>
             </form>
           }
@@ -1330,14 +1344,14 @@ const App: Component = () => {
                   puzzle to a screen reader, and to anything else reading this
                   window — docs/testing/invite.ps1 has to tell the room a
                   client is *in* from a room an invite is *offering*. */}
-              <p class="tagline" aria-label={`room ${joined().room}`}>
+              <p class="tagline" aria-label={t().roomLabel(joined().room)}>
                 {joined().room}
               </p>
 
               <Show when={reconnecting()}>
                 {(attempt) => (
                   <p class="notice notice-warn" role="status">
-                    reconnecting… (attempt {attempt()})
+                    {t().reconnecting(attempt())}
                   </p>
                 )}
               </Show>
@@ -1345,7 +1359,7 @@ const App: Component = () => {
               <ul class="roster">
                 <For
                   each={roster()}
-                  fallback={<li class="roster-empty">just you</li>}
+                  fallback={<li class="roster-empty">{t().justYou}</li>}
                 >
                   {(peer) => (
                     <li class="roster-row">
@@ -1368,16 +1382,16 @@ const App: Component = () => {
                       />
                       <span class="roster-name">{peer.name}</span>
                       <Show when={peer.id === joined().self_id}>
-                        <span class="roster-tag">you</span>
+                        <span class="roster-tag">{t().you}</span>
                       </Show>
                       <Show when={peer.muted}>
-                        <span class="roster-tag">muted</span>
+                        <span class="roster-tag">{t().mutedTag}</span>
                       </Show>
                       {/* Two different facts: muted is "cannot be heard",
                         deafened is "cannot hear you". Someone deafened is
                         still able to talk, so the roster says both. */}
                       <Show when={peer.deafened}>
-                        <span class="roster-tag">deafened</span>
+                        <span class="roster-tag">{t().deafenedTag}</span>
                       </Show>
                     </li>
                   )}
@@ -1392,7 +1406,7 @@ const App: Component = () => {
                   onClick={toggleMute}
                   aria-pressed={muted()}
                 >
-                  {muted() ? "unmute" : "mute"}
+                  {muted() ? t().unmute : t().mute}
                 </button>
                 <button
                   class="action"
@@ -1401,7 +1415,7 @@ const App: Component = () => {
                   onClick={toggleDeafen}
                   aria-pressed={deafened()}
                 >
-                  {deafened() ? "undeafen" : "deafen"}
+                  {deafened() ? t().undeafen : t().deafen}
                 </button>
               </div>
 
@@ -1410,7 +1424,11 @@ const App: Component = () => {
                 type="button"
                 onClick={() => void copyInvite()}
               >
-                {copied() ?? "copy invite"}
+                {(() => {
+                  const answer = copied();
+                  if (!answer) return t().copyInvite;
+                  return answer.ok ? t().inviteCopied : answer.detail;
+                })()}
               </button>
 
               <Show when={sharer()}>
@@ -1420,7 +1438,7 @@ const App: Component = () => {
                     type="button"
                     onClick={() => void watchScreen()}
                   >
-                    watch {who().name}&apos;s screen
+                    {t().watchScreen(who().name)}
                   </button>
                 )}
               </Show>
@@ -1432,20 +1450,24 @@ const App: Component = () => {
                 })()}
                 fallback={
                   <button class="action" type="button" onClick={openPicker}>
-                    share a screen
+                    {t().shareAScreen}
                   </button>
                 }
               >
                 {(live) => (
                   <div class="sharing">
                     <p class="notice" role="status">
-                      sharing {live().target} at {live().width}×{live().height}
+                      {t().sharingAt(
+                        live().target,
+                        live().width,
+                        live().height,
+                      )}
                     </p>
                     {/* prd.md §3 F3: a software fallback is allowed and the
                       user must be told. This is the telling. */}
                     <Show when={!live().hardware}>
                       <p class="notice notice-warn" role="status">
-                        no hardware encoder — this will cost the machine frames
+                        {t().noHardwareEncoder}
                       </p>
                     </Show>
                     <button
@@ -1453,7 +1475,7 @@ const App: Component = () => {
                       type="button"
                       onClick={stopShare}
                     >
-                      stop sharing
+                      {t().stopSharing}
                     </button>
                   </div>
                 )}
@@ -1474,31 +1496,33 @@ const App: Component = () => {
 
               <Show when={picking()}>
                 <div class="picker animate-enter">
-                  <p class="field-label">quality</p>
+                  <p class="field-label">{t().quality}</p>
                   <div class="modes">
                     <For each={QUALITIES}>
                       {(option) => (
                         <button
                           class="action"
                           classList={{
-                            "action-picked": quality() === option.id,
+                            "action-picked": quality() === option,
                           }}
                           type="button"
-                          onClick={() => pickQuality(option.id)}
-                          aria-pressed={quality() === option.id}
-                          title={option.hint}
+                          onClick={() => pickQuality(option)}
+                          aria-pressed={quality() === option}
+                          title={t().qualityHint[option]}
                         >
-                          {option.label}
+                          {QUALITY_LABEL[option]}
                         </button>
                       )}
                     </For>
                   </div>
 
-                  <p class="field-label">what to share</p>
+                  <p class="field-label">{t().whatToShare}</p>
                   <ul class="targets">
                     <For
                       each={targets()}
-                      fallback={<li class="roster-empty">nothing to share</li>}
+                      fallback={
+                        <li class="roster-empty">{t().nothingToShare}</li>
+                      }
                     >
                       {(target) => (
                         <li>
@@ -1507,7 +1531,9 @@ const App: Component = () => {
                             type="button"
                             onClick={() => void startShare(target)}
                           >
-                            <span class="target-kind">{target.kind}</span>
+                            <span class="target-kind">
+                              {t().targetKind[target.kind]}
+                            </span>
                             <span class="target-name">{target.name}</span>
                             <span class="target-size">
                               {target.width}×{target.height}
@@ -1523,13 +1549,13 @@ const App: Component = () => {
                     type="button"
                     onClick={() => setPicking(false)}
                   >
-                    cancel
+                    {t().cancel}
                   </button>
                 </div>
               </Show>
 
               <button class="action action-leave" type="button" onClick={leave}>
-                leave
+                {t().leave}
               </button>
             </section>
           )}

@@ -4,7 +4,8 @@ import { render } from "solid-js/web";
 
 import { App } from "./App";
 import { Viewer } from "./Viewer";
-import { boot } from "./theme";
+import { boot as bootLanguage } from "./i18n";
+import { boot as bootTheme } from "./theme";
 import "./styles/app.css";
 
 const root = document.getElementById("root");
@@ -13,12 +14,18 @@ if (!root) {
 }
 
 /*
- * Before the first render, not inside it: the stored palette has to be on
- * <html> when the window paints, or the default shows for a frame first. Task
- * 4.6 destroys and rebuilds this window on every trip back from the tray, so
- * that frame would not be a one-off at startup — it would be every time.
+ * Before the first render, not inside it: the stored palette and the stored
+ * language have to be on <html> when the window paints, or the defaults show
+ * for a frame first. Task 4.6 destroys and rebuilds this window on every trip
+ * back from the tray, so that frame would not be a one-off at startup — it
+ * would be every time.
+ *
+ * The language first, because it is the one that also leaves the window: it
+ * hands the client the tag so the tray menu is in the same language, and on a
+ * fresh install that push is the only way the client ever learns it (i18n.ts).
  */
-boot();
+bootLanguage();
+bootTheme();
 
 /*
  * One bundle, two windows. The viewer (plan.md task 5.4) is a second Tauri
