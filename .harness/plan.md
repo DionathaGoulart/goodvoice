@@ -21,58 +21,43 @@
 
 ## Start here
 
-**Where this stopped:** 2026-08-25, with §7.6's instrument built and its
-answer taken: this machine cannot host that test.
-Phases 0–5 are closed, and so are §6.1, §6.2, §7.1, §7.2, §7.3, §7.4 and §7.5.
-What is open is §6.3, §6.4 and the rest of Phase 7 — and **Phase 7 opens with
-the order to do all of it in**, whose rows 1–6 are done and whose row 7 is now
-blocked on an object rather than on work. Nothing else in this file needs
-reading first.
+**Where this stopped:** 2026-08-26, with §7.6 measured and closed. That was
+the last release-blocking row that was about this app rather than about a
+machine nobody here has, and it needed one object: a loudspeaker the microphone
+could hear. A HyperX earcup laid face-down on the fifine's capsule was it.
+Phases 0–5 are closed, and so are §6.1, §6.2 and §7.1–§7.6. What is open is
+§6.3, §6.4 and §7.7–§7.13. Nothing else in this file needs reading first.
 
-**Two of the three things below now wait on hardware nobody here has**, and
-that is the shape of the release rather than a thing to keep re-discovering:
-§7.6 wants a loudspeaker the microphone can hear, §6.3 wants a second Windows
-machine. Both were asked for on 2026-08-25 and neither was available. §6.4 is
-not blocked, and it is the row that decides what a release with those two
-unrun is allowed to claim.
+**Only one thing still blocks v0.1.0, and it is a second Windows machine.**
+§6.3 and §6.4's verification are the same act — install on a machine that has
+never had the toolchain, and join a call — and §6.4's other half is a person
+pressing publish on a draft that is already built. Nothing left is code.
 
-### The next three things, in this order
+### The next two things, in this order
 
-1. **Phase 7 row 7 — §7.6, a room hearing itself. Blocked on a loudspeaker,
-   and on nothing else.** The question this file asked — *can an instrument
-   reach it before anybody is scheduled* — has been answered: yes, all of it
-   except the room. `bin/echo-room` makes the tone take the whole trip through
-   a real transducer and a real microphone, and it **refused twice**, at
-   0.4 dB and 2.0 dB of coupling against the 6 dB it needs (DR-41). The only
-   active render endpoint on this machine is a headset earphone; the analog
-   jack DR-23 measured through now reports `not present`. Lay an earcup
-   face-down against the fifine, or put a speaker back in the jack, and the
-   row is one command: `cargo run -p goodvoice-harness --bin echo-room --
-   --record <dir>`. **Do not re-derive this** — the drill's own control says
-   it in one line, and the canceller-off segment is there so that a room with
-   no loudspeaker in it can never be mistaken for a canceller that works.
-   4.7's other half — does the suppressor sound better on than off — needs no
-   loudspeaker at all: `--record` writes the WAVs even when the verdict is
-   refused, and `quiet.wav` against `suppressed.wav` is a listening test that
-   can be done today.
-   **Injection is refused while an *elevated* program holds the foreground.**
-   Not, as this file said twice, while somebody is at the machine: measured
-   with the desktop idle 31 minutes and still refused, and a click on an
-   ordinary window cleared it (DR-39). This blocks every drill that clicks, and
-   the drills now name the program in the way rather than blaming the app.
-2. **§6.3 — the clean-VM install**, which needs a second Windows machine that
+1. **§6.3 — the clean-VM install**, which needs a second Windows machine that
    has never had the toolchain on it. The bundle is built and installs here;
    what is unproven is that it carries everything a machine without MSVC needs.
-   **Rebuild the bundle first:** DR-38 changed the window and the frontend, and
-   the installed app on this machine is older than both.
-3. **§6.4 — the README is written, `v0.1.0` is tagged and pushed, and the
-   release page exists as a draft carrying both installers and their
-   checksums.** What is left is two things a person does: **press publish**,
-   and then the DoD's own verification — download from the page, install,
-   join a call. On this machine that install proves only what §6.3 already
-   proved here, so the verification worth having is §6.3's clean VM, and
-   **it should install the NSIS *and* the MSI**: only NSIS carries the WebView2
-   bootstrapper, the MSI downloads it.
+   **Take the bundle off the release page, not out of `target`** — the draft's
+   installers were built by CI from the `v0.1.0` tag, which is `ca9c74c` and
+   therefore already carries DR-38's window and frontend. Downloading them is
+   also §6.4's own verification, so one trip does both rows.
+   **Install the NSIS *and* the MSI**: only NSIS carries the WebView2
+   bootstrapper, the MSI downloads it from `go.microsoft.com/fwlink` at install
+   time, so a VM behind something that blocks that fwlink fails one path and
+   passes the other — and a test that tries one does not know which it proved.
+2. **§6.4 — press publish.** The README is written, `v0.1.0` is tagged and
+   pushed, and the release page exists as a draft carrying both installers and
+   their checksums. What is left is a person pressing publish, and then the
+   DoD's own verification, which is row 1 above.
+
+**What no longer needs re-discovering.** Two things this file used to open with
+are settled and should not be re-derived. §7.6 is not waiting on a room: it was
+measured twice at 31.7 dB of cancellation (DR-42), and the far-field version of
+it is §7.13, which blocks nothing. And **injection is refused while an
+*elevated* program holds the foreground** — not, as this file once said, while
+somebody is at the machine: measured with the desktop idle 31 minutes and still
+refused, and a click on an ordinary window cleared it (DR-39).
 
 ### What this machine needs
 
@@ -693,9 +678,13 @@ Goal: two clients talking through the SFU. Riskiest phase — spikes first.
   threshold nothing in the room reaches, and **50 frames a second** at one the
   room's hum crosses — the slider's own effect, at the far end. Screenshots of
   the panel and of a lit roster dot in `docs/ui/`.
-  **Not verified:** whether the noise suppressor and the echo canceller sound
-  better switched on than off, which is 3.4's outstanding row and needs the
-  same person on loudspeakers. **§7.6** owns this now.
+  **Verified 2026-08-26, by §7.6 and DR-42:** the noise suppressor is better
+  switched on — the room's 200–450 Hz rumble is clearly reduced and nothing
+  that matters goes with it — and the echo canceller takes 31.7 dB off a real
+  loudspeaker's echo, leaving a residual a person can find but not one that
+  pumps or gates. Neither was answerable by a level: `NOISE_SUPPRESSED` has
+  read both signs across five runs of one room, because the gain controller
+  sits after the suppressor.
 
 ## Phase 5 — Screen share
 
@@ -1000,10 +989,12 @@ Goal: two clients talking through the SFU. Riskiest phase — spikes first.
   the RAM budget is met by destroying the window, DR-21), carries six
   screenshots out of `docs/ui/`, and points at `docs/self-hosting.md`.
   **It says what has not been through anything**, which is the half of this
-  task that is not a README: §7.6 and §6.3 are written as *tested up to the
-  hardware the test needs*, each with the command that finishes it, and
-  §7.7–§7.12 are a six-row table of things never run — so a reader cannot
-  assume a measurement nobody took.
+  task that is not a README: §6.3 is written as *tested up to the hardware the
+  test needs*, with the command that finishes it, and §7.7–§7.13 are a
+  seven-row table of things never run — so a reader cannot assume a measurement
+  nobody took. Rewritten 2026-08-26, when §7.6 stopped being one of them: the
+  echo canceller's 31.7 dB through a real room is quoted under *Performance*
+  now, with the far-field case it does **not** cover named beside it.
   Built: `.github/workflows/release.yml`, on `push: tags: v*`. It is ci.yml's
   Windows environment — the MSVC dev shell, LLVM *after* it (DR-30), meson and
   ninja from pip (DR-11), `CMAKE_POLICY_VERSION_MINIMUM` (DR-4) — and then
@@ -1061,7 +1052,7 @@ knew about itself. The checkbox is here.
 | ~~4~~ | ~~§7.3 the rebuilt window's flicker~~ — measured and fixed 2026-08-25, DR-38 | a drill, after all | — |
 | ~~5~~ | ~~§7.4 the share picker under the `retro` skin~~ — shot and looked at 2026-08-25 | a person, two minutes | — |
 | ~~6~~ | ~~§7.5 the talk key over a fullscreen game~~ — passed twice 2026-08-25, a drill; DR-40 | ~~a person and a game~~ a swap chain | — |
-| 7 | §7.6 a room hearing itself on loudspeakers — **instrument built and refused: this machine has no loudspeaker** (DR-41) | ~~a person in a room~~ a loudspeaker the microphone can hear | **yes** — prd.md §3 F4 |
+| ~~7~~ | ~~§7.6 a room hearing itself on loudspeakers~~ — measured twice 2026-08-26, 31.7 dB of cancellation; DR-41 refused it, DR-42 passed it | ~~a loudspeaker the microphone can hear~~ an earcup on the capsule | — |
 | 8 | §6.3 the clean-VM install | a second Windows machine | **yes** |
 | 9 | §6.4 README, tag, release | — | **it is the release** |
 | 10 | §7.7 the netdown run | a second machine, or a person and a cable | no |
@@ -1070,8 +1061,9 @@ knew about itself. The checkbox is here.
 | 13 | §7.10 keyframe on demand, by PLI | code | no |
 | 14 | §7.11 the self-hosting walkthrough on a fresh account | a Cloudflare account nobody here has | no |
 | 15 | §7.12 the rebuilt window comes back somewhere else | code | no |
+| 16 | §7.13 a loudspeaker a metre away, not one on the capsule | a click in `mmsys.cpl`, and a monitor with speakers | no |
 
-Rows 10–15 do not block the release **as long as the README says so**: a
+Rows 10–16 do not block the release **as long as the README says so**: a
 measured number nobody has taken is not a promise, and 6.4 has to say which of
 these were never run rather than let a reader assume all of them were.
 
@@ -1239,47 +1231,41 @@ these were never run rather than let a reader assume all of them were.
   has focus*. And that state survives a restart: the settings button then reads
   `key:` with nothing after it, so a drill matching `key: ` walks away
   reporting an app with no key button.
-- [ ] **7.6 A room hearing itself** — tasks 3.4 and 4.7. The echo canceller is
+- [x] **7.6 A room hearing itself** — tasks 3.4 and 4.7. The echo canceller was
   measured against a synthetic loopback, which is the *hard* case and not the
-  real one; nobody has put a microphone and a loudspeaker in one room and
+  real one; nobody had put a microphone and a loudspeaker in one room and
   listened. Same run answers 4.7's question about whether noise suppression
   sounds better on than off.
   DoD: a paragraph in `docs/testing/` with what was heard, and the echo column
   from `bin/listener --tone` beside it.
   Verify: `cargo run -p goodvoice-harness --bin echo-room -- --record <dir>`,
   with a loudspeaker in front of the microphone.
-  **The instrument exists and reaches everything but the room — DR-41.**
-  `bin/echo-room` puts two clients in one process the way `bin/latency` does:
-  the room holds the real devices through the same `hardware::open` the app
-  uses, the far end publishes a 1 200 Hz tone and keeps every frame that comes
-  back, and the tone makes the whole trip — SFU, transducer, air, microphone,
-  SFU. Four segments: the room silent, the room with the suppressor on, the
-  tone with the canceller **off**, the tone with it on. `docs/testing/echo.md`
-  is how to read it.
-  **It refuses, and the refusal is about this machine.** COUPLING **0.4 dB**
-  and then **2.0 dB** against the 6 dB it asks for before it will say anything
-  about a canceller — because the only active render endpoint here is a headset
-  earphone, and the analog jack DR-23 measured through at 84.7 ms now reports
-  `not present`. An earcup nobody is holding is not a room. The canceller-off
-  segment is the control and it is the whole point: a canceller that works and
-  a room with no loudspeaker in it produce the same number, which is §7.5's
-  silent capture device again.
-  **What is left is not "a person in a room" but one object.** A loudspeaker
-  the fifine can hear — an earcup laid face-down against it, or a speaker back
-  in the analog jack — and then the row is one command. Everything else is
-  built.
-  **4.7's half does not wait on that.** `--record` writes a WAV per segment
-  *even when the run refuses a verdict*, so `quiet.wav` against
-  `suppressed.wav` is a listening test that can be done today. The level cannot
-  answer it: `NOISE_SUPPRESSED` came out at −1.3, 0.1 and −0.4 dB across three
-  runs of the same room, because the gain controller sits after the suppressor
-  and answers a quieter frame by turning it up.
-  **One trap, in DR-41 and in the drill's header.** The obvious metric — the
-  tone's bin now against the tone's bin in the silent room — reported
-  `COUPLING=17.2 dB` on the first run and there was no coupling: the room got
-  louder between the two segments (median level 121.0 → 453.3) and the bin rose
-  with it. The tone is read against its own neighbours in the same 200 ms now,
-  which a chair or a gain change cannot move.
+  **Measured 2026-08-26, twice, and it works — DR-42.** The loudspeaker is
+  DR-23's arrangement, a HyperX earcup laid face-down on the fifine's capsule.
+  The tone stood **32.4 dB and 32.2 dB** out of the room with the canceller
+  off and **0.7 dB and 0.5 dB** with it on: **31.7 dB of cancellation on both
+  runs**, a residual at the room's own noise, and a coupling of 32.1 and
+  34.7 dB against the 6 dB floor that refused this row the day before.
+  **The echo column the DoD asks for**, which is what `bin/listener --tone`
+  prints: **5.0 dB below sent** with the canceller off, **40.5 and 41.2 dB
+  below sent** with it on.
+  **The second witness agrees and is independent.** `Microphone::echo_likelihood`
+  is AEC3's own opinion, computed in the capturing process and never sent
+  anywhere: **0.59 → 0.02** across the same switch, both runs.
+  **31.7 dB through a room against 31.8 dB against the synthetic loopback**,
+  which answers what DR-41 left open — whether the delay estimator finds a real
+  reference at all. It does, on this path. Still unmeasured: a *far-field*
+  loudspeaker, where the delay is a metre of air on top of the 84.7 ms of
+  devices DR-23 measured. §7.13 owns that now, and it does not block anything.
+  **What was heard, which is the other half of the DoD** and is written out in
+  `docs/testing/echo.md`. The residual is *audible* — a weak tone a person can
+  find if they know to listen, far under the blatant one in `echo-off.wav`, and
+  it does not pump, gate or come and go. **The suppressor is better on**: the
+  room's 200–450 Hz rumble is clearly reduced and nothing that matters goes
+  with it. **That closes 4.7's outstanding row**, and the level could never
+  have closed it — `NOISE_SUPPRESSED` has now read −1.3, 0.1, −0.4, −1.6 and
+  **+4.2** dB across five runs of one room, because the gain controller sits
+  after the suppressor and answers a quieter frame by turning it up.
 
 ### After the release
 
@@ -1335,6 +1321,20 @@ these were never run rather than let a reader assume all of them were.
   this measurement.
 
 ---
+
+- [ ] **7.13 A loudspeaker a metre away** — §7.6's remaining half, and it blocks
+  nothing. The pass above put the transducer *against* the capsule, so the
+  delay AEC3 had to find was the device pipeline's alone. A far-field
+  loudspeaker adds air and a smeared reference, which is the case a person on
+  desk speakers actually has.
+  DoD: a second `state of it` block in `docs/testing/echo.md`, far-field beside
+  the near-field one, or a DR saying what broke.
+  Verify: enable the monitor's endpoint and make it default — `mmsys.cpl`,
+  Playback, `24G2W1G4` (NVIDIA High Definition Audio), Enable then Set Default
+  — then the same one command. **The endpoint is there**: its registry
+  `DeviceState` is `0x10000001`, which is `DISABLED` with the `ACTIVE` bit
+  still set, not the `4` that means an empty jack. Whether that monitor has
+  speakers in it is the one thing this is short of.
 
 ## Decision Records (§DR)
 
@@ -4248,3 +4248,111 @@ test in `processing.rs` hands the reference back with no delay, which is the
 easy case for the estimator; DR-23 measured this hardware's acoustic round trip
 at 84.7 ms, which is not. Nothing here says which side of AEC3's search window
 that falls on, and nothing will until there is a loudspeaker.
+
+### DR-42: the room heard itself, and the number is the synthetic one (2026-08-26)
+
+**Context.** §7.6, the last release-blocking row, refused twice the day before
+for want of a loudspeaker (DR-41). The instrument was finished; what it was
+short of was a fact about a room. DR-41 listed three things that would clear
+it, and the cheapest — *an earcup laid face-down against the fifine*, which is
+DR-23's own arrangement — is the one that was done: the HyperX earcup resting
+on the capsule, nobody holding it, for the sixty seconds the drill takes.
+
+**It passed, twice, and the two runs agree on the number that matters.**
+
+```text
+                              run A         run B
+COUPLING                      32.1 dB       34.7 dB
+  standout, canceller off     32.4 dB       32.2 dB
+  standout, canceller on       0.7 dB        0.5 dB
+  standout, room silent        0.3 dB       -2.5 dB
+ECHO_CANCELLED              ≥ 31.7 dB       31.7 dB
+at the tone, canceller off     5.0 dB        5.0 dB   below sent
+at the tone, canceller on     40.5 dB       41.2 dB   below sent
+CANCELLER_BELIEVED        0.59 → 0.02   0.59 → 0.02
+VERDICT                      measured      measured
+```
+
+32 dB of coupling against the 6 dB floor is not a marginal pass, and it is the
+same room that gave 0.4 dB and 2.0 dB on 2026-08-25 with nothing against the
+microphone — which is the control doing its job in both directions.
+
+**31.7 dB through a real room; 31.8 dB against the synthetic loopback.** Task
+3.4's unit test hands the render stream straight back to the capture side with
+no delay and measures 31.8 dB. The real path — SFU, a physical transducer, air,
+a physical microphone, SFU — gives back the same number to a tenth of a
+decibel, on both runs. **That answers what DR-41 recorded as left unmeasured**:
+whether AEC3's delay estimator finds a *real* reference at all, rather than
+only the zero-delay one the test hands it. It does.
+
+**On this path**, and the caveat is the whole of §7.13. The transducer was
+against the capsule, so the delay to be found was the device pipeline's — DR-23
+measured this pair's acoustic round trip at 84.7 ms — with no metre of air on
+top and no room smearing the reference. A far-field loudspeaker is the case a
+person on desk speakers actually has, and nobody has run one. It does not block
+the release, because a release that says which measurements were never taken is
+not claiming them.
+
+**Two witnesses, and nothing connects them but the room.** The far end's number
+is a spectrum this drill computes out of received audio. The near side's is
+`Microphone::echo_likelihood`, which is AEC3's own residual-echo estimate,
+computed inside the capturing process and never transmitted. They went 0.59 →
+0.02 across the same switch that moved the far end 32.4 dB → 0.7 dB, twice.
+DR-41 said the two agreeing is a measurement and the two disagreeing is a
+Decision Record; they agree.
+
+**`ECHO_CANCELLED` was floored on one run and not the other, and that is the
+room rather than the canceller.** The drill prints *at least* when the cancelled
+tone lands within 1.5 dB of the silent room's own standout, because an echo
+pushed under a noise floor cannot be measured further down. Run A's silent room
+stood at 0.3 dB and its residual at 0.7, so it printed *at least*; run B's
+silent room sat 2.8 dB lower and left room to print the number outright. Both
+printed 31.7.
+
+**Gain was not the explanation, and DR-41 has no record of it either way.** The
+default render endpoint's master volume was read out of `IAudioEndpointVolume`
+before the first run: **100%, unmuted.** That says gain does not explain the
+pass. It says nothing about the refusals of the day before, which were never
+checked that way — and it does not need to, because those refusals have a
+simpler explanation that `bin/probe` printed at the time.
+
+**What the endpoint list was hiding, and it is worth knowing for §7.13.**
+`probe` prints `disabled` for three render endpoints, and the word understates
+them. `HKLM\…\MMDevices\Audio\Render\{guid}\DeviceState` carries
+**`0x10000001`** for those three — `DEVICE_STATE_DISABLED` with the `ACTIVE`
+bit still set, which is Windows saying *plugged in, and would work if you
+turned it on* — against a plain `4` (`NOTPRESENT`) for a jack with nothing in
+it. So this machine has two candidate loudspeakers that cost a click rather
+than a purchase: the monitor over DisplayPort (`24G2W1G4`, NVIDIA HD Audio) and
+the fifine's own headphone jack. The monitor is the one §7.13 wants, being a
+metre of air away, and the one thing unknown about it is whether that model has
+speakers in it at all.
+
+**The by-hand half, which no instrument here can take.** Both questions were
+answered by listening to what `--record` wrote, and one of them could not have
+been answered any other way.
+
+- **The residual is audible.** `echo-off.wav` is a blatant 1 200 Hz tone;
+  `echo-on.wav` holds a weak one a person can find if they know to listen for
+  it. So *nothing is left* is the wrong claim and *31.7 dB is left behind* is
+  the right one. It does not pump, gate or come and go — the failure modes that
+  would have been a DR of their own — it is just quiet, at the room's own noise.
+- **The noise suppressor is better on than off**, which closes task 4.7's last
+  row: the room's 200–450 Hz rumble is clearly reduced and nothing that matters
+  goes with it. **The level could never have said so.** `NOISE_SUPPRESSED` has
+  now read −1.3, 0.1, −0.4, −1.6 and **+4.2** dB across five runs of one room —
+  six decibels of spread and both signs — because the gain controller sits
+  after the suppressor and answers a quieter frame by turning it up. A drill
+  that reported that column as the answer would have shipped a coin flip.
+
+**Two blemishes in the logs, neither of which moves a number.** Run A printed
+one `audio device error: A buffer underrun or overrun occurred.` during the
+`suppressed` segment, and lost a single frame out of `echo off` — 599 of 600.
+One frame in eight hundred is well under the resolution anything here is read
+at, and run B lost none.
+
+**Consequences.** §7.6 closes and stops blocking the release (prd.md §3 F4).
+Task 4.7's outstanding row closes with it. §7.13 opens for the far-field case
+and blocks nothing. What still blocks v0.1.0 is §6.3 and §6.4's verification,
+which are one act on a second Windows machine, and a person pressing publish.
+

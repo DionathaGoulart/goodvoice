@@ -64,6 +64,17 @@ Two of those have a story worth reading before you quote them:
   browser in the process tree. Showing the window rebuilds it in ~130 ms.
   DR-20 and DR-21 have the three levers that were tried and what each measured.
 
+One measurement below has no budget and is worth quoting anyway. **The echo
+canceller was measured through a real acoustic path**, twice: a 1 200 Hz tone
+made the whole trip — SFU, loudspeaker, air, microphone, SFU — and stood
+**32 dB** out of the room with the canceller off against **0.6 dB** with it on.
+That is **31.7 dB of cancellation**, a residual sitting at the room's own noise,
+and the same number WebRTC's AEC3 gives against a synthetic zero-delay loopback
+(31.8 dB). What is _not_ tested is a distant loudspeaker: the transducer was
+against the microphone's capsule, so the delay the canceller had to find was
+the device pipeline's and not a metre of air on top of it. DR-42 and
+[docs/testing/echo.md](docs/testing/echo.md).
+
 ## Screen share
 
 ![The picker](docs/ui/share-picker.png)
@@ -91,22 +102,12 @@ Full guide: [docs/self-hosting.md](docs/self-hosting.md).
 
 ## What this release has not been through
 
-A measured number nobody has taken is not a promise. Two things this version
-claims are tested up to the hardware their test needs and no further, and six
+A measured number nobody has taken is not a promise. One thing this version
+claims is tested up to the hardware its test needs and no further, and seven
 more were never run at all.
 
-**Tested up to the hardware, with the command that finishes them:**
+**Tested up to the hardware, with the command that finishes it:**
 
-- **The echo canceller has never heard a real room.** It is measured against a
-  synthetic loopback, which is the hard case for the estimator and not the real
-  one. The instrument for the real one exists and reaches everything but the
-  room: `bin/echo-room` sends a 1 200 Hz tone the whole way — SFU, loudspeaker,
-  air, microphone, SFU — and it **refuses a verdict** on the only machine here,
-  at 0.4 dB and 2.0 dB of coupling against the 6 dB it requires, because that
-  machine's only working output is a headset earcup. Put a loudspeaker in front
-  of a microphone and the row is one command:
-  `cargo run -p goodvoice-harness --bin echo-room -- --record <dir>`. See DR-41
-  and [docs/testing/echo.md](docs/testing/echo.md).
 - **The installer has never met a machine without the toolchain.** Both bundles
   build, and the installed client was heard by an independent client in the
   same room at 50 frames a second against the live deploy — from an install,
@@ -123,10 +124,11 @@ more were never run at all.
 | Keyframe on demand | no `nack pli` / `ccm fir`, so a viewer waits up to 2 s for a picture and a still share re-sends keyframes to nobody |
 | The self-hosting guide, followed by a stranger | written and half-measured; nobody has done it on a fresh Cloudflare account |
 | Where the window comes back | closing to the tray and reopening walks the window down the screen |
+| A loudspeaker a metre away | the canceller was measured with the transducer against the capsule, which is a shorter delay than a desk speaker |
 
 The plan tracks each of these as a task with a definition of done and the
 command that proves it: [.harness/plan.md](.harness/plan.md), §7.7 through
-§7.12.
+§7.13.
 
 ## Building it yourself
 
