@@ -269,7 +269,7 @@ function Measure-Picture([IntPtr] $h, [string] $name) {
   $bmp.UnlockBits($data)
   $bmp.Dispose()
 
-  # Against the corner, which is letterbox whenever there is any — and by how
+  # Against the fill, which is letterbox wherever there is any — and by how
   # *much* of the row differs rather than whether any of it does. The retro
   # skin paints a dot grid on that background: a handful of pixels a row sit a
   # few values off, and a rule that called any variation "picture" would call
@@ -281,8 +281,35 @@ function Measure-Picture([IntPtr] $h, [string] $name) {
   $colFar = New-Object int[] $cols
   $colSeen = New-Object int[] $cols
 
-  # The letterbox's own colour, read where there is letterbox if there is any.
-  $corner = [int](($bytes[0] + 5 * $bytes[1] + 2 * $bytes[2]) / 8)
+  # The letterbox's own colour — the value that fills the border of the client
+  # area — read as the most common luminance along all four edges rather than
+  # from the single corner pixel.
+  #
+  # The corner is only letterbox when there *is* letterbox, and `object-fit:
+  # contain` leaves none at all in a window that is already the source's shape.
+  # The "as opened" window is exactly that: a 16:9 viewer onto a 16:9 monitor,
+  # picture edge to edge, corner included. Reading the reference there measures
+  # the picture against its own top-left pixel, which is why a share of a flat
+  # sheet came back as no picture at all (§7.14). Along the whole border the
+  # letterbox still wins the count whenever there is any, and when there is
+  # none the mode is one of the backdrop's two greys — which the other one is
+  # far from, so the picture is still found.
+  $tally = New-Object int[] 32
+  for ($x = 0; $x -lt $box.W; $x += $step) {
+    foreach ($y in @(0, ($box.H - 1))) {
+      $i = $y * $stride + $x * 4
+      $tally[[int]((($bytes[$i] + 5 * $bytes[$i + 1] + 2 * $bytes[$i + 2]) / 8) / 8)]++
+    }
+  }
+  for ($y = 0; $y -lt $box.H; $y += $step) {
+    foreach ($x in @(0, ($box.W - 1))) {
+      $i = $y * $stride + $x * 4
+      $tally[[int]((($bytes[$i] + 5 * $bytes[$i + 1] + 2 * $bytes[$i + 2]) / 8) / 8)]++
+    }
+  }
+  $mode = 0
+  for ($b = 1; $b -lt 32; $b++) { if ($tally[$b] -gt $tally[$mode]) { $mode = $b } }
+  $fill = $mode * 8 + 4
 
   $minY = -1; $maxY = -1; $rowsLit = 0; $rowsSeen = 0
   for ($y = 0; $y -lt $box.H; $y += $step) {
@@ -293,7 +320,7 @@ function Measure-Picture([IntPtr] $h, [string] $name) {
       # Luminance, integer: blue, green, red as Windows stores them.
       $lum = [int](($bytes[$i] + 5 * $bytes[$i + 1] + 2 * $bytes[$i + 2]) / 8)
       $rowSeen++
-      if ([math]::Abs($lum - $corner) -gt $far) {
+      if ([math]::Abs($lum - $fill) -gt $far) {
         $rowFar++
         if ($ci -lt $cols) { $colFar[$ci]++ }
       }
@@ -330,14 +357,29 @@ function Measure-Picture([IntPtr] $h, [string] $name) {
 
 # --- something worth sharing ------------------------------------------------
 
-# A plain grey sheet over the monitor, for the length of the run.
+# A grey chequered sheet over the monitor, for the length of the run.
 #
-# Not decoration: the aspect-ratio check below measures where the picture ends
-# and the letterbox begins, and it can only do that if the two are different
-# colours. Share a desktop whose wallpaper is nearly black into a window whose
-# theme background is nearly black, and the boundary is unmeasurable — which is
-# a fact about that desktop rather than about the viewer. It also keeps
-# whatever the person at the machine had on screen out of the screenshots.
+# Not decoration, and the chequer is not decoration either.
+#
+# The aspect check below measures where the picture ends and the letterbox
+# begins, and it can only do that if the two are different colours: share a
+# desktop whose wallpaper is nearly black into a window whose theme background
+# is nearly black and the boundary is unmeasurable, which is a fact about that
+# desktop rather than about the viewer. Both greys here are far from any
+# palette's `--bg`, light or dark.
+#
+# The squares answer the other half (§7.14). A window that is already the
+# source's shape has no letterbox at all, so there is no boundary to find and
+# the only honest question left is whether the whole client area is picture —
+# which a *flat* sheet cannot answer, because a picture of one colour edge to
+# edge and an empty window painted one colour are the same pixels. Two greys
+# 80 apart put variation in every row and every column of the picture, so the
+# picture is found by what it contains rather than by where it stops. 64-pixel
+# squares survive the 1920 -> 1280 encode and the scale down into a
+# 500-pixel-wide viewer with room to spare.
+#
+# The sheet also keeps whatever the person at the machine had on screen out of
+# the screenshots.
 function Start-Backdrop {
   $script = @'
 Add-Type -AssemblyName System.Windows.Forms
@@ -347,6 +389,17 @@ $form.FormBorderStyle = 'None'
 $form.BackColor = [System.Drawing.Color]::FromArgb(176, 176, 176)
 $form.Bounds = [System.Windows.Forms.Screen]::PrimaryScreen.Bounds
 $form.ShowInTaskbar = $false
+$cell = 64
+$dark = New-Object System.Drawing.SolidBrush ([System.Drawing.Color]::FromArgb(96, 96, 96))
+$form.Add_Paint({
+  param($sender, $e)
+  for ($y = 0; $y -lt $sender.Height; $y += $cell) {
+    for ($x = 0; $x -lt $sender.Width; $x += $cell) {
+      if ((([int]($x / $cell)) + ([int]($y / $cell))) % 2 -eq 0) { continue }
+      $e.Graphics.FillRectangle($dark, $x, $y, $cell, $cell)
+    }
+  }
+})
 # Topmost, because nothing else will raise it: Windows refuses the foreground
 # to a process that did not have it, so a sheet started from a script sits
 # wherever the z-order left it — which, on a machine with a maximised window

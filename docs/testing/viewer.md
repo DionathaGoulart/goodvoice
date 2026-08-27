@@ -35,20 +35,20 @@ powershell -NoProfile -ExecutionPolicy Bypass -File docs\testing\viewer.ps1 -Ski
 What one run says, four cycles by default:
 
 ```
-  t+  5s  the sharer is live at 1280x720 on hardware after 0.9 s
+  t+  4s  the sharer is live at 1280x720 on hardware after 0.9 s
   t+  7s  the app offers "WATCH SHARER'S SCREEN"     the roster reached the app
   t+  7s  cycle 1: the viewer is open
-  t+ 14s  cycle 1: window 960x540, picture 954x534, aspect 1.787, 98% of it lit
-  t+ 15s  cycle 1: the viewer is closed
+  t+ 14s  cycle 1: window 960x540, picture 960x540, aspect 1.778, 100% of it lit
+  t+ 14s  cycle 1: the viewer is closed
    ... three more, two of them resized ...
 
   cycle  shape           window       picture      aspect  lit
-  1      as opened       960x540      954x534      1,787   0,983
-  2      as opened       960x540      954x534      1,787   0,983
-  2      stretched wide  1084x381     675x375      1,8     0,612
-  3      as opened       960x540      954x534      1,787   0,983
-  3      squashed tall   504x661      498x282      1,766   0,42
-  4      as opened       960x540      954x534      1,787   0,983
+  1      as opened       960x540      960x540      1,778   1
+  2      as opened       960x540      960x540      1,778   1
+  2      stretched wide  1084x381     678x381      1,78    0,624
+  3      as opened       960x540      960x540      1,778   1
+  3      squashed tall   504x661      504x285      1,768   0,43
+  4      as opened       960x540      960x540      1,778   1
 
 - the app was first heard at 5 s
 - 101 seconds measured, 0 of them below 45 frames
@@ -57,17 +57,24 @@ What one run says, four cycles by default:
 
 **The aspect column is the claim.** 16:9 is 1.778. A window stretched to 2.85:1
 and one squashed to 0.76:1 both show a picture at 1.77–1.80 — the letterbox
-grows and the picture keeps its shape. `675 × 375` is what `object-fit:
+grows and the picture keeps its shape. `678 × 381` is what `object-fit:
 contain` gives a 1280×720 source in a 1084×381 client area (677 wide,
-arithmetically); `498 × 282` is the same in a 504×661 one (283 high).
+arithmetically); `504 × 285` is the same in a 504×661 one (283 high).
+
+**The "as opened" row is a different question**, and DR-46 is why it is worth
+saying so. The window opens at 960×540 onto a monitor that is 16:9, so
+`contain` has nothing to letterbox: the picture is the client area, edge to
+edge, and `960 × 540` is the right answer rather than a suspiciously round one.
+What that row proves is that a picture arrived at all and that the default
+window does not crop it — the *shape* claim is the two resized rows.
 
 `docs/ui/viewer-letterbox.png` is that middle row as a person sees it: the
 viewer stretched to 1084×381, the sheet letterboxed inside it, and — because
 the sheet is the whole monitor — the viewer showing itself showing itself.
 
-**"lit" is how much of the window the picture covers.** 98% with no letterbox
-to speak of, 61% stretched wide, 42% squashed tall. Zero means a viewer that
-never got a picture, which is the failure DR-33 was about.
+**"lit" is how much of the window the picture covers.** 100% as opened, where
+there is no letterbox at all, 62% stretched wide, 43% squashed tall. Zero means
+a viewer that never got a picture, which is the failure DR-33 was about.
 
 **The frames-a-second table is the definition of done.** A 20 ms frame path
 delivers fifty a second; the drill fails the run if any second between the app
@@ -83,13 +90,22 @@ viewer's client area before every capture and reports `not measured` rather
 than measuring somebody's browser. Two runs during this task's own verification
 did exactly that.
 
-**The grey sheet is not decoration.** The aspect measurement finds where the
-picture ends and the letterbox begins, which it can only do if they are
-different colours. Sharing a desktop whose wallpaper is nearly black into a
-window whose theme background is nearly black measures nothing — a fact about
-that desktop rather than about the viewer. The sheet is also what keeps
-whatever the person at the machine had on screen out of the PNGs. `-NoBackdrop`
-turns it off.
+**The chequered sheet is not decoration, and neither are the squares.** The
+aspect measurement finds where the picture ends and the letterbox begins, which
+it can only do if they are different colours. Sharing a desktop whose wallpaper
+is nearly black into a window whose theme background is nearly black measures
+nothing — a fact about that desktop rather than about the viewer, and
+`-NoBackdrop` on this machine's own desktop measures exactly that: `0x0`,
+`39x63`, `3x3`, every row of a run whose voice gate passed. The sheet is also
+what keeps whatever the person at the machine had on screen out of the PNGs.
+
+The squares are the other half, and DR-46 is where they come from. A window
+already the source's shape has no letterbox, so there is no boundary to find
+and the only question left is whether the whole client area is picture — which
+a *flat* sheet cannot answer, because a picture of one colour edge to edge and
+an empty window painted one colour are the same pixels. Two greys 80 apart put
+variation in every row and every column, so the picture is found by what it
+contains rather than by where it stops.
 
 **A skin renames every button, and some of them are toggles.** The terminal
 skin's `text-transform: uppercase` reaches the accessible name (DR-26), so
@@ -123,7 +139,7 @@ nothing at all because WGC announces changes and there were none. It is now 11
 keyframes and 69 kB, which is 3.5 kB/s for a screen that is doing nothing.
 
 **Touching nothing is harder than it reads**, and `docs\testing\keyframe.ps1`
-is what stopped relying on it: it puts this file's grey sheet over the monitor,
+is what stopped relying on it: it puts a plain grey sheet over the monitor,
 runs the drills hidden with their output redirected to files, and takes the
 sheet down. It also runs `share-drill --no-viewer`, which counts what the
 *sharer* put on the wire rather than what reached anybody — the two are the

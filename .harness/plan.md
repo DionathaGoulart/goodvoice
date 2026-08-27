@@ -21,18 +21,25 @@
 
 ## Start here
 
-**Where this stopped:** 2026-08-27, with §7.9 closed and a bug fixed — DR-45.
-A viewer that closed kept receiving the whole share: 62.7 of 62.9 kB/s still on
-the wire, on every client that had ever opened one, because giving up the
-viewer aborted a playback task and told Cloudflare nothing. Two things came out
-of it. `rtc::wire` is the instrument — webrtc's own transport and per-SSRC
-counters, which sit *below* the read that closing the viewer stops, and which
-is why this was invisible until now. `close_pull` in `rtc::session` is the fix,
-and the closed phase is now the never-opened floor to a tenth of a kB/s. Same
-day, §7.10 closed as **refused** (DR-44): nothing on Cloudflare ever asks this
+**Where this stopped:** 2026-08-27, with §7.14 closed — DR-46. `viewer.ps1`'s
+"as opened" rows had stopped finding a picture, and the cause was the
+measurement rather than the viewer: `Measure-Picture` read its reference colour
+from pixel (0,0), and the corner is only letterbox when there *is* letterbox.
+The viewer opens at 960×540 onto a 16:9 monitor, so `object-fit: contain`
+produces none at all and the comparison became the picture against its own
+top-left pixel. The reference is now the mode of the four edges, and the
+backdrop is a chequer so that a picture filling the window has variation to be
+found by. The grey-on-grey guess this file used to carry was wrong: the
+letterbox is near-black and the sheet is grey.
+
+Earlier the same day, §7.9 closed with DR-45 — a viewer that closed kept
+receiving the whole share, 62.7 of 62.9 kB/s, because giving up the viewer
+aborted a playback task and told Cloudflare nothing. `rtc::wire` is the
+instrument that made it visible and `close_pull` in `rtc::session` is the fix.
+And §7.10 closed as **refused** (DR-44): nothing on Cloudflare ever asks this
 client for a picture. Phases 0–5 are closed, and so are §6.1, §6.2, §7.1–§7.6,
-§7.9, §7.10 and §7.12. What is open is §6.3, §6.4, §7.7, §7.8, §7.11, §7.13 and
-the new §7.14. Nothing else in this file needs reading first.
+§7.9, §7.10, §7.12 and §7.14. What is open is §6.3, §6.4, §7.7, §7.8, §7.11 and
+§7.13. Nothing else in this file needs reading first.
 
 **`main` is ahead of the `v0.1.0` tag now.** The draft release's installers were
 built from `ca9c74c` and carry neither §7.12's fix nor §7.9's. That does not
@@ -65,18 +72,20 @@ release* is code.
    their checksums. What is left is a person pressing publish, and then the
    DoD's own verification, which is row 1 above.
 
-**The one open row that is not blocked on hardware or a person** is §7.14, and
-it is a measurement script rather than the app: `viewer.ps1`'s "as opened"
-rows stopped finding the picture. It reproduces on unmodified `main`, so it is
-not §7.9's doing, and both runs still passed their real gate — 0 seconds below
-45 frames.
+**There is no longer an open row that is not blocked on hardware or a person.**
+§7.14 was the last of them. §7.7 and §7.8 want a second machine, §7.11 wants a
+Cloudflare account nobody here has, and §7.13 wants a click in `mmsys.cpl` and
+a monitor with speakers — the table in Phase 7 says which is which.
 
 **What no longer needs re-discovering.** Three things this file used to open
 with are settled and should not be re-derived. **Windows' per-process IO
 counters cannot see the media sockets** — 5.2 / 5.4 / 5.6 kB/s was never about
 video, and `rtc::wire` is what to reach for instead (DR-45). §7.6 is not waiting on a room: it was
 measured twice at 31.7 dB of cancellation (DR-42), and the far-field version of
-it is §7.13, which blocks nothing. And **injection is refused while an
+it is §7.13, which blocks nothing. **The grey sheet is not the reason
+`viewer.ps1` could not find a picture** — the letterbox is near-black and the
+sheet is grey 176 (DR-46); the corner pixel it read its reference from was.
+And **injection is refused while an
 *elevated* program holds the foreground** — not, as this file once said, while
 somebody is at the machine: measured with the desktop idle 31 minutes and still
 refused, and a click on an ordinary window cleared it (DR-39).
@@ -1077,13 +1086,14 @@ knew about itself. The checkbox is here.
 | 9 | §6.4 README, tag, release | — | **it is the release** |
 | 10 | §7.7 the netdown run | a second machine, or a person and a cable | no |
 | 11 | §7.8 four clients conversing, with the CPU measured | four hosts | no |
-| 12 | §7.9 does Cloudflare stop sending video to a closed viewer | an instrument, then code | no |
-| 13 | §7.10 keyframe on demand, by PLI | code | no |
+| ~~12~~ | ~~§7.9 does Cloudflare stop sending video to a closed viewer~~ — measured and fixed 2026-08-27, DR-45; it did not, and `close_pull` is why it does now | an instrument, then code | — |
+| ~~13~~ | ~~§7.10 keyframe on demand, by PLI~~ — **refused** 2026-08-27, DR-44: nothing on Cloudflare ever asks this client for a picture | code | — |
 | 14 | §7.11 the self-hosting walkthrough on a fresh account | a Cloudflare account nobody here has | no |
-| 15 | §7.12 the rebuilt window comes back somewhere else | code | no |
+| ~~15~~ | ~~§7.12 the rebuilt window comes back somewhere else~~ — fixed 2026-08-26, DR-43; it was cascading down the screen | code | — |
 | 16 | §7.13 a loudspeaker a metre away, not one on the capsule | a click in `mmsys.cpl`, and a monitor with speakers | no |
+| ~~17~~ | ~~§7.14 `viewer.ps1` stopped finding the picture~~ — fixed 2026-08-27, DR-46; the detector read its reference from the corner | a drill | — |
 
-Rows 10–16 do not block the release **as long as the README says so**: a
+Rows 10–17 do not block the release **as long as the README says so**: a
 measured number nobody has taken is not a promise, and 6.4 has to say which of
 these were never run rather than let a reader assume all of them were.
 
@@ -1474,26 +1484,25 @@ these were never run rather than let a reader assume all of them were.
      does not, `echo-room` refuses to report a cancellation and route 1 is the
      answer.
 
-- [ ] **7.14 `viewer.ps1`'s first measurement stopped finding the picture** —
-  found while verifying §7.9 and **not caused by it**: the same run on
-  unmodified `main` gives the same table. The "as opened" rows, which
-  docs/testing/viewer.md records as `954x534, aspect 1.787, 98% lit` on every
-  cycle, now read `0x0`, `0x75`, `0x114`, `213x435`, `105x57` — a picture the
-  detector cannot find. The *resize* rows in the same runs are still correct
-  (`678x381` at 1.78, `504x285` at 1.768), and both runs passed their real
-  gate: 101 s measured, 0 seconds below 45 frames.
-  So this is the script's edge-finder rather than the viewer: the "as opened"
-  shot is taken ~7 s in and the resize shot ~4 s later, and only the first one
-  fails. viewer.md's own warning is the first place to look — the picture and
-  the letterbox have to be different colours, and this share is of a monitor
-  showing the grey sheet, inside a window whose letterbox is grey.
-  Two runs of the app also printed `audio device error: A buffer underrun or
-  overrun occurred` while the voice held throughout; on a third the microphone
-  never came up at all and the run failed outright. Worth reading together.
-  DoD: the aspect table back to a picture on every "as opened" row, or
-  viewer.md corrected to say what the script can actually measure and why.
-  Verify: `docs\testing\viewer.ps1`, and `-NoBackdrop` to test the grey-on-grey
-  theory.
+- [x] **7.14 `viewer.ps1`'s first measurement stopped finding the picture** —
+  found while verifying §7.9 and **not caused by it**. Closed by **DR-46**, and
+  the grey-on-grey theory was wrong: the letterbox is the retro palette's
+  near-black `--bg` and the sheet is grey 176, 158 apart on a scale whose
+  threshold is 40. What was wrong is that `Measure-Picture` read its reference
+  colour from pixel (0,0), and the corner is only letterbox when there *is*
+  letterbox — the viewer opens at 960×540 onto a 16:9 monitor, `contain`
+  produces none, and the comparison became the picture against its own top-left
+  pixel. The old `98% lit` was not measuring a boundary either; it was
+  measuring how much of a busy desktop differed from its own corner. Two
+  changes, neither sufficient alone: the reference is now the mode of the four
+  edges, and the backdrop is a 64-pixel chequer in greys 176 and 96 so that a
+  picture filling the window has variation to be found by. Every "as opened"
+  row is now `960x540, aspect 1.778, 100% lit`, the resize rows land on the
+  arithmetic (677 predicted / 678 measured, 283 / 285), and the voice gate
+  passed throughout: 101 s measured, 0 below 45 frames, lowest 49.
+  `-NoBackdrop` measures nothing on this desktop — dark terminal into a
+  near-black letterbox — which is viewer.md's existing warning, measured.
+  `docs/ui/viewer-letterbox.png` retaken.
 
 ## Decision Records (§DR)
 
@@ -4766,3 +4775,76 @@ The Worker needed no change — it has proxied `tracks/close` since task 2.3 and
 nothing had ever called it. `rtc::wire` outlives this row: it is the seam for
 any future question of the form "is the wire carrying what we think it is", and
 the answer to why the per-process IO counters must never be asked one again.
+
+### DR-46: the corner is only letterbox when there is letterbox (2026-08-27)
+
+**Context.** §7.14. `viewer.ps1`'s "as opened" rows stopped finding a picture:
+`0x0`, `0x75`, `0x114`, `213x435`, `105x57` where viewer.md records `954x534,
+aspect 1.787, 98% lit` on every cycle. The *resize* rows in the same runs were
+still right, and both runs passed their real gate. It reproduced on unmodified
+`main`, so it was never §7.9's doing.
+
+**What it was not.** viewer.md's own warning — the picture and the letterbox
+have to be different colours — was the first suspect and is not the answer
+here. Measured from the shots: the letterbox is the retro palette's `--bg`,
+near-black, and the sheet is grey 176. They are 158 apart on a scale where the
+detector's threshold is 40.
+
+**What it was.** `Measure-Picture` read its reference colour from pixel (0,0)
+and called every pixel more than 40 away from it "picture". That is only a
+reading of the letterbox when there *is* letterbox. The viewer opens at 960×540
+onto a 16:9 monitor, so `object-fit: contain` produces none at all — the corner
+is the picture's own top-left, the comparison is the picture against itself,
+and a share of a flat grey sheet comes back as nothing. The old 98% was never
+measuring a boundary either: it was measuring how much of a *busy* desktop
+differed from its own top-left pixel, which is a number that says nothing about
+where the picture ends. The row has been unmeasurable as written since the day
+the sheet went in; it only started *looking* wrong when the sheet became the
+whole of what was on screen.
+
+**Decision.** Two changes, and each is insufficient alone.
+
+1. **The reference is the mode of the four edges**, not the corner pixel.
+   Wherever there is letterbox it still wins the count along the whole border,
+   and one stray pixel — a cursor, a nested window's edge — no longer decides
+   the measurement.
+2. **The backdrop is a chequer**, 64-pixel squares in greys 176 and 96. A
+   picture that fills the window has no boundary to find, so the only honest
+   question left is whether the client area *is* picture, and a flat sheet
+   cannot answer it: a picture of one colour edge to edge and an empty window
+   painted one colour are the same pixels. Two greys 80 apart put variation in
+   every row and every column. Both greys stay clear of any palette's `--bg`,
+   light (238) or dark (18), by more than the threshold.
+
+**Measurements.** Same drill, same machine, four cycles:
+
+```
+  cycle  shape           window       picture      aspect  lit
+  1      as opened       960x540      960x540      1,778   1
+  2      as opened       960x540      960x540      1,778   1
+  2      stretched wide  1084x381     678x381      1,78    0,624
+  3      as opened       960x540      960x540      1,778   1
+  3      squashed tall   504x661      504x285      1,768   0,43
+  4      as opened       960x540      960x540      1,778   1
+```
+
+Every "as opened" row is a picture, and it is the whole client area because
+that window is already the source's shape. The resize rows are unchanged in
+kind and now land on the arithmetic exactly: 677 wide predicted, 678 measured;
+283 high predicted, 285 measured. The voice gate passed both before and after —
+101 seconds measured, 0 below 45 frames, lowest 49.
+
+**`-NoBackdrop` on this desktop measures nothing**, which is the point of the
+sheet rather than a regression: `0x0`, `39x63`, `3x3`, `12x3`, `0x0` over three
+cycles whose voice gate passed. The desktop is a dark terminal and a dark
+browser, the letterbox is near-black, and the two are inside the threshold of
+each other. That is viewer.md's existing warning, measured.
+
+**Consequences.** `docs/ui/viewer-letterbox.png` is retaken, since it is the
+stretched row as a person sees it and that row now has a chequer in it.
+`keyframe.ps1` keeps its flat sheet: its measurement is keyframes and bytes,
+and a screen that never changes does not care what colour it is. Two runs
+printed `audio device error: A buffer underrun or overrun occurred` while the
+voice held throughout and the gate passed on both — noted here because §7.14
+asked for it to be read together with the aspect table, and it is unrelated to
+it.
