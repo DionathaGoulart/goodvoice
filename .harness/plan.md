@@ -21,26 +21,31 @@
 
 ## Start here
 
-**Where this stopped:** 2026-08-27, with §7.10 closed as **refused** — DR-44,
-and it is the more interesting of the two. Nothing on Cloudflare ever asks this
-client for a picture, `nack pli` was in the offer all along, and the
-two-second keyframe repeat §7.10 wanted to delete turns out to be what keeps
-the track subscribable at all. No code changed; a drill and a decision record
-came out of it. The day before, §7.12 fixed the window walking down the screen
-(`src/place.rs`, DR-43). Phases 0–5 are closed, and so are §6.1, §6.2,
-§7.1–§7.6, §7.10 and §7.12. What is open is §6.3, §6.4, §7.7, §7.8, §7.9,
-§7.11 and §7.13. Nothing else in this file needs reading first.
+**Where this stopped:** 2026-08-27, with §7.9 closed and a bug fixed — DR-45.
+A viewer that closed kept receiving the whole share: 62.7 of 62.9 kB/s still on
+the wire, on every client that had ever opened one, because giving up the
+viewer aborted a playback task and told Cloudflare nothing. Two things came out
+of it. `rtc::wire` is the instrument — webrtc's own transport and per-SSRC
+counters, which sit *below* the read that closing the viewer stops, and which
+is why this was invisible until now. `close_pull` in `rtc::session` is the fix,
+and the closed phase is now the never-opened floor to a tenth of a kB/s. Same
+day, §7.10 closed as **refused** (DR-44): nothing on Cloudflare ever asks this
+client for a picture. Phases 0–5 are closed, and so are §6.1, §6.2, §7.1–§7.6,
+§7.9, §7.10 and §7.12. What is open is §6.3, §6.4, §7.7, §7.8, §7.11, §7.13 and
+the new §7.14. Nothing else in this file needs reading first.
 
 **`main` is ahead of the `v0.1.0` tag now.** The draft release's installers were
-built from `ca9c74c` and do not carry §7.12's fix. That does not change the
-plan below — §7.12 was always an *after the release* row — but it does mean the
-clean-VM install in §6.3 is testing a bundle that walks its window, and the
-README on `main` says as much.
+built from `ca9c74c` and carry neither §7.12's fix nor §7.9's. That does not
+change the plan below — both were always *after the release* rows — but it does
+mean the clean-VM install in §6.3 is testing a bundle whose window walks down
+the screen and which keeps pulling a share after its viewer closes. The README
+on `main` says as much about the first.
 
 **Only one thing still blocks v0.1.0, and it is a second Windows machine.**
 §6.3 and §6.4's verification are the same act — install on a machine that has
 never had the toolchain, and join a call — and §6.4's other half is a person
-pressing publish on a draft that is already built. Nothing left is code.
+pressing publish on a draft that is already built. Nothing left *for the
+release* is code.
 
 ### The next two things, in this order
 
@@ -60,8 +65,16 @@ pressing publish on a draft that is already built. Nothing left is code.
    their checksums. What is left is a person pressing publish, and then the
    DoD's own verification, which is row 1 above.
 
-**What no longer needs re-discovering.** Two things this file used to open with
-are settled and should not be re-derived. §7.6 is not waiting on a room: it was
+**The one open row that is not blocked on hardware or a person** is §7.14, and
+it is a measurement script rather than the app: `viewer.ps1`'s "as opened"
+rows stopped finding the picture. It reproduces on unmodified `main`, so it is
+not §7.9's doing, and both runs still passed their real gate — 0 seconds below
+45 frames.
+
+**What no longer needs re-discovering.** Three things this file used to open
+with are settled and should not be re-derived. **Windows' per-process IO
+counters cannot see the media sockets** — 5.2 / 5.4 / 5.6 kB/s was never about
+video, and `rtc::wire` is what to reach for instead (DR-45). §7.6 is not waiting on a room: it was
 measured twice at 31.7 dB of cancellation (DR-42), and the far-field version of
 it is §7.13, which blocks nothing. And **injection is refused while an
 *elevated* program holds the foreground** — not, as this file once said, while
@@ -89,7 +102,7 @@ refused, and a click on an ordinary window cleared it (DR-39).
 . $env:USERPROFILE\gv\env.ps1     # leaves you in client\src-tauri
 cargo fmt --all --check
 cargo clippy --workspace --all-targets -- -D warnings
-cargo test --workspace              # 181 tests
+cargo test --workspace              # 192 tests
 cd ..;         npm run format:check; npm run typecheck
 cd ..\server;  npm run format:check; npm run typecheck; npm test   # 85 tests
 ```
@@ -837,15 +850,13 @@ Goal: two clients talking through the SFU. Riskiest phase — spikes first.
   --check`, `cargo clippy --workspace --all-targets -- -D warnings` and
   `cargo test --workspace` (151) all green; the drills above against the live
   deploy.
-  **Left unmeasured:** whether Cloudflare stops *sending* the video once a
-  viewer closes. The client stops pulling and stops decoding, but nothing tells
-  the SFU — `tracks/close` is allowlisted by the Worker and unused by the
-  client — so the "Cloudflare is not sending video to a client with no viewer"
-  half of §3 F3 holds until the first viewer opens and is unproven after one
-  closes. Windows' per-process IO counters do not see the media sockets
-  (5.2 / 5.4 / 5.6 kB/s across never-opened, open and closed-again: the voice
-  path and nothing else), so it needs an instrument this task did not have.
-  **§7.9** owns this now.
+  **Was left unmeasured, and §7.9 measured it:** Cloudflare did *not* stop
+  sending the video when a viewer closed — 62.7 of 62.9 kB/s kept arriving,
+  because the client stopped pulling and told the SFU nothing. Windows' IO
+  counters could not see it (5.2 / 5.4 / 5.6 kB/s across never-opened, open
+  and closed-again was the voice path and nothing else); `rtc::wire` could.
+  `close_pull` now calls `tracks/close` and the closed phase is the
+  never-opened floor. **DR-45.**
 - [x] **5.5 [WIN] FPS-impact benchmark** — `docs/perf/screenshare-bench.md`.
   Run a GPU-bound game (e.g. built-in benchmark), record FPS with/without 1080p
   share (hw encode). Target ~0 delta.
@@ -1288,18 +1299,26 @@ these were never run rather than let a reader assume all of them were.
   needs four hosts.
   DoD: numbers in the task, or a DR saying why the budget cannot be met.
   Verify: four machines, `bin/soak` on each.
-- [ ] **7.9 What a closed viewer still costs the room** — task 5.4's open
-  question. The client stops pulling the video and stops decoding it, but
-  nothing tells the SFU: `tracks/close` is allowlisted by the Worker and unused
-  by the client, so "Cloudflare is not sending video to a client with no
-  viewer" holds until the first viewer opens and is unproven after one closes.
-  Windows' per-process IO counters cannot see the media sockets — 5.2 / 5.4 /
-  5.6 kB/s across never-opened, open and closed-again — so this needs an
-  instrument first and code second.
+- [x] **7.9 What a closed viewer still costs the room** — task 5.4's open
+  question, and it was the expensive answer. The video kept arriving in full:
+  **62.7 of 62.9 kB/s** still on the wire after the viewer closed, because
+  nothing told the SFU. Windows' per-process IO counters could not see it —
+  their 5.2 / 5.4 / 5.6 kB/s across never-opened, open and closed-again were
+  never about video — so the instrument came first: `rtc::wire` reads webrtc's
+  own transport and per-SSRC counters, which sit *below* the read that closing
+  the viewer stops, and `bin/watch-cost` drives three phases through it. Then
+  the code: `close_pull` sets the pulled transceiver `Inactive`, offers, and
+  names the mid to `tracks/close` — which the Worker had proxied since task 2.3
+  and nobody had ever called. After: **0.0 kB/s of video and 5.6 kB/s in, the
+  never-opened floor to a tenth**. DR-45.
+  Voice was checked on both sides of the renegotiation, because DR-8 is what a
+  bad one costs: `out` flat at 5.6 kB/s across all three phases, `rewatch` 4 of
+  4 viewers got a picture at 0.90–1.06 s, `viewer.ps1` 101 s measured and 0
+  below 45 frames.
   DoD: the bandwidth measured on both sides of a close; `tracks/close`
-  implemented if it turns out the video keeps arriving.
-  Verify: an instrument that can see UDP per socket, then a repeat of the
-  measurement.
+  implemented if it turns out the video keeps arriving. **Both done.**
+  Verify: `cargo run -p goodvoice-harness --bin watch-cost -- --seconds 15`,
+  then `--bin rewatch -- --rounds 4`.
 - [x] **7.10 Keyframe on demand** — DR-34's remaining half. A viewer opening
   mid-share waits up to two seconds for the repeated keyframe, and the sharer
   re-sends one every two seconds whether anybody is watching or not, because
@@ -1454,6 +1473,27 @@ these were never run rather than let a reader assume all of them were.
      the capsule, and an earcup at a metre may not clear the 6 dB floor. If it
      does not, `echo-room` refuses to report a cancellation and route 1 is the
      answer.
+
+- [ ] **7.14 `viewer.ps1`'s first measurement stopped finding the picture** —
+  found while verifying §7.9 and **not caused by it**: the same run on
+  unmodified `main` gives the same table. The "as opened" rows, which
+  docs/testing/viewer.md records as `954x534, aspect 1.787, 98% lit` on every
+  cycle, now read `0x0`, `0x75`, `0x114`, `213x435`, `105x57` — a picture the
+  detector cannot find. The *resize* rows in the same runs are still correct
+  (`678x381` at 1.78, `504x285` at 1.768), and both runs passed their real
+  gate: 101 s measured, 0 seconds below 45 frames.
+  So this is the script's edge-finder rather than the viewer: the "as opened"
+  shot is taken ~7 s in and the resize shot ~4 s later, and only the first one
+  fails. viewer.md's own warning is the first place to look — the picture and
+  the letterbox have to be different colours, and this share is of a monitor
+  showing the grey sheet, inside a window whose letterbox is grey.
+  Two runs of the app also printed `audio device error: A buffer underrun or
+  overrun occurred` while the voice held throughout; on a third the microphone
+  never came up at all and the run failed outright. Worth reading together.
+  DoD: the aspect table back to a picture on every "as opened" row, or
+  viewer.md corrected to say what the script can actually measure and why.
+  Verify: `docs\testing\viewer.ps1`, and `-NoBackdrop` to test the grey-on-grey
+  theory.
 
 ## Decision Records (§DR)
 
@@ -4655,3 +4695,74 @@ seconds at worst. What a room pays for a still share with nobody in it is
 worth revisiting it is not from the client end: it needs an SFU that relays a
 subscriber's picture-loss request to the publisher, and `keyframe.ps1` is what
 would notice the day one does.
+
+### DR-45: opting in has to be revocable, and only the socket could say it was not (2026-08-27)
+
+**Context.** §7.9, out of task 5.4. prd.md §3 F3 asks for opt-in viewing: a
+client with no viewer open should not be receiving anybody's screen. That held
+on the way in — no sink, no subscription, no video (`reconcile_watch`) — and
+was unproven on the way out. Closing the viewer aborted a playback task and
+crossed no wire.
+
+**Nothing above the socket could measure it.** Closing the viewer is precisely
+what stops this client *reading* the track, so a sink counting zero access
+units is true whether the packets stopped or are being discarded — the
+instrument and the thing being measured share a cause. Windows' per-process IO
+counters, which task 5.4 reached for, read **5.2 / 5.4 / 5.6 kB/s** across
+never-opened, open and closed-again: a 69 kB/s share is invisible inside a
+figure that size, so those three numbers were never about video at all.
+
+**The instrument.** `Call::wire` (`client/src-tauri/src/rtc/wire.rs`), reading
+webrtc's own counters through `get_stats`. Two of them, at two depths:
+
+- the **transport** counters, incremented in webrtc's demuxer as each datagram
+  arrives and *before* anything decides whether it is STUN, DTLS or SRTP;
+- the **per-SSRC inbound** counters, incremented in the RTP endpoint for every
+  packet it can name a track for, whether or not a receiver is draining it.
+
+Neither is downstream of the read, which is the whole point. `bin/watch-cost`
+drives it through three phases — never opened, open, closed — and the question
+is only whether the third row looks like the first or the second.
+
+**It looked like the second.** Unmodified `main`, 15 s a phase:
+
+| phase | in | video | audio |
+|---|---|---|---|
+| never opened | 5.7 | 0.0 | 4.1 |
+| open | 70.2 | 62.9 | 4.0 |
+| closed | 70.0 | **62.7** | 4.0 |
+
+100% of it, still arriving, for as long as the share lasted, on every client
+that had ever opened a viewer. The same run through Windows' counters is the
+5.2 / 5.4 / 5.6 above.
+
+**The fix, and why it is shaped this way.** `close_pull` in `rtc::session`: the
+pulled transceiver goes `Inactive`, this side offers, and `tracks/close` names
+the mid. Three choices in that sentence are load-bearing.
+
+1. **`Inactive`, not `stop()`.** A stopped transceiver's m-section is dead, and
+   the next watch would make Cloudflare mint a new one. `bin/rewatch` after the
+   change: four watch-close-watch cycles, 4 of 4 got a picture, first picture
+   0.90–1.06 s — an inactive m-section is re-subscribable.
+2. **`force: false`.** The renegotiation is the point; forcing closes the track
+   without one and leaves the two ends disagreeing about what the m-section is
+   for.
+3. **The mid, and nothing else.** A pull is asked for by track name and
+   answered by mid, and the mid is the only handle the SFU takes back. It is
+   now carried on `Watching`.
+
+**Measured after, same drill:** never opened 5.7 / open 76.4 / closed **5.6**
+kB/s in, video 0.0 / 68.9 / **0.0**. Phase 3 is phase 1 to a tenth of a kB/s.
+
+**What else had to hold.** Closing a pull is a renegotiation, and DR-8 is the
+session where a renegotiation rebuilt the microphone's sender underneath the
+publish loop and the room went quiet. `watch-cost` now carries an `out` column
+for exactly that and fails the run if phase 3 stops sending: **5.6 kB/s out in
+all three phases**. `viewer.ps1` end to end: the voice held throughout, 101
+seconds measured, 0 below 45 frames, lowest 50.
+
+**Consequences.** §3 F3's opt-in is now revocable and measured on both sides.
+The Worker needed no change — it has proxied `tracks/close` since task 2.3 and
+nothing had ever called it. `rtc::wire` outlives this row: it is the seam for
+any future question of the form "is the wire carrying what we think it is", and
+the answer to why the per-process IO counters must never be asked one again.

@@ -7,12 +7,15 @@
 //! [`reconnect`] holds what a call does when the session under it dies: the
 //! retry schedule and the state the UI shows while it runs. [`screen`] is the
 //! same kind of seam as the audio one, for video: a call publishes an H.264
-//! track without knowing that a monitor exists.
+//! track without knowing that a monitor exists. [`wire`] is the measurement
+//! seam under all of it: what the transport carried, whether or not anything
+//! read it.
 
 pub mod reconnect;
 pub mod screen;
 pub mod session;
 pub mod signaling;
+pub mod wire;
 
 use thiserror::Error;
 

@@ -14,7 +14,7 @@ use std::{
     collections::HashMap,
     sync::{
         atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicU8, Ordering},
-        Arc, Mutex,
+        Arc, Mutex, Weak,
     },
     time::{Duration, Instant},
 };
@@ -51,9 +51,9 @@ use webrtc::{
         register_default_interceptors, MediaEngine, PeerConnection, PeerConnectionBuilder,
         PeerConnectionEventHandler, RTCConfigurationBuilder, RTCIceCandidateType,
         RTCIceGatheringState, RTCIceServer, RTCPeerConnectionIceEvent, RTCPeerConnectionState,
-        RTCSessionDescription, Registry, SettingEngine,
+        RTCSessionDescription, Registry, SettingEngine, StatsSelector,
     },
-    rtp_transceiver::{RTCRtpTransceiverDirection, RTCRtpTransceiverInit},
+    rtp_transceiver::{RTCRtpTransceiverDirection, RTCRtpTransceiverInit, RtpTransceiver},
     runtime::default_runtime,
 };
 
@@ -63,6 +63,7 @@ use super::{
     signaling::{
         ClientMessage, IceServer, JoinResponse, Participant, ServerMessage, SfuOperation, Signaling,
     },
+    wire::Wire,
     RtcError,
 };
 use crate::audio::{
@@ -406,6 +407,13 @@ struct Shared {
     watch_sink: Mutex<Option<WatchSink>>,
     /// Rung when [`Self::watch_sink`] changes.
     watch_changed: Notify,
+    /// The current session's transport, for [`Call::wire`] to count bytes on.
+    ///
+    /// `Weak`, because a measurement must not be what keeps a peer connection
+    /// alive: the supervisor closes one on its way out of every session, and a
+    /// harness holding a strong reference would leave the old one running
+    /// beside the new one and count both.
+    peer: Mutex<Option<Weak<dyn PeerConnection>>>,
 }
 
 /// A viewer's sink, and which viewer it belongs to.
@@ -452,6 +460,7 @@ impl Shared {
             share_changed: Notify::new(),
             watch_sink: Mutex::new(None),
             watch_changed: Notify::new(),
+            peer: Mutex::new(None),
         })
     }
 
@@ -615,6 +624,9 @@ impl Shared {
         if let Ok(mut commands) = self.commands.lock() {
             *commands = Some(session.commands.clone());
         }
+        if let Ok(mut peer) = self.peer.lock() {
+            *peer = Some(Arc::downgrade(&session.peer));
+        }
         self.self_id.send_replace(session.self_id.clone());
         self.roster.send_replace(session.participants.clone());
         published.send_replace(Some(
@@ -638,6 +650,9 @@ impl Shared {
     fn finish(&self, reason: EndReason) {
         if let Ok(mut commands) = self.commands.lock() {
             *commands = None;
+        }
+        if let Ok(mut peer) = self.peer.lock() {
+            *peer = None;
         }
         self.state.send_replace(CallState::Ended(reason));
     }
@@ -943,6 +958,33 @@ impl Call {
     /// down when the first frame arrives.
     pub fn set_talk_key(&self, down: bool) {
         self.shared.talk_key.store(down, Ordering::Relaxed);
+    }
+
+    /// What this call's transport has carried since the current session opened.
+    ///
+    /// Counted inside webrtc, at the point every datagram arrives and before
+    /// anything decides what it is — so a track this client has stopped
+    /// reading still shows up. That is the point of it: closing the viewer
+    /// stops the read (`reconcile_watch`), so every instrument above the
+    /// socket reports silence whether or not Cloudflare is still sending
+    /// (plan.md §7.9). See [`super::wire`].
+    ///
+    /// `None` between sessions — while a reconnect is in flight there is no
+    /// transport to count. The counters restart with each session, so a
+    /// snapshot is only comparable with another from the same one;
+    /// [`Transport::since`](super::wire::Transport::since) saturates rather
+    /// than wrapping when they are not.
+    pub async fn wire(&self) -> Option<Wire> {
+        let peer = self
+            .shared
+            .peer
+            .lock()
+            .ok()
+            .and_then(|held| held.as_ref().and_then(Weak::upgrade))?;
+
+        Some(Wire::read(
+            &peer.get_stats(Instant::now(), StatsSelector::None).await,
+        ))
     }
 
     /// Throws the current seat away and takes another one, as if the transport
@@ -2210,6 +2252,10 @@ struct Watching {
     peer: String,
     /// Their Realtime session, which changes when they reconnect.
     session_id: String,
+    /// The m-section Cloudflare put the pull on. What `tracks/close` names, and
+    /// the only handle on this subscription the SFU recognises — `None` if the
+    /// answer did not carry one, which leaves nothing to close.
+    mid: Option<String>,
     playback: JoinHandle<()>,
 }
 
@@ -2251,6 +2297,17 @@ async fn reconcile_watch(
         if let Some(sink) = sink.as_ref() {
             sink.ended();
         }
+        // Aborting the playback stops this client *reading* the screen and
+        // nothing else. Measured on 2026-08-27 (§7.9, docs/testing/viewer.md):
+        // 62.7 of 62.9 kB/s still arrived after the viewer closed, because
+        // nothing had told Cloudflare to stop. This is what tells them.
+        if let Some(mid) = current.mid.as_deref() {
+            if let Err(error) = close_pull(subscriber, mid).await {
+                // Worth reporting and not worth ending the call for: the worst
+                // case is the bandwidth this used to spend unconditionally.
+                eprintln!("could not close the screen pull on m-line {mid}: {error}");
+            }
+        }
     }
 
     let (Some(_), Some(sharer)) = (sink, sharer) else {
@@ -2261,10 +2318,11 @@ async fn reconcile_watch(
     };
 
     match subscribe_to_screen(subscriber, session_id).await {
-        Ok(playback) => {
+        Ok((playback, mid)) => {
             *watching = Some(Watching {
                 peer: sharer.id.clone(),
                 session_id: session_id.to_owned(),
+                mid,
                 playback,
             });
         }
@@ -2275,10 +2333,14 @@ async fn reconcile_watch(
 }
 
 /// Pulls the room's `screen` track and starts feeding whatever viewer is open.
+///
+/// Hands back the m-section the pull landed on as well as the playback task:
+/// closing this subscription later is addressed by mid and by nothing else
+/// (see [`close_pull`]).
 async fn subscribe_to_screen(
     subscriber: &Subscriber,
     session_id: &str,
-) -> Result<JoinHandle<()>, RtcError> {
+) -> Result<(JoinHandle<()>, Option<String>), RtcError> {
     let answer = pull_track(subscriber, session_id, SCREEN_TRACK).await?;
 
     if answer
@@ -2289,12 +2351,13 @@ async fn subscribe_to_screen(
         renegotiate(subscriber, &answer).await?;
     }
 
+    let mid = mid_of(&answer).map(ToOwned::to_owned);
     let ssrc = ssrc_of(&answer);
     let track = claim_track(&subscriber.signals.tracks, ssrc).await?;
-    Ok(tokio::spawn(screen_playback_loop(
-        track,
-        Arc::clone(&subscriber.shared),
-    )))
+    Ok((
+        tokio::spawn(screen_playback_loop(track, Arc::clone(&subscriber.shared))),
+        mid,
+    ))
 }
 
 fn free_slot(playing: &HashMap<String, Subscription>) -> Option<usize> {
@@ -2415,6 +2478,80 @@ async fn renegotiate(subscriber: &Subscriber, answer: &Value) -> Result<(), RtcE
     Ok(())
 }
 
+/// Tells Cloudflare to stop sending a track this client has stopped watching.
+///
+/// **Why this exists.** Giving up the viewer used to be a purely local act:
+/// `reconcile_watch` aborted the playback task and nothing crossed the wire.
+/// Measured on 2026-08-27 with `bin/watch-cost` (plan.md §7.9), that left
+/// 62.7 kB/s of the 62.9 kB/s the open viewer was receiving still arriving —
+/// the room paying for a picture nobody was looking at, on every client that
+/// had ever opened one, for as long as the share lasted. prd.md §3 F3 asks for
+/// opt-in viewing, and opt-in has to be revocable.
+///
+/// **The shape of it.** A pull is closed the way it was opened: by
+/// renegotiation. The transceiver goes `Inactive` — the m-section stays,
+/// against `stop()`, so re-watching can reuse it rather than making Cloudflare
+/// mint a new one — this side offers, and `tracks/close` names the mid and
+/// carries the offer. Unlike a pull, *this* exchange is ours to start, so the
+/// SDP goes up as an offer and comes back as an answer.
+///
+/// The microphone's sender can be rebuilt by the exchange, exactly as in
+/// [`renegotiate`], so the publish loop is told about it before its next frame
+/// goes nowhere (DR-8).
+async fn close_pull(subscriber: &Subscriber, mid: &str) -> Result<(), RtcError> {
+    let transceiver = transceiver_for(subscriber.peer.as_ref(), mid)
+        .await
+        .ok_or_else(|| RtcError::Protocol(format!("no transceiver on m-line {mid} to close")))?;
+    transceiver
+        .set_direction(RTCRtpTransceiverDirection::Inactive)
+        .await?;
+
+    let offer = subscriber.peer.create_offer(None).await?;
+    subscriber.peer.set_local_description(offer).await?;
+    let sdp = local_sdp(subscriber.peer.as_ref(), &subscriber.signals).await?;
+    trace_sdp("close offer", &sdp);
+
+    let answer = subscriber
+        .signaling
+        .sfu(
+            &subscriber.self_id,
+            SfuOperation::TracksClose,
+            &json!({
+                "tracks": [{ "mid": mid }],
+                "sessionDescription": { "type": "offer", "sdp": sdp },
+                // The renegotiation above is the point; forcing would close the
+                // track without one and leave the two ends disagreeing about
+                // what the m-section is for.
+                "force": false,
+            }),
+        )
+        .await?;
+
+    if let Some((code, description)) = track_error(&answer) {
+        return Err(RtcError::Sfu(format!("{description} ({code})")));
+    }
+
+    let sdp = sdp_of(&answer)?;
+    trace_sdp("close answer", &sdp);
+    subscriber
+        .peer
+        .set_remote_description(RTCSessionDescription::answer(sdp)?)
+        .await?;
+
+    subscriber.published.refresh(subscriber.peer.as_ref()).await;
+    Ok(())
+}
+
+/// The transceiver carrying `mid`, if the peer connection still has one.
+async fn transceiver_for(peer: &dyn PeerConnection, mid: &str) -> Option<Arc<dyn RtpTransceiver>> {
+    for transceiver in peer.get_transceivers().await {
+        if transceiver.mid().await.ok().flatten().as_deref() == Some(mid) {
+            return Some(transceiver);
+        }
+    }
+    None
+}
+
 /// Dumps one SDP when `GOODVOICE_TRACE_SDP` is set.
 ///
 /// Every hard problem on this path so far has been visible in the SDP and
@@ -2466,13 +2603,22 @@ fn is_starting_up(code: &str) -> bool {
 /// The SSRC the pulled track will arrive on, when the answer names one.
 fn ssrc_of(answer: &Value) -> Option<u32> {
     let sdp = sdp_of(answer).ok()?;
-    let mid = answer
+    ssrc_for_mid(&sdp, mid_of(answer)?)
+}
+
+/// The m-section Cloudflare put a pulled track on.
+///
+/// The pull is asked for by track name and answered by mid, and the mid is the
+/// only name the SFU will take back: `tracks/close` has no other way to say
+/// which subscription is being given up (server/src/room.ts, `tracks/close`
+/// names the caller's own transceivers).
+fn mid_of(answer: &Value) -> Option<&str> {
+    answer
         .get("tracks")
         .and_then(Value::as_array)
         .and_then(|tracks| tracks.first())
         .and_then(|track| track.get("mid"))
-        .and_then(Value::as_str)?;
-    ssrc_for_mid(&sdp, mid)
+        .and_then(Value::as_str)
 }
 
 /// Takes the track this subscription is waiting for out of the inbox.

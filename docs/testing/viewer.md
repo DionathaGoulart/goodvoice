@@ -133,3 +133,54 @@ That 3.5 kB/s is what a still share costs a room with nobody in it, and DR-44
 is why it is not zero: Cloudflare refuses a subscription to a track that has
 never carried a packet, so the repeat is the heartbeat that keeps the share
 openable, not merely a courtesy to whoever opens late.
+
+## What a closed viewer costs the room
+
+`bin/watch-cost` is §7.9, and it is the only instrument here that counts
+*below* the socket. Every other one counts what this client read — and closing
+the viewer is exactly what stops it reading (`rtc::session::reconcile_watch`),
+so a sink reporting zero says nothing about whether the packets stopped or are
+being thrown away. It counts through `Call::wire` (`rtc::wire`) instead:
+webrtc's own transport counters, which see every datagram before anything
+decides what it is, and its per-SSRC inbound counters, which see every RTP
+packet the endpoint can name a track for whether or not a receiver is draining
+it.
+
+```powershell
+cargo run -p goodvoice-harness --bin watch-cost -- --seconds 15
+```
+
+Three phases, and the question is whether the third looks like the first or the
+second:
+
+```
+  phase             in    video    audio      out
+  never opened      5.7      0.0      4.0      5.6
+  open             76.4     68.9      4.1      5.6
+  closed            5.6      0.0      4.0      5.6
+```
+
+**Before `tracks/close`, the third row was the second row.** Measured
+2026-08-27: 62.7 of the 62.9 kB/s an open viewer was receiving still arrived
+after it closed — 100% of it, for as long as the share lasted, on every client
+that had ever opened one. Nothing had told Cloudflare, because giving up the
+viewer aborted a playback task and did not cross the wire.
+
+**Windows' per-process IO counters cannot see any of this**, which is what
+§7.9 was waiting on an instrument for. They read 5.2 / 5.4 / 5.6 kB/s across
+the same three phases — a 69 kB/s share is invisible inside them. The numbers
+above are the same three phases measured where the packets actually arrive.
+
+`close_pull` is the fix: the transceiver goes `Inactive`, this side offers, and
+`tracks/close` names the mid. The Worker already proxied the operation
+(`server/src/sfu.ts`) and nothing had ever called it.
+
+**Two things the table is also watching.** `audio` is flat across all three
+phases, so the close does not disturb what is being *heard*; `out` is flat too,
+which is the DR-8 check — closing a pull is a renegotiation, and a
+renegotiation is what once rebuilt the microphone's sender underneath the
+publish loop and left the room quiet. A run where phase 3 stops sending fails
+on that alone. `bin/rewatch` covers the other side of it: four
+watch-close-watch cycles, every viewer got a picture, first picture 0.90–1.06 s
+— an `Inactive` m-section is re-subscribable, which is why the transceiver is
+not `stop()`ped.
