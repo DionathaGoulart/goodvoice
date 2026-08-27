@@ -97,9 +97,20 @@ jobs:
         run: npm run tauri build
         working-directory: client
 
-      # Two bundles, named for the version, and the checksums beside them. The
-      # count is asserted because `targets: "all"` silently producing one of the
-      # two is a release page missing an installer, not a failed build.
+      # The bundles, named for the version, and the checksums beside them.
+      #
+      # The counts are asserted because every way this goes wrong is silent.
+      # `targets: "all"` producing one installer instead of both is a release
+      # page missing a download, not a failed build — and since the installers
+      # learned Portuguese there is a second way: WiX writes **one MSI per
+      # culture**, so a `wix.language` that lost an entry ships a release whose
+      # Brazilian half is simply not there. The expected MSIs are therefore read
+      # out of `tauri.conf.json` rather than counted, and a culture with no file
+      # fails with the culture named in it.
+      #
+      # NSIS is the other shape: `nsis.languages` compiles every language into
+      # the *one* exe and asks at install time, so there is nothing to count
+      # here and a lost language would not change this step's output at all.
       - name: Collect the bundles and check them
         id: collect
         run: |
@@ -113,6 +124,18 @@ jobs:
           $msi  = Get-ChildItem $out -Filter *.msi
           if (-not $nsis) { throw "no NSIS installer under $env:CARGO_TARGET_DIR\release\bundle" }
           if (-not $msi)  { throw "no MSI under $env:CARGO_TARGET_DIR\release\bundle" }
+
+          $conf = Get-Content client/src-tauri/tauri.conf.json | ConvertFrom-Json
+          $cultures = @($conf.bundle.windows.wix.language)
+          foreach ($culture in $cultures) {
+            if (-not ($msi | Where-Object { $_.Name -match "_$([regex]::Escape($culture))\.msi$" })) {
+              throw "tauri.conf.json asks for the $culture MSI and the bundle has none"
+            }
+          }
+          if ($msi.Count -ne $cultures.Count) {
+            throw "$($msi.Count) MSIs for $($cultures.Count) cultures: $($msi.Name -join ', ')"
+          }
+
           foreach ($f in @($nsis) + @($msi)) {
             if ($f.Name -notmatch [regex]::Escape($v)) {
               throw "$($f.Name) does not carry version $v"

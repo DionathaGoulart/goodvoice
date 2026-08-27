@@ -32,11 +32,13 @@ Windows 10/11, x64. Download from the
 
 - `goodvoice_0.1.0_x64-setup.exe` — NSIS, installs per-user into
   `%LOCALAPPDATA%\goodvoice` with no admin prompt, and carries Microsoft's
-  WebView2 bootstrapper
-- `goodvoice_0.1.0_x64_en-US.msi` — the same app for anyone who deploys by MSI.
-  **It does not carry WebView2**: it fetches the bootstrapper from
-  `go.microsoft.com/fwlink` at install time, so it needs the network the NSIS
-  installer does not.
+  WebView2 bootstrapper. **It asks which language to install in**: one exe with
+  both, English and Português Brasileiro.
+- `goodvoice_0.1.0_x64_en-US.msi` / `goodvoice_0.1.0_x64_pt-BR.msi` — the same
+  app for anyone who deploys by MSI. WiX writes one file per language rather
+  than asking, so take the one you want. **Neither carries WebView2**: they
+  fetch the bootstrapper from `go.microsoft.com/fwlink` at install time, so
+  they need the network the NSIS installer does not.
 
 Verify what you downloaded against `SHA256SUMS.txt` on the same page:
 
@@ -44,7 +46,7 @@ Verify what you downloaded against `SHA256SUMS.txt` on the same page:
 Get-FileHash .\goodvoice_0.1.0_x64-setup.exe -Algorithm SHA256
 ```
 
-The one prerequisite neither installer carries is the **VC++ 2015–2022 x64
+The one prerequisite no installer carries is the **VC++ 2015–2022 x64
 runtime** — the exe imports `VCRUNTIME140.dll`, `VCRUNTIME140_1.dll` and
 `MSVCP140.dll`. Most machines with a game on them already have it.
 
@@ -104,9 +106,10 @@ wire was read rather than the process's IO counters (DR-45).
 
 ## Language
 
-English and Brazilian Portuguese. The window picks one from your machine on
-first run and remembers what you choose after that; the tray menu follows in
-the same click.
+English and Brazilian Portuguese, from the installer onwards. The NSIS setup
+asks which language to install in; the window picks one from your machine on
+first run and remembers what you choose after that, and the tray menu follows
+in the same click.
 
 ![The settings screen in Portuguese](docs/ui/settings-language-ptbr.png)
 

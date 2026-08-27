@@ -1127,6 +1127,18 @@ Goal: two clients talking through the SFU. Riskiest phase — spikes first.
   every failure path in the client, and the half left untranslated would be the
   half somebody pastes into an issue. Both READMEs say so in a section of their
   own.
+  **The installers speak both too**, and the two bundlers do it differently.
+  `nsis.languages` compiles both into the **one** exe and
+  `displayLanguageSelector` puts a dropdown in front of it — measured by
+  launching the real installer and reading its combo box: two entries, `English`
+  and `Português Brasileiro`, and picking the second gives *Instalação do
+  goodvoice* / *Bem-vindo ao Instalador do goodvoice* / *Próximo >*. WiX does
+  not ask: `wix.language` writes **one MSI per culture**, so the release now
+  carries `_en-US.msi` and `_pt-BR.msi`, read out of their own Property tables
+  as `ProductLanguage` 1033 and **1046**, with `&Finish` against `&Concluir`.
+  `release.yml` reads the culture list out of `tauri.conf.json` and fails with
+  the culture named if one has no file — a `wix.language` that loses an entry
+  would otherwise ship a release with its Brazilian half silently missing.
   Gates after it: `cargo test --workspace` **197**, clippy and fmt clean, `tsc`
   clean, server's 85 untouched.
   **Measured on the installed bundle, 2026-08-27**, every row PASS: the window
@@ -1137,6 +1149,15 @@ Goal: two clients talking through the SFU. Riskiest phase — spikes first.
   takes on the way through. The Portuguese is longer than the English
   everywhere and nothing overflowed: the two server buttons wrap to three lines
   inside 105×70 and stay legible.
+  **A local bundle is not the CI bundle, and this is where that showed.** The
+  MSI built here carries `goodvoice-client.exe` **and** a 1 039 360-byte
+  `goodvoice_client_lib.dll`; the one CI built from `4724584` carries only the
+  exe. It is not caused by the installer languages — reverting that change and
+  rebuilding produces the same two files — so it is this machine's `target`
+  against the runner's, and §6.4's "the app cab carries exactly one binary" was
+  read off a CI bundle and still holds for what ships. It is the concrete
+  reason §6.3 must take its installers off the release page rather than out of
+  `target`: the two are not the same file.
   **Two things the drill had to learn about this window**, both worth keeping
   because both looked like the app was broken. WebView2 answers
   `ScrollItemPattern` and does not scroll, so a control below the fold is only

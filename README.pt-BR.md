@@ -36,11 +36,13 @@ Windows 10/11, x64. Baixe da
 
 - `goodvoice_0.1.0_x64-setup.exe` — NSIS, instala por usuário em
   `%LOCALAPPDATA%\goodvoice` sem pedir administrador, e leva junto o
-  bootstrapper do WebView2 da Microsoft
-- `goodvoice_0.1.0_x64_en-US.msi` — o mesmo app, para quem instala por MSI.
-  **Ele não leva o WebView2 junto**: busca o bootstrapper em
-  `go.microsoft.com/fwlink` na hora da instalação, então precisa da rede que o
-  instalador NSIS não precisa.
+  bootstrapper do WebView2 da Microsoft. **Ele pergunta em que idioma
+  instalar**: um exe só, com inglês e Português Brasileiro.
+- `goodvoice_0.1.0_x64_en-US.msi` / `goodvoice_0.1.0_x64_pt-BR.msi` — o mesmo
+  app, para quem instala por MSI. O WiX escreve um arquivo por idioma em vez de
+  perguntar, então pegue o que você quer. **Nenhum dos dois leva o WebView2
+  junto**: buscam o bootstrapper em `go.microsoft.com/fwlink` na hora da
+  instalação, então precisam da rede que o instalador NSIS não precisa.
 
 Confira o que você baixou contra o `SHA256SUMS.txt` da mesma página:
 
@@ -48,7 +50,7 @@ Confira o que você baixou contra o `SHA256SUMS.txt` da mesma página:
 Get-FileHash .\goodvoice_0.1.0_x64-setup.exe -Algorithm SHA256
 ```
 
-O único pré-requisito que nenhum dos dois instaladores carrega é o **runtime do
+O único pré-requisito que nenhum instalador carrega é o **runtime do
 VC++ 2015–2022 x64** — o exe importa `VCRUNTIME140.dll`, `VCRUNTIME140_1.dll` e
 `MSVCP140.dll`. A maioria das máquinas que tem um jogo instalado já tem isso.
 
@@ -113,8 +115,9 @@ processo (DR-45).
 
 ## Idioma
 
-Inglês e português do Brasil. A janela escolhe um a partir da sua máquina na
-primeira execução e lembra o que você escolher depois disso; o menu da bandeja
+Inglês e português do Brasil, do instalador em diante. O setup NSIS pergunta em
+que idioma instalar; a janela escolhe um a partir da sua máquina na primeira
+execução e lembra o que você escolher depois disso, e o menu da bandeja
 acompanha no mesmo clique.
 
 O que **não** está traduzido é o diagnóstico — o que volta de uma entrada que
