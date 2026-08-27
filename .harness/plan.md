@@ -47,14 +47,14 @@ Phases 0–5 are closed, and so are §6.1, §6.2, §6.5, §7.1–§7.6, §7.9, �
 §7.12 and §7.14. What is open is §6.3, §6.4, §7.7, §7.8, §7.11 and §7.13.
 Nothing else in this file needs reading first.
 
-**`main` is well ahead of the `v0.1.0` tag, and the tag's bundle is now two
-features behind.** The draft release's installers were built from `ca9c74c` and
-carry neither §7.12's fix, nor §7.9's, nor §6.5's two languages at all. A
-clean-VM test against *those* bundles is testing an app that only speaks
-English and whose window walks down the screen. **§6.3 should be run against a
-rebuilt bundle**, which means the tag has to move or the release has to take
-locally-built installers — that decision is §6.4's, and it is not made in this
-file yet.
+**The tag and the page agree again.** `v0.1.0` used to name `ca9c74c`, whose
+installers had neither §7.12's fix, nor §7.9's, nor §6.5's two languages. That
+draft was deleted, the tag re-cut on `4724584`, and CI built it again — NSIS
+3 084 759 bytes, MSI 4 128 768 bytes, checksums verified off the page. The
+notes are written in both languages and open on *this is a test release*.
+**The page's own NSIS installer was downloaded, installed here and put through
+`language.ps1`, which passed every row.** So §6.3's clean VM should take the
+bundle off the release page, and it is now the right bundle to take.
 
 **Only one thing still blocks v0.1.0, and it is a second Windows machine.**
 §6.3 and §6.4's verification are the same act — install on a machine that has
@@ -64,19 +64,20 @@ pressing publish on a draft. Nothing left *for the release* is code.
 ### The next two things, in this order
 
 1. **§6.3 — the clean-VM install**, which needs a second Windows machine that
-   has never had the toolchain on it. The bundle is built and installs here;
-   what is unproven is that it carries everything a machine without MSVC needs.
+   has never had the toolchain on it. The bundle is built, installs here, and
+   the *downloaded* one passes `language.ps1`; what is unproven is that it
+   carries everything a machine without MSVC needs.
    **Install the NSIS *and* the MSI**: only NSIS carries the WebView2
    bootstrapper, the MSI downloads it from `go.microsoft.com/fwlink` at install
    time, so a VM behind something that blocks that fwlink fails one path and
    passes the other — and a test that tries one does not know which it proved.
-   **Take a bundle that has §6.5 in it**, not the one on the draft page: the
-   draft's were built from `ca9c74c` and predate both languages.
-2. **§6.4 — press publish.** The README is written in two languages, `v0.1.0`
-   is tagged, and the release page exists as a draft carrying both installers
-   and their checksums. What is left is deciding which bundle the page should
-   carry, a person pressing publish, and then the DoD's own verification, which
-   is row 1 above.
+   **Take them off the release page**, which now carries a build of `4724584`.
+2. **§6.4 — press publish.** Both READMEs are written, `v0.1.0` names
+   `4724584`, and the draft carries both installers, their checksums and notes
+   in two languages. What is left is a person pressing publish, and then the
+   DoD's own verification, which is row 1 above. **Publish last**, not first:
+   the tag is still movable only because nothing on that page has ever been
+   downloadable.
 
 **There is no longer an open row that is not blocked on hardware or a person.**
 §6.5 was the last of them. §7.7 and §7.8 want a second machine, §7.11 wants a
@@ -1010,6 +1011,11 @@ Goal: two clients talking through the SFU. Riskiest phase — spikes first.
   **Not done — the clean VM.** The install was done on this machine, which
   proves the bundle runs; it does not prove it carries everything a machine
   without the toolchain needs.
+  **Take the bundle off the release page.** As of 2026-08-27 the page carries
+  a build of `4724584`, which is the first one with §6.5's two languages in it
+  — and the tag was moved onto that commit for the same reason, so the tag and
+  the installers name the same code. A bundle out of `target` would prove the
+  same thing about a different app.
   **The bundle is the app and nothing else, as of DR-29.** It used to drop a
   1.1 MB `audio-spike.exe` beside it. NSIS is 3.0 MB, MSI 4.3 MB, and the
   installed directory is `goodvoice-client.exe` and `uninstall.exe`.
@@ -1042,11 +1048,29 @@ Goal: two clients talking through the SFU. Riskiest phase — spikes first.
   as a run artifact whatever happens next, and opens the release **as a draft** —
   because what a release claims about untaken measurements is not a thing CI
   can know.
-  **The tag is pushed and the page exists, as a draft.** `v0.1.0` is annotated,
-  on `ca9c74c`, and the release run built the bundles in **12m33s** — NSIS
-  3 073 808 bytes, MSI 4 112 384 bytes, `SHA256SUMS.txt` 194 bytes. Both
-  checksums were verified the only way that proves anything: downloaded back
-  off the page and re-hashed, rather than read out of the log that wrote them.
+  **The tag was moved on 2026-08-27, and the first page was deleted.** `v0.1.0`
+  was annotated on `ca9c74c` and the run built the bundles in **12m33s** — NSIS
+  3 073 808 bytes, MSI 4 112 384 bytes, `SHA256SUMS.txt` 194 bytes, both
+  checksums verified by downloading them back off the page and re-hashing
+  rather than reading the log that wrote them. Then §6.5 landed, and a tag
+  naming a commit with no Portuguese in it under a page carrying installers
+  that had it would be a mismatch nobody downloading could see. So the draft
+  was deleted, the tag re-cut on `4724584`, and CI built it again. **Deleting
+  it was safe and would not have been later:** a draft has never been
+  downloadable, so nothing anybody holds was invalidated. Once this page is
+  published, the tag stops being movable and a fix is a `v0.1.1`.
+  **The second run: 4724584, and the page carries it.** NSIS 3 084 759 bytes,
+  MSI 4 128 768 bytes, `SHA256SUMS.txt` 194 bytes, and both checksums verified
+  the same way as the first — downloaded back off the page and re-hashed.
+  **And the page's own binary was run**: the NSIS installer was downloaded from
+  the release, installed, and put through `docs\testing\language.ps1`, which
+  passed every row. That is a stronger claim than "the bundle builds" — it is
+  the artifact a stranger would get, doing the thing it is new for.
+  **The notes are written, bilingual, and say what this is.** English and
+  Portuguese, each opening on *this is a test release*, each carrying the five
+  measured numbers beside their budgets, which installer to take and why the
+  MSI needs a network the NSIS one does not, and the five things nobody has run
+  — the clean machine first, because it is the one most likely to bite.
   A draft's page lives at an `untagged-…` URL until somebody publishes it.
   **Two things the MSI's own tables settle**, read out of the bundle rather
   than out of the build. DR-27's fix holds where it matters: the app cab
@@ -1062,9 +1086,13 @@ Goal: two clients talking through the SFU. Riskiest phase — spikes first.
   that blocks that fwlink, fails the MSI path and passes the NSIS one, and a
   clean-VM test that only tries one of them does not know which it proved.
   **Not done — the publish, and the DoD's own verification**, which is a
-  download from the release page onto a machine, an install, and a call. That
-  last one is §6.3's clean VM if it is to prove anything the install on this
-  machine has not already proven.
+  download from the release page onto a machine, an install, and a call. The
+  download-and-install half is now done *on this machine* (above); what is left
+  is a machine that has never had the toolchain, which is §6.3's clean VM, and
+  a person pressing publish.
+  **Publishing closes the door on the tag.** It has been moved once, safely,
+  because a draft is not downloadable by anybody. Once the page is published
+  that stops being true and the next fix is a `v0.1.1`.
 
 - [x] **6.5 Two languages** — `client/ui/strings.ts`, `client/ui/i18n.ts`,
   `client/src-tauri/src/lang.rs`, both READMEs. English and Brazilian
