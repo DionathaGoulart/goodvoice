@@ -102,6 +102,14 @@ click on an ordinary window cleared it (DR-39).
 - **Dot-source `$env:USERPROFILE\gv\env.ps1` before any cargo command.** It enters the MSVC dev
   shell, puts LLVM after it (DR-30), and points `CARGO_TARGET_DIR` at a path
   short enough for the vendored C++ (DR-30) and outside OneDrive.
+  **Driving it from WSL needs `-ExecutionPolicy Bypass`**, and the failure is
+  quiet in the worst way: `powershell.exe -Command ". $env:USERPROFILE\gv\env.ps1; cargo …"`
+  refuses the dot-source for the execution policy and then **runs the cargo
+  command anyway**, in whatever directory and environment it happened to have.
+  What comes back is a `Cargo.toml`-not-found, or worse, a build with the wrong
+  toolchain. `powershell.exe -NoProfile -ExecutionPolicy Bypass -Command …` is
+  the form that works. The same flag is needed to run any drill in
+  `docs\testing\` from here.
 - **`--features custom-protocol` is not optional** for any binary that will be
   looked at or measured: without it the webview points at the Vite dev server
   and every number is about Edge's error page (DR-22).
