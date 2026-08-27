@@ -1424,8 +1424,36 @@ these were never run rather than let a reader assume all of them were.
   Playback, `24G2W1G4` (NVIDIA High Definition Audio), Enable then Set Default
   — then the same one command. **The endpoint is there**: its registry
   `DeviceState` is `0x10000001`, which is `DISABLED` with the `ACTIVE` bit
-  still set, not the `4` that means an empty jack. Whether that monitor has
-  speakers in it is the one thing this is short of.
+  still set, not the `4` that means an empty jack.
+  **The monitor accepts audio, which was the one thing this was short of.**
+  Read out of its EDID rather than guessed — `HKLM\SYSTEM\CurrentControlSet\
+  Enum\DISPLAY\AOC2402\…\Device Parameters\EDID`, the CTA-861 extension
+  block:
+
+  ```
+  CTA-861 rev=3  byte3=0xF1  basic_audio=True
+  SHORT_AUDIO format=1 (LPCM) channels=2 rates=0x07 (32 / 44.1 / 48 kHz)
+  ```
+
+  So the sink has an audio path and will take 48 kHz stereo. What EDID cannot
+  say is whether that path ends in a speaker or in the monitor's headphone
+  jack, and only enabling it answers that. The other screen, an `LG HD`, has no
+  CTA block at all and no audio.
+  **What is left is physical and nothing else.** `probe` on 2026-08-27 finds
+  exactly one active render endpoint — the HyperX headset — with the AOC, the
+  fifine's own jack and a digital output all `disabled` and enable-able.
+  Two routes, and the second was chosen on 2026-08-27 without being run:
+
+  1. **The AOC's speakers.** Two right-clicks in `mmsys.cpl` plus the monitor's
+     own OSD volume, and it is a desk speaker at a desk distance, which is the
+     case §7.13 is actually about.
+  2. **The HyperX at a metre**, conches facing the microphone instead of laid
+     on the capsule. It changes no configuration and gives the two things that
+     matter — a metre of air and the room's reflections — but not the level:
+     DR-42 measured 32.1 and 34.7 dB of coupling with the transducer *touching*
+     the capsule, and an earcup at a metre may not clear the 6 dB floor. If it
+     does not, `echo-room` refuses to report a cancellation and route 1 is the
+     answer.
 
 ## Decision Records (§DR)
 
