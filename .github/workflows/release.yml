@@ -1,0 +1,142 @@
+name: release
+
+# The tag is the trigger so that the file on the release page is one CI built
+# from the commit the tag names, rather than one a development machine built
+# and somebody uploaded. That is the whole of task 6.4's "CI built it".
+on:
+  push:
+    tags: ["v*"]
+
+# `gh release create` writes to the repository.
+permissions:
+  contents: write
+
+jobs:
+  bundle:
+    # NSIS, MSI and WebView2 are Windows. There is no cross-build of this.
+    runs-on: windows-latest
+    env:
+      # Same reason as ci.yml: MAX_PATH, and the vendored C++ spends most of it
+      # inside meson's build tree before it reaches an object file.
+      CARGO_TARGET_DIR: D:\gv
+    steps:
+      - uses: actions/checkout@v5
+
+      # Cheap, and it runs before the twenty-minute build rather than after:
+      # a release page whose installer says 0.1.0 under a tag that says v0.2.0
+      # is a thing a person downloads and cannot tell apart.
+      - name: The tag and the manifest have to agree
+        run: |
+          $tag = "${{ github.ref_name }}" -replace '^v', ''
+          $conf = (Get-Content client/src-tauri/tauri.conf.json | ConvertFrom-Json).version
+          if ($tag -ne $conf) {
+            throw "tag ${{ github.ref_name }} says $tag, tauri.conf.json says $conf"
+          }
+          "version=$conf" >> $env:GITHUB_OUTPUT
+        id: version
+
+      - uses: dtolnay/rust-toolchain@stable
+      # webrtc-audio-processing builds its bundled C++ with meson and ninja
+      # (DR-11); neither is on the runner's PATH, and both ship as wheels.
+      - run: pip install meson ninja
+
+      # Every line of this step is ci.yml's, for ci.yml's reasons: meson picks
+      # its toolchain off PATH, and windows-latest stocks it with Strawberry
+      # Perl's gcc, a MinGW toolchain and Git's `usr\bin\link.exe`, all of which
+      # answer before MSVC does. The vendored C++ has to be built by the
+      # compiler the Rust side links with.
+      - name: Enter the MSVC environment
+        run: |
+          $vs = & "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe" `
+            -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 `
+            -property installationPath
+          Import-Module "$vs\Common7\Tools\Microsoft.VisualStudio.DevShell.dll"
+          Enter-VsDevShell -VsInstallPath $vs -SkipAutomaticLocation `
+            -DevCmdArguments '-arch=x64 -host_arch=x64' | Out-Null
+          "INCLUDE=$env:INCLUDE" >> $env:GITHUB_ENV
+          "LIB=$env:LIB" >> $env:GITHUB_ENV
+          "LIBPATH=$env:LIBPATH" >> $env:GITHUB_ENV
+          "CC=cl" >> $env:GITHUB_ENV
+          "CXX=cl" >> $env:GITHUB_ENV
+          # DR-4: the vendored libopus still declares cmake_minimum_required
+          # (VERSION 3.1), which CMake 4 refuses without this.
+          "CMAKE_POLICY_VERSION_MINIMUM=3.5" >> $env:GITHUB_ENV
+          $env:PATH -split ';' |
+            Where-Object { $_ -and $_ -notmatch 'Strawberry|mingw|Git\\usr\\bin|Tools\\Llvm' } >> $env:GITHUB_PATH
+
+      # After the dev shell, not before (DR-24, DR-30): Visual Studio ships its
+      # own clang under `VC\Tools\Llvm`, and whichever libclang answers first is
+      # the one bindgen loads.
+      - name: Point the build at the runner's LLVM
+        run: |
+          $llvm = "C:\Program Files\LLVM\bin"
+          if (-not (Test-Path "$llvm\libclang.dll")) {
+            throw "no libclang at $llvm; bindgen would silently find another"
+          }
+          "LIBCLANG_PATH=$llvm" >> $env:GITHUB_ENV
+          $llvm >> $env:GITHUB_PATH
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: client/src-tauri
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: client/package-lock.json
+      - run: npm ci
+        working-directory: client
+
+      # `tauri build` turns on `custom-protocol` itself, which is what makes
+      # this a client with the frontend embedded rather than one pointed at a
+      # Vite dev server that is not running (DR-22). No GOODVOICE_SERVER here:
+      # unset is what selects lib.rs's public deploy, and an empty value would
+      # be `Some("")` and point the client at nothing.
+      - name: Build the bundles
+        run: npm run tauri build
+        working-directory: client
+
+      # Two bundles, named for the version, and the checksums beside them. The
+      # count is asserted because `targets: "all"` silently producing one of the
+      # two is a release page missing an installer, not a failed build.
+      - name: Collect the bundles and check them
+        id: collect
+        run: |
+          $v = "${{ steps.version.outputs.version }}"
+          $out = "$env:GITHUB_WORKSPACE\artifacts"
+          New-Item -ItemType Directory -Path $out | Out-Null
+          $found = Get-ChildItem -Path "$env:CARGO_TARGET_DIR\release\bundle" -Recurse `
+            -Include *-setup.exe, *.msi
+          foreach ($f in $found) { Copy-Item $f.FullName -Destination $out }
+          $nsis = Get-ChildItem $out -Filter *-setup.exe
+          $msi  = Get-ChildItem $out -Filter *.msi
+          if (-not $nsis) { throw "no NSIS installer under $env:CARGO_TARGET_DIR\release\bundle" }
+          if (-not $msi)  { throw "no MSI under $env:CARGO_TARGET_DIR\release\bundle" }
+          foreach ($f in @($nsis) + @($msi)) {
+            if ($f.Name -notmatch [regex]::Escape($v)) {
+              throw "$($f.Name) does not carry version $v"
+            }
+            "{0}  {1}" -f (Get-FileHash $f.FullName -Algorithm SHA256).Hash.ToLower(), $f.Name |
+              Out-File -Append -Encoding ascii "$out\SHA256SUMS.txt"
+          }
+          Get-Content "$out\SHA256SUMS.txt"
+
+      # Kept whether or not the release step runs, so a tag pushed with the
+      # release notes not yet written still leaves a downloadable build behind.
+      - uses: actions/upload-artifact@v4
+        with:
+          name: goodvoice-${{ github.ref_name }}-windows-x64
+          path: artifacts/
+
+      # A draft: the page it makes carries the installers and their checksums,
+      # and a person writes what the release claims before anybody can download
+      # it. 6.4 has things to say that CI cannot know — which measurements were
+      # never taken, and on what hardware.
+      - name: Draft the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "${{ github.ref_name }}" (Get-ChildItem artifacts | ForEach-Object FullName) `
+            --draft --title "goodvoice ${{ github.ref_name }}" `
+            --notes "Windows x64. Verify against ``SHA256SUMS.txt``. Built by CI from ${{ github.sha }}."
