@@ -65,11 +65,19 @@ unrun is allowed to claim.
    what is unproven is that it carries everything a machine without MSVC needs.
    **Rebuild the bundle first:** DR-38 changed the window and the frontend, and
    the installed app on this machine is older than both.
-3. **§6.4 — the README, the tag, the release.** It prints the measured numbers,
-   §7.1's ≤ 6% among them, and it has to say which of rows 10–15 were never
-   run rather than let a reader assume all of them were. **It now also has to
-   say what §7.6 and §6.3 are**, which is not "untested" but "tested up to the
-   hardware the test needs, and here is the command that finishes it".
+3. **§6.4 — the README, the tag, the release. The README and the release CI
+   are written; what is left is `git tag v0.1.0` and a push.** The README
+   prints the measured numbers, §7.1's ≤ 6% among them, says which of rows
+   10–15 were never run, and writes §7.6 and §6.3 the way this file asked —
+   not "untested" but "tested up to the hardware the test needs, and here is
+   the command that finishes it". `.github/workflows/release.yml` builds both
+   bundles from the tagged commit, checks the tag against
+   `tauri.conf.json` before it builds anything, writes `SHA256SUMS.txt`, and
+   opens the release as a **draft**. Pushing the tag is therefore reversible up
+   to the moment somebody presses publish. **What the tag does not do is the
+   DoD's verification** — a download from the release page, an install, a
+   call — and on this machine that install proves only what §6.3 already
+   proved here.
 
 ### What this machine needs
 
@@ -991,6 +999,32 @@ Goal: two clients talking through the SFU. Riskiest phase — spikes first.
   installer artifact via CI.
   DoD: release page has installer + checksums; CI built it.
   Verify: download from release page, install, join call.
+  **The README is written and the CI that builds the release exists. What is
+  left is the tag.** The README prints the five measured numbers beside their
+  budgets, says which two of them have a story (the FPS budget moved, DR-35;
+  the RAM budget is met by destroying the window, DR-21), carries six
+  screenshots out of `docs/ui/`, and points at `docs/self-hosting.md`.
+  **It says what has not been through anything**, which is the half of this
+  task that is not a README: §7.6 and §6.3 are written as *tested up to the
+  hardware the test needs*, each with the command that finishes it, and
+  §7.7–§7.12 are a six-row table of things never run — so a reader cannot
+  assume a measurement nobody took.
+  Built: `.github/workflows/release.yml`, on `push: tags: v*`. It is ci.yml's
+  Windows environment — the MSVC dev shell, LLVM *after* it (DR-30), meson and
+  ninja from pip (DR-11), `CMAKE_POLICY_VERSION_MINIMUM` (DR-4) — and then
+  `npm run tauri build`, which is what turns `custom-protocol` on so the
+  bundle is the app rather than a webview pointed at a dev server (DR-22).
+  Three things it refuses rather than ships: a tag whose version disagrees with
+  `tauri.conf.json` (checked *before* the twenty-minute build), a bundle
+  directory that yielded fewer than both installers, and a file whose name does
+  not carry the version. It writes `SHA256SUMS.txt` beside them, uploads them
+  as a run artifact whatever happens next, and opens the release **as a draft** —
+  because what a release claims about untaken measurements is not a thing CI
+  can know.
+  **Not done — the tag, the publish, and the DoD's own verification**, which is
+  a download from the release page onto a machine, an install, and a call. That
+  last one is §6.3's clean VM if it is to prove anything the install on this
+  machine has not already proven.
 
 ---
 
