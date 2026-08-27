@@ -47,14 +47,18 @@ Phases 0–5 are closed, and so are §6.1, §6.2, §6.5, §7.1–§7.6, §7.9, �
 §7.12 and §7.14. What is open is §6.3, §6.4, §7.7, §7.8, §7.11 and §7.13.
 Nothing else in this file needs reading first.
 
-**The tag and the page agree again.** `v0.1.0` used to name `ca9c74c`, whose
-installers had neither §7.12's fix, nor §7.9's, nor §6.5's two languages. That
-draft was deleted, the tag re-cut on `4724584`, and CI built it again — NSIS
-3 084 759 bytes, MSI 4 128 768 bytes, checksums verified off the page. The
-notes are written in both languages and open on *this is a test release*.
-**The page's own NSIS installer was downloaded, installed here and put through
-`language.ps1`, which passed every row.** So §6.3's clean VM should take the
-bundle off the release page, and it is now the right bundle to take.
+**The tag and the page agree, and the page now carries three files.** `v0.1.0`
+used to name `ca9c74c`, whose installers had neither §7.12's fix, nor §7.9's,
+nor two languages at all. It has been re-cut twice since — the draft deleted
+each time, which is safe only because a draft has never been downloadable — and
+names `0395b0c`, whose installers ask which language to install in. NSIS
+3 086 848 bytes, both MSIs 4 128 768, checksums verified off the page, notes
+written in both languages and opening on *this is a test release*.
+**The page's own files were opened rather than trusted**: the NSIS installer
+was downloaded, installed here and put through `language.ps1`, which passed
+every row; its combo box offers `English` and `Português Brasileiro`; and the
+two MSIs read `ProductLanguage` 1033 and 1046. So §6.3's clean VM should take
+its installers off the release page, and they are now the right ones to take.
 
 **Only one thing still blocks v0.1.0, and it is a second Windows machine.**
 §6.3 and §6.4's verification are the same act — install on a machine that has
@@ -1079,6 +1083,13 @@ Goal: two clients talking through the SFU. Riskiest phase — spikes first.
   measured numbers beside their budgets, which installer to take and why the
   MSI needs a network the NSIS one does not, and the five things nobody has run
   — the clean machine first, because it is the one most likely to bite.
+  **The third run: `0395b0c`, three installers.** NSIS 3 086 848 bytes, MSI
+  `_en-US` and `_pt-BR` 4 128 768 each, `SHA256SUMS.txt` 291 bytes, all three
+  checksums verified by downloading them back off the page and re-hashing.
+  **The page's own files were opened, not trusted**: the NSIS offers `English`
+  and `Português Brasileiro` out of its own combo box, the two MSIs read
+  `ProductLanguage` 1033 and 1046 out of their own Property tables, and the
+  pt-BR cab carries exactly `goodvoice-client.exe`.
   A draft's page lives at an `untagged-…` URL until somebody publishes it.
   **Two things the MSI's own tables settle**, read out of the bundle rather
   than out of the build. DR-27's fix holds where it matters: the app cab
@@ -1151,13 +1162,14 @@ Goal: two clients talking through the SFU. Riskiest phase — spikes first.
   inside 105×70 and stay legible.
   **A local bundle is not the CI bundle, and this is where that showed.** The
   MSI built here carries `goodvoice-client.exe` **and** a 1 039 360-byte
-  `goodvoice_client_lib.dll`; the one CI built from `4724584` carries only the
-  exe. It is not caused by the installer languages — reverting that change and
-  rebuilding produces the same two files — so it is this machine's `target`
-  against the runner's, and §6.4's "the app cab carries exactly one binary" was
-  read off a CI bundle and still holds for what ships. It is the concrete
-  reason §6.3 must take its installers off the release page rather than out of
-  `target`: the two are not the same file.
+  `goodvoice_client_lib.dll`; the ones CI builds carry only the exe — 4 648 960
+  bytes against 4 128 768, checked on the release page's own file both before
+  and after the installer languages landed. It is not caused by them: reverting
+  the change and rebuilding here produces the same two files. So it is this
+  machine's `target` against the runner's, §6.4's "the app cab carries exactly
+  one binary" still holds for everything that ships, and it is the concrete
+  reason §6.3 must take its installers **off the release page** rather than out
+  of `target` — the two are not the same file.
   **Two things the drill had to learn about this window**, both worth keeping
   because both looked like the app was broken. WebView2 answers
   `ScrollItemPattern` and does not scroll, so a control below the fold is only
