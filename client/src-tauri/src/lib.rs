@@ -9,6 +9,7 @@ pub mod audio;
 pub mod capture;
 pub mod home;
 pub mod invite;
+pub mod place;
 pub mod rtc;
 pub mod tray;
 
@@ -973,6 +974,11 @@ fn reveal(window: &tauri::Window, who: &str) {
         return;
     }
     let _ = window.set_focus();
+    // Where it came up. A window nobody has moved still has a place — Windows
+    // chose it — and without this the first thing `place` ever remembers is
+    // the first *drag*, so a window that was only ever closed and reopened
+    // would still walk (DR-43).
+    place::note(window);
 }
 
 /// Shows the window after [`REVEAL_GRACE`] whatever the webview does.
@@ -1277,7 +1283,13 @@ pub fn run() {
             // (DR-38); this is what shows it if the webview never says so.
             // `tray::open` arms the same timer on every window it rebuilds.
             if let Some(window) = app.get_webview_window("main") {
-                reveal_after_grace(&window.as_ref().window());
+                let window = window.as_ref().window();
+                // Before the reveal, because this one is a *move*: the run's
+                // first window is built from the config before `setup` runs,
+                // so it cannot be born in place the way the rebuilt ones are
+                // (`place`). Hidden is what makes the move invisible.
+                place::restore(&window);
+                reveal_after_grace(&window);
             }
 
             let controls = app.state::<CurrentCall>().controls.subscribe();

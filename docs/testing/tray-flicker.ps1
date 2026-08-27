@@ -472,11 +472,15 @@ try {
     Save-Sheet $strip $from $to $sheet
     Write-Output "FILMSTRIP_$cycle=$sheet"
   }
-  # Every position the window was given, in order. It is not one place: the
-  # config names no position, so Windows names one, and it is a different one
-  # each time. Recorded here because it is the thing a person watching the
-  # round trip actually notices.
-  Check 'WALK' $true ($walk -join ' -> ')
+  # Every position the window was given, in order, and they have to be one
+  # position. This used to be a `$true` — a line that recorded the walk rather
+  # than failing on it — because the config named no position, Windows named a
+  # different one every rebuild, and the window marched down the screen
+  # (plan.md 7.12). `place.rs` remembers the rectangle and hands it to the
+  # builder, so a rebuild that lands anywhere else is a regression, and this is
+  # the only thing that would see it.
+  $where = $walk | Select-Object -Unique
+  Check 'WALK' ($where.Count -eq 1) ($walk -join ' -> ')
 }
 finally {
   Stop-Process -Id $p.Id -Force -ErrorAction SilentlyContinue

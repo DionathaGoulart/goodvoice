@@ -172,7 +172,8 @@ where
 /// A window that was **destroyed** (see [`window_event`]) has to be built
 /// again from the same config the app declares, which is what makes the rebuilt
 /// one the same size, title and shape as the original rather than a
-/// second-class copy of it.
+/// second-class copy of it — and from [`crate::place`], which is what puts it
+/// back where the last one was instead of wherever Windows would cascade it to.
 ///
 /// The rebuild costs what a webview costs to start — 127 ms from click to
 /// window on the DR-12 machine — and buys back 327 MB (DR-21). It is also why
@@ -217,12 +218,26 @@ fn open(app: &AppHandle) -> Result<(), tauri::Error> {
         return window.set_focus();
     }
 
-    let Some(config) = app.config().app.windows.first().cloned() else {
+    let Some(mut config) = app.config().app.windows.first().cloned() else {
         // Nothing declares a window, so there is nothing to rebuild. Not fatal
         // and not silent: a tray whose Open does nothing needs explaining.
         eprintln!("no window is declared in the app config; nothing to open");
         return Ok(());
     };
+    // Where the last one was, written into the config the new one is built
+    // from — so the window is *born* in place rather than moved there. The
+    // config declares a size and no position, which is what let Windows
+    // cascade every rebuild down the screen (DR-38); moving it afterwards
+    // would fix the walk and add a jump, because a window has a rectangle
+    // from the moment it exists and `tray-flicker.ps1` counts every one of
+    // them.
+    if let Some(place) = crate::place::remembered(app) {
+        config.x = Some(place.x);
+        config.y = Some(place.y);
+        config.width = place.width;
+        config.height = place.height;
+        config.maximized = place.maximized;
+    }
     let built = WebviewWindowBuilder::from_config(app, &config)?.build()?;
     // No `set_focus` here: the window is built hidden and shows itself once
     // the webview has painted (DR-38), and focus comes with that. Asking for
@@ -237,6 +252,14 @@ fn open(app: &AppHandle) -> Result<(), tauri::Error> {
 /// Quitting is the one exit that has to be tidy: the window closing is not the
 /// end of a call any more, so this is where the seat goes back.
 fn quit(app: &AppHandle) {
+    // The last chance to write where the window is: quitting from the tray
+    // menu is the one exit that does not destroy a window first, so nothing
+    // else on this path would have saved it.
+    if let Some(window) = app.get_webview_window("main") {
+        crate::place::note(&window.as_ref().window());
+    }
+    crate::place::keep(app);
+
     let app = app.clone();
     tauri::async_runtime::spawn(async move {
         let _ = tokio::time::timeout(LEAVE_GRACE, crate::end_call(app.clone())).await;
@@ -274,6 +297,16 @@ pub fn window_event(window: &Window, event: &WindowEvent) {
     if window.label() != "main" {
         return;
     }
+
+    // Where it is, and where it was when it went. Above the tray check on
+    // purpose: a host that gave us no tray still has a person who put the
+    // window somewhere, and their next run should get it back.
+    match event {
+        WindowEvent::Moved(_) | WindowEvent::Resized(_) => crate::place::note(window),
+        WindowEvent::Destroyed => crate::place::keep(window.app_handle()),
+        _ => {}
+    }
+
     if !window.state::<Tray>().hides_the_window() {
         return;
     }

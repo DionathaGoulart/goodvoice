@@ -16,10 +16,12 @@
 //!
 //! # Why a file rather than a plugin
 //!
-//! One string, read once at startup and written when somebody changes it.
+//! Two small things, read once at startup and written when they change — the
+//! server, and the rectangle the window was last left at ([`crate::place`]).
 //! `tauri-plugin-store` would bring a dependency, an ACL entry per window and
 //! a second source of truth for the one setting the window is *not* the
-//! authority on.
+//! authority on. The window's own position is the second, and it is written
+//! from Rust for the same reason: the window is gone by the time it is known.
 
 use std::{
     fs,
@@ -29,16 +31,24 @@ use std::{
 
 use serde::{Deserialize, Serialize};
 
+use crate::place::Placement;
+
 /// What is stored, and all that is stored.
 ///
 /// A struct rather than a bare string so that the next thing a self-hoster has
-/// to set does not need a second file or a migration.
+/// to set does not need a second file or a migration. The window's rectangle
+/// is the second thing, and it needed neither.
 #[derive(Debug, Default, Clone, Serialize, Deserialize)]
 pub struct Stored {
     /// The Worker origin this client joins rooms on. `None` means "whatever
     /// the build was pointed at", which is what a fresh install has.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub server: Option<String>,
+    /// Where the window was last seen. `None` is a machine that has never had
+    /// a window on it, and means "let Windows choose", which is what every
+    /// window did before [`crate::place`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub window: Option<Placement>,
 }
 
 /// The file name inside the app's config directory.
@@ -103,6 +113,27 @@ impl Home {
         self.fallback
     }
 
+    /// Where the window was last seen, as it was written.
+    ///
+    /// Unchecked: whether that rectangle is still on a screen is
+    /// [`crate::place::remembered`]'s question, and it needs monitors this
+    /// type has never heard of.
+    #[must_use]
+    pub fn window(&self) -> Option<Placement> {
+        self.stored.read().ok().and_then(|stored| stored.window)
+    }
+
+    /// Records the window's rectangle **without writing the file**.
+    ///
+    /// Every move and every resize comes through here (`place::note`), which
+    /// is hundreds of calls for one drag. [`Home::save`] is the trip to the
+    /// disk, and it happens once, when the window goes away.
+    pub fn note_window(&self, place: Placement) {
+        if let Ok(mut stored) = self.stored.write() {
+            stored.window = Some(place);
+        }
+    }
+
     /// Points this client at `url`, or back at the build's own server when it
     /// is empty.
     ///
@@ -137,7 +168,10 @@ impl Home {
     /// not worth failing the change over: the client is already pointed at the
     /// new server for this run, and the alternative is a dialog about a
     /// directory nobody can do anything about.
-    fn save(&self) {
+    ///
+    /// Public because [`Home::note_window`] deliberately does not call it —
+    /// see there.
+    pub fn save(&self) {
         let Some(path) = self.path.as_deref() else {
             return;
         };
@@ -151,7 +185,7 @@ impl Home {
             let _ = fs::create_dir_all(parent);
         }
         if let Err(error) = fs::write(path, text) {
-            eprintln!("could not remember the server: {error}");
+            eprintln!("could not write the settings: {error}");
         }
     }
 }

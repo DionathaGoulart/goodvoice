@@ -103,7 +103,7 @@ Full guide: [docs/self-hosting.md](docs/self-hosting.md).
 ## What this release has not been through
 
 A measured number nobody has taken is not a promise. One thing this version
-claims is tested up to the hardware its test needs and no further, and seven
+claims is tested up to the hardware its test needs and no further, and six
 more were never run at all.
 
 **Tested up to the hardware, with the command that finishes it:**
@@ -123,12 +123,18 @@ more were never run at all.
 | What a closed viewer still costs | `tracks/close` is unused, so the SFU is never told a viewer went away |
 | Keyframe on demand | no `nack pli` / `ccm fir`, so a viewer waits up to 2 s for a picture and a still share re-sends keyframes to nobody |
 | The self-hosting guide, followed by a stranger | written and half-measured; nobody has done it on a fresh Cloudflare account |
-| Where the window comes back | closing to the tray and reopening walks the window down the screen |
 | A loudspeaker a metre away | the canceller was measured with the transducer against the capsule, which is a shorter delay than a desk speaker |
 
 The plan tracks each of these as a task with a definition of done and the
 command that proves it: [.harness/plan.md](.harness/plan.md), §7.7 through
 §7.13.
+
+One row has left this table since the `v0.1.0` bundle was built, and **the
+bundle does not have the fix**: the window used to come back somewhere else
+every time it was reopened, cascading down the screen over a session (§7.12,
+DR-43). It is fixed on `main` — the rectangle is remembered across a close, a
+reopen and a restart, and refused if the screen it names has gone away — and
+`docs/testing/window-place.ps1` is what says so. It ships in the next build.
 
 ## Building it yourself
 

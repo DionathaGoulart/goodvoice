@@ -198,21 +198,36 @@ also confirms the window does not resize or move after somebody could see it.
 millisecond on each. It stays in `%TEMP%` rather than in the repo: it is a
 photograph of the desktop the drill ran on, and whatever else was on it.
 
-### The window walks
+### The window used to walk
 
-`WALK` prints the position of every window the run was given:
+`WALK` prints the position of every window the run was given. It used to be a
+different place every time:
 
 ```
 WALK=104,104 -> 208,208 -> 52,52 -> 130,130
 ```
 
-**It is a different place every time.** `tauri.conf.json` gives the window a
-size and no position, so Windows picks one and cascades from the last. A person
-who puts goodvoice where they want it and closes it to the tray does not get it
-back there. Nobody had noticed because no drill had compared two rebuilds'
-rectangles. plan.md §7.12 owns it; it is also why this drill cannot be pointed
-at a fixed region and instead waits for the handle to exist — a few
-milliseconds, long before the first paint — and reads the rectangle off it.
+`tauri.conf.json` gives the window a size and no position, so Windows picked
+one and cascaded from the last, and a person who put goodvoice where they
+wanted it and closed it to the tray did not get it back there. Nobody had
+noticed because no drill had compared two rebuilds' rectangles.
+
+**Fixed by `place.rs`** (plan.md §7.12, DR-43): the rectangle is remembered and
+handed to the builder, so the window is born where the last one was.
+
+```
+WALK=104,104 -> 104,104 -> 104,104 -> 104,104 -> 104,104
+```
+
+That line is now an assertion rather than a note — five windows, one position,
+or the run fails. What it does *not* cover is a window somebody moved: this
+drill never moves one, so it proves goodvoice stopped walking and not that it
+remembers. `window-place.ps1` is that half, and the restart half with it.
+
+It is still why this drill cannot be pointed at a fixed region and instead
+waits for the handle to exist — a few milliseconds, long before the first paint
+— and reads the rectangle off it. A `settings.json` from a machine whose
+monitors have moved will put the window somewhere this drill has to discover.
 
 ## By hand, the part no script can sign off
 
@@ -224,10 +239,11 @@ Build and run it, then:
    column for goodvoice drops by about 300 MB within a second or two.
 3. **Left-click the icon.** Nothing happens for about four tenths of a second,
    and then the window is there, focused, complete, showing the room it was in.
-   It is a *new* window — same size and title, scrolled to the top, whatever you
-   had typed in the join form gone, and **not where you left it** (see *the
-   window walks* above). That is the trade task 4.6 made: 427 ms and a fresh
-   window, for 327 MB.
+   It is a *new* window — same size, title and **position**, scrolled to the
+   top, whatever you had typed in the join form gone. That is the trade task
+   4.6 made: 427 ms and a fresh window, for 327 MB. Move it somewhere first if
+   you want to see the position come back; it is the same rectangle after a
+   restart, too.
 4. **Watch for flicker.** There is none, and `tray-flicker.ps1` above is the
    reason to believe that rather than this paragraph. There was: 394 ms of
    white, on every trip back, until DR-38.

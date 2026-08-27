@@ -21,12 +21,17 @@
 
 ## Start here
 
-**Where this stopped:** 2026-08-26, with §7.6 measured and closed. That was
-the last release-blocking row that was about this app rather than about a
-machine nobody here has, and it needed one object: a loudspeaker the microphone
-could hear. A HyperX earcup laid face-down on the fifine's capsule was it.
-Phases 0–5 are closed, and so are §6.1, §6.2 and §7.1–§7.6. What is open is
-§6.3, §6.4 and §7.7–§7.13. Nothing else in this file needs reading first.
+**Where this stopped:** 2026-08-26, with §7.12 fixed and closed — the window
+walking down the screen, which was the only open row that was code rather than
+a machine, a room or a person. It is `src/place.rs` and DR-43. Phases 0–5 are
+closed, and so are §6.1, §6.2, §7.1–§7.6 and §7.12. What is open is §6.3, §6.4
+and §7.7–§7.11 plus §7.13. Nothing else in this file needs reading first.
+
+**`main` is ahead of the `v0.1.0` tag now.** The draft release's installers were
+built from `ca9c74c` and do not carry §7.12's fix. That does not change the
+plan below — §7.12 was always an *after the release* row — but it does mean the
+clean-VM install in §6.3 is testing a bundle that walks its window, and the
+README on `main` says as much.
 
 **Only one thing still blocks v0.1.0, and it is a second Windows machine.**
 §6.3 and §6.4's verification are the same act — install on a machine that has
@@ -1308,7 +1313,7 @@ these were never run rather than let a reader assume all of them were.
   DoD: somebody who has never deployed this reaches a working room using only
   that document; whatever tripped them up is fixed in it.
   Verify: a clean account, and a second pair of eyes.
-- [ ] **7.12 The rebuilt window comes back somewhere else** — DR-38's other
+- [x] **7.12 The rebuilt window comes back somewhere else** — DR-38's other
   finding. `tauri.conf.json` gives the window a size and no position, so every
   window Windows makes for this process is cascaded from the last one: four
   rebuilds in one run landed at `104,104`, `208,208`, `52,52` and `130,130`. A
@@ -1319,6 +1324,43 @@ these were never run rather than let a reader assume all of them were.
   across a restart; `tray-flicker.ps1`'s `WALK` line repeats one position.
   Verify: `docs\testing\tray-flicker.ps1 -Cycles 3`, whose `WALK` is exactly
   this measurement.
+  **Both halves measured 2026-08-26, and it stopped walking — DR-43.** The
+  rectangle is remembered in `settings.json` beside the chosen server, in
+  logical pixels because that is the unit the window config is in, and
+  `src/place.rs` is the whole of it: a `Placement`, a reachability check, and
+  the two ways a window is put back.
+
+  ```
+  WALK=104,104 -> 104,104 -> 104,104 -> 104,104 -> 104,104
+  ```
+
+  That is `tray-flicker.ps1 -Cycles 3` — the DoD's own line, and now an
+  assertion instead of a note: five windows, one position, or the run fails. It
+  used to be four positions and a `$true`.
+  **The DoD's first half needed a second drill**, because `tray-flicker.ps1`
+  never *moves* the window: what it proves is that goodvoice stopped walking,
+  not that it remembers. `docs\testing\window-place.ps1` moves one to
+  `690,337` — a place no cascade from `104,104` could ever reach — closes it,
+  and asks four questions:
+
+  ```
+  MOVED_TO=690,337 520x700          WROTE_WINDOW=690.0,337.0 504.0x661.0 max=False
+  REOPEN_AT=690,337 520x700         RESTART_AT=690,337 520x700
+  OFFSCREEN_REFUSED=182,182 436x659 VIRTUAL_SCREEN={X=-768,Y=-173,Width=2688,Height=1366}
+  ```
+
+  `WROTE_WINDOW` is exact rather than near: 504x661 is the *inner* size of a
+  520x700 frame, and nothing rounds on the way back because logical is the unit
+  at both ends. `RESTART_AT` is the half `WALK` cannot reach — a **killed**
+  process, relaunched, whose first window is built from the config before
+  `setup` runs and is therefore moved rather than born in place.
+  **`OFFSCREEN_REFUSED` is the failure this could have caused**, and it is the
+  reason the check exists at all: `-9000,-9000` written into the file by hand
+  is the second monitor that went away, and a window that is *there* — existing,
+  focused, on no screen — is worse than one that forgot. It came up at
+  `182,182` instead. This machine has two screens (the virtual desktop starts
+  at `-768`), so the check is being asked a real question rather than a
+  degenerate one.
 
 ---
 
@@ -4356,3 +4398,80 @@ Task 4.7's outstanding row closes with it. §7.13 opens for the far-field case
 and blocks nothing. What still blocks v0.1.0 is §6.3 and §6.4's verification,
 which are one act on a second Windows machine, and a person pressing publish.
 
+
+### DR-43: the window remembers where it was, in the unit the config is in (2026-08-26)
+
+**Context.** `tauri.conf.json` gives the main window a size and no position, so
+Windows placed every one of them and cascaded from the last: `104,104`,
+`208,208`, `52,52`, `130,130` across four rebuilds in one run (DR-38). Task 4.6
+made that a thing a person meets constantly rather than once a session — the
+window is *destroyed* on the way to the tray and a new one is built on the way
+back — so goodvoice walks down the screen over an evening. §7.12.
+
+**Options considered.**
+
+1. **`tauri-plugin-window-state`.** The plugin that exists for this. Rejected
+   for what `home.rs` already rejected `tauri-plugin-store` for: a dependency,
+   an ACL entry per window, and a second file that means the same kind of thing
+   as `settings.json`. It also saves on a timer and on exit, and the exit this
+   app cares about is a window being destroyed while the process carries on —
+   which is not an exit.
+2. **A position in `tauri.conf.json`.** Stops the walk and remembers nothing;
+   every install would open at the same hardcoded corner.
+3. **Remember it in `settings.json`.** Taken. The file is read before the first
+   window exists, is written whole, and was built for exactly this: *"a struct
+   rather than a bare string so that the next thing … does not need a second
+   file or a migration."*
+
+**Decision.** `src/place.rs`. A `Placement` — outer position, inner size, and
+whether it was maximised — rides in `Stored` beside the server. Three
+decisions inside it are the ones worth writing down.
+
+**Logical pixels, not physical.** `WindowConfig::x`/`y` reach `tao` as a
+`LogicalPosition` and `width`/`height` as a `LogicalSize`. Storing physical
+would mean converting on the way out by a scale factor nobody can know — the
+one of whatever monitor the window is *about* to land on — so the round trip is
+kept in the unit that needs no guess. Measured: a 520x700 frame moved to
+`690,337` stores `690.0,337.0 504.0x661.0` and comes back at `690,337 520x700`,
+exactly, on a scale-1.0 screen.
+
+**Born in place, not moved there — for the rebuilt window.** `tray::open`
+writes the rectangle into the cloned `WindowConfig` before
+`WebviewWindowBuilder::from_config`. Calling `set_position` after the build
+would fix the walk and add a jump: a window has a rectangle from the moment it
+exists, and `tray-flicker.ps1`'s `GEOM_CHANGES_AFTER_FIRST` counts every one it
+has, hidden ones included. The **first** window of a run cannot be built this
+way — it comes from the config before `setup` runs — so that one *is* moved,
+and it is invisible only because DR-38 already keeps it hidden until it has
+painted. Two paths, and `window-place.ps1` measures both because they are not
+the same code.
+
+**Written on destroy, not on move.** `place::note` is called on every `Moved`
+and every `Resized`, which is hundreds of calls for one drag, and it only
+touches memory. `place::keep` writes the file, on the window being destroyed
+and on the tray's quit — the two ordinary ends of a window. A process killed
+outright loses the last move, which is the right trade and is also what makes
+`window-place.ps1`'s `RESTART_AT` mean something: it kills the process and the
+rectangle is still there, because the close before it wrote the file.
+
+**A remembered position is refused if it is nowhere.** The monitor a window was
+left on is not always there next time. A position that now lands off every
+screen is worse than no memory at all, because the window *exists*, has focus,
+and is on no screen. `Placement::is_reachable_on` asks whether the top edge is
+on some monitor's work area with at least 96 px of width and 32 px of title bar
+— area is the wrong test, because a window overlapping only along its bottom
+edge is drawn and cannot be dragged anywhere. A host that enumerates no
+monitors is taken at its word and the position is used: losing a good position
+to a question nobody could answer is the worse failure.
+
+**Consequences.** §7.12 closes. `WALK` becomes an assertion — five windows, one
+position, or `tray-flicker.ps1` fails — and `docs\testing\window-place.ps1`
+joins it with the half `WALK` cannot reach: a window somebody moved, across a
+reopen and across a restart, plus the off-screen refusal. `settings.json` grows
+a `window` object; a file written by 0.1.0 has none and parses, and a
+`Placement` written without `maximized` defaults to false, both covered by
+tests. Seven new tests, 188 in the workspace.
+
+**The bundle on the draft release page does not have this.** `v0.1.0` is
+`ca9c74c` and this is later, so the README on `main` says so rather than
+quietly implying the installer behaves this way.
