@@ -44,13 +44,13 @@ Budgets are hard requirements, not aspirations (see
 hardware against the live deploy — an RTX 2060 desktop, a HyperX headset out
 and a fifine USB microphone in.
 
-| Metric                            | Budget  | Measured                          |
-| --------------------------------- | ------- | --------------------------------- |
-| End-to-end voice latency          | ≤ 80 ms | **41.4 ms** (21.4 ms wire + 20 ms device period) |
-| Idle CPU in a room                | < 2%    | **0.39%** median, 30-min soak     |
-| RAM idle in the tray              | ≤ 120 MB| **34.1 MB** peak, 34.0 median     |
-| FPS impact sharing 1080p30        | ≤ 6%    | **5.6%** (57.0 → 53.8 fps)        |
-| Cold start → audible in the room  | < 3 s   | **2692 ms** median of five runs   |
+| Metric                           | Budget   | Measured                                         |
+| -------------------------------- | -------- | ------------------------------------------------ |
+| End-to-end voice latency         | ≤ 80 ms  | **41.4 ms** — 21.4 ms wire + 20 ms device period |
+| Idle CPU in a room               | < 2%     | **0.39%** median, 30-minute soak                 |
+| RAM idle in the tray             | ≤ 120 MB | **34.1 MB** peak, 34.0 median                    |
+| FPS impact sharing 1080p30       | ≤ 6%     | **5.6%** — 57.0 fps to 53.8                      |
+| Cold start → audible in the room | < 3 s    | **2692 ms** median of five runs                  |
 
 Two of those have a story worth reading before you quote them:
 
@@ -115,8 +115,8 @@ more were never run at all.
 
 **Never run, and none of them block this release:**
 
-| | |
-| --- | --- |
+| What                                           | Why it is still open                                                                                                  |
+| ---------------------------------------------- | --------------------------------------------------------------------------------------------------------------------- |
 | Pulling the network mid-call | `bin/reconnect-drill` kills the session from the inside; only a real netdown checks that the client *notices* |
 | Four clients conversing | N-party audio is tested; the CPU cost of four at once needs four hosts |
 | What a closed viewer still costs | `tracks/close` is unused, so the SFU is never told a viewer went away |
