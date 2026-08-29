@@ -19,6 +19,9 @@ jobs:
       # Same reason as ci.yml: MAX_PATH, and the vendored C++ spends most of it
       # inside meson's build tree before it reaches an object file.
       CARGO_TARGET_DIR: D:\gv
+      # Lifted to the job so the symbol step can ask whether it is set: the
+      # `secrets` context is not readable from a step-level `if`.
+      SENTRY_AUTH_TOKEN: ${{ secrets.SENTRY_AUTH_TOKEN }}
     steps:
       - uses: actions/checkout@v5
 
@@ -96,6 +99,51 @@ jobs:
       - name: Build the bundles
         run: npm run tauri build
         working-directory: client
+        env:
+          # Where this build reports crashes to, and the only place the value
+          # exists — `report::DSN` is an `option_env!`, so a build without this
+          # secret produces a client that reports nowhere and needs no opt-out.
+          # That is what a fork's CI gets, and it is the right answer for one.
+          GOODVOICE_SENTRY_DSN: ${{ secrets.GOODVOICE_SENTRY_DSN }}
+
+      # The PDB is written into the runner and the runner is destroyed. If it
+      # is not sent from here, the one file that can turn this build's crashes
+      # into function names and line numbers stops existing — and nothing
+      # downstream notices, because an unsymbolicated crash still arrives, just
+      # as a column of addresses. That is why this step fails the job rather
+      # than warning: it is the same family of silent failure the bundle counts
+      # below are asserted against.
+      #
+      # Both the PDB and the exe: Sentry needs the binary to extract the call
+      # frame information that gives a correct stack out of an optimised
+      # minidump, and `lto = true` with `opt-level = "s"` makes this one very
+      # optimised indeed.
+      #
+      # `deps\` and not `release\`: cargo copies the exe up one level but
+      # leaves the PDB where the linker wrote it. Named file by file rather
+      # than scanning the directory — `deps` holds a PDB for every dependency
+      # in the graph, several hundred of them, and none is this app.
+      - name: Send the symbols
+        if: env.SENTRY_AUTH_TOKEN != ''
+        env:
+          SENTRY_ORG: ${{ secrets.SENTRY_ORG }}
+          SENTRY_PROJECT: ${{ secrets.SENTRY_PROJECT }}
+        run: |
+          npm install -g @sentry/cli
+          $files = @(
+            "$env:CARGO_TARGET_DIR\release\deps\goodvoice_client.pdb",
+            "$env:CARGO_TARGET_DIR\release\deps\goodvoice_client_lib.pdb",
+            "$env:CARGO_TARGET_DIR\release\goodvoice-client.exe"
+          )
+          foreach ($f in $files) {
+            if (-not (Test-Path $f)) {
+              throw "$f is missing; a crash from this build would be unreadable"
+            }
+          }
+          # `--include-sources` embeds the source of the frames in the trace.
+          # The repository is MIT and public, so it costs nothing here and is
+          # the difference between a line number and the line.
+          sentry-cli debug-files upload --include-sources $files
 
       # The bundles, named for the version, and the checksums beside them.
       #
