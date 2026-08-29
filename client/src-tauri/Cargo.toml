@@ -149,7 +149,26 @@ codegen-units = 1
 lto = true
 opt-level = "s"
 panic = "abort"
-strip = true
+# What a crash report can be read with. On windows-msvc a PDB is written
+# either way — the linker produces one whatever `debug` says — but the profile
+# default of `debug = false` leaves it holding only what the *linker* knows:
+# public symbols, no line numbers, and no record of what was inlined. With
+# `lto = true` and `opt-level = "s"` above, almost every interesting frame is
+# inlined, so that PDB symbolicates a minidump into a short list of the wrong
+# functions.
+#
+# `line-tables-only` is the cheapest setting that adds the line tables and the
+# inline records. Measured on `probe`, the smallest binary here, rebuilt
+# either side of this line: PDB 1,019,904 -> 1,126,400 bytes (+10.4%), and the
+# exe **byte-for-byte the same size** at 156,672. None of it ships: the PDB is
+# a separate file that no installer carries.
+#
+# `strip = true` used to sit here and is deliberately gone. On MSVC it behaves
+# as `strip = "symbols"`, which is what breaks a backtrace on this target —
+# Cargo disables its own default debuginfo stripping here for that reason
+# (rust-lang/cargo#13630) — and it was buying nothing, since the exe is the
+# same size without it.
+debug = "line-tables-only"
 
 # DR-11: upstream's build.rs has no Windows branch and fails in five places,
 # none of them a real incompatibility. `vendor/webrtc-audio-processing-sys`
