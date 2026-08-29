@@ -5,7 +5,7 @@
 Chat de voz leve e de código aberto para quem joga no Windows. **Simples como o
 Mumble, com a qualidade do Discord, e um custo de desempenho perto de zero.**
 
-> **A v0.1.0 é uma versão de testes.** Tudo o que está abaixo foi medido, e a
+> **A v0.1.1 é uma versão de testes.** Tudo o que está abaixo foi medido, e a
 > lista do que **não** passou por teste nenhum está em
 > [Por onde esta versão não passou](#por-onde-esta-versão-não-passou) — é uma
 > lista de verdade, não um aviso legal. O maior item dela: **nenhuma máquina sem
@@ -23,6 +23,12 @@ Três funcionalidades. Nada além disso:
 Em **inglês e português do Brasil**, escolhido na tela de ajustes e seguido pelo
 menu da bandeja. Ele começa no idioma em que a sua máquina está.
 
+**Relatórios de erro ficam desligados até você ligar.** A tela de
+configurações pergunta; nada sai da máquina antes de você responder, e a
+resposta vale a partir da próxima vez que o app abrir. Um registro rotativo é
+escrito localmente de qualquer forma — há um botão que abre a pasta dele, para
+anexar numa issue.
+
 ![A lista de participantes, com os níveis](docs/ui/roster-levels.png)
 ![A tela de ajustes em português](docs/ui/settings-language-ptbr.png)
 
@@ -34,11 +40,11 @@ menu da bandeja. Ele começa no idioma em que a sua máquina está.
 Windows 10/11, x64. Baixe da
 [última release](https://github.com/DionathaGoulart/goodvoice/releases/latest):
 
-- `goodvoice_0.1.0_x64-setup.exe` — NSIS, instala por usuário em
+- `goodvoice_0.1.1_x64-setup.exe` — NSIS, instala por usuário em
   `%LOCALAPPDATA%\goodvoice` sem pedir administrador, e leva junto o
   bootstrapper do WebView2 da Microsoft. **Ele pergunta em que idioma
   instalar**: um exe só, com inglês e Português Brasileiro.
-- `goodvoice_0.1.0_x64_en-US.msi` / `goodvoice_0.1.0_x64_pt-BR.msi` — o mesmo
+- `goodvoice_0.1.1_x64_en-US.msi` / `goodvoice_0.1.1_x64_pt-BR.msi` — o mesmo
   app, para quem instala por MSI. O WiX escreve um arquivo por idioma em vez de
   perguntar, então pegue o que você quer. **Nenhum dos dois leva o WebView2
   junto**: buscam o bootstrapper em `go.microsoft.com/fwlink` na hora da
@@ -47,7 +53,7 @@ Windows 10/11, x64. Baixe da
 Confira o que você baixou contra o `SHA256SUMS.txt` da mesma página:
 
 ```powershell
-Get-FileHash .\goodvoice_0.1.0_x64-setup.exe -Algorithm SHA256
+Get-FileHash .\goodvoice_0.1.1_x64-setup.exe -Algorithm SHA256
 ```
 
 O único pré-requisito que nenhum instalador carrega é o **runtime do
@@ -148,7 +154,7 @@ Guia completo: [docs/self-hosting.md](docs/self-hosting.md) (em inglês).
 
 Um número que ninguém mediu não é uma promessa. Uma coisa que esta versão
 afirma está testada até o limite do hardware que o teste dela precisa e nada
-além disso, e outras quatro nunca foram executadas. **É isso que faz da v0.1.0
+além disso, e outras quatro nunca foram executadas. **É isso que faz da v0.1.1
 uma versão de testes e não uma 1.0.**
 
 **Testado até onde o hardware permitiu, com o comando que termina o serviço:**
@@ -169,6 +175,8 @@ uma versão de testes e não uma 1.0.**
 | Quatro clientes conversando                   | o áudio N-para-N está testado; o custo de CPU de quatro ao mesmo tempo precisa de quatro máquinas                      |
 | O guia de auto-hospedagem, seguido por alguém | escrito e medido pela metade; ninguém o seguiu numa conta Cloudflare nova                                              |
 | Um alto-falante a um metro                    | o cancelador foi medido com o transdutor encostado na cápsula, o que é um atraso menor que o de uma caixa sobre a mesa |
+| O segundo processo do repórter de crash       | `minidump::init` reexecuta o binário, e nenhuma build com DSN dentro foi executada — o caminho dos dois processos nunca subiu. `bin/crash-drill --kind processes` é o que confere |
+| O que o repórter de crash custa               | os orçamentos de RAM e início a frio da §4 foram medidos sem ele. O soak amostra a árvore de processos, então um segundo processo cai nos dois |
 
 O plano acompanha cada um deles como uma tarefa com uma definição de pronto e o
 comando que a prova: [.harness/plan.md](.harness/plan.md), §7.7, §7.8, §7.11 e

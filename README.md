@@ -5,7 +5,7 @@
 Lightweight, open-source voice chat for Windows gamers. **Mumble-simple,
 Discord-quality, near-zero performance cost.**
 
-> **v0.1.0 is a test release.** Everything below was measured, and the list of
+> **v0.1.1 is a test release.** Everything below was measured, and the list of
 > what has _not_ been through a test is in
 > [What this release has not been through](#what-this-release-has-not-been-through)
 > — it is a real list, not a disclaimer. The largest item on it: **no machine
@@ -22,6 +22,11 @@ Three features. Nothing more:
 In **English and Brazilian Portuguese**, picked in the settings screen and
 followed by the tray menu. It starts in whatever your machine is set to.
 
+**Crash reports are off until you turn them on.** The settings screen asks;
+nothing leaves the machine before you answer, and the answer takes effect the
+next time the app starts. A rotating log is written locally either way — there
+is a button that opens the folder it is in, for attaching to an issue.
+
 ![The roster, with levels](docs/ui/roster-levels.png)
 ![The settings screen](docs/ui/settings-sensitivity.png)
 
@@ -30,11 +35,11 @@ followed by the tray menu. It starts in whatever your machine is set to.
 Windows 10/11, x64. Download from the
 [latest release](https://github.com/DionathaGoulart/goodvoice/releases/latest):
 
-- `goodvoice_0.1.0_x64-setup.exe` — NSIS, installs per-user into
+- `goodvoice_0.1.1_x64-setup.exe` — NSIS, installs per-user into
   `%LOCALAPPDATA%\goodvoice` with no admin prompt, and carries Microsoft's
   WebView2 bootstrapper. **It asks which language to install in**: one exe with
   both, English and Português Brasileiro.
-- `goodvoice_0.1.0_x64_en-US.msi` / `goodvoice_0.1.0_x64_pt-BR.msi` — the same
+- `goodvoice_0.1.1_x64_en-US.msi` / `goodvoice_0.1.1_x64_pt-BR.msi` — the same
   app for anyone who deploys by MSI. WiX writes one file per language rather
   than asking, so take the one you want. **Neither carries WebView2**: they
   fetch the bootstrapper from `go.microsoft.com/fwlink` at install time, so
@@ -43,7 +48,7 @@ Windows 10/11, x64. Download from the
 Verify what you downloaded against `SHA256SUMS.txt` on the same page:
 
 ```powershell
-Get-FileHash .\goodvoice_0.1.0_x64-setup.exe -Algorithm SHA256
+Get-FileHash .\goodvoice_0.1.1_x64-setup.exe -Algorithm SHA256
 ```
 
 The one prerequisite no installer carries is the **VC++ 2015–2022 x64
@@ -140,7 +145,7 @@ Full guide: [docs/self-hosting.md](docs/self-hosting.md).
 
 A measured number nobody has taken is not a promise. One thing this version
 claims is tested up to the hardware its test needs and no further, and four
-more were never run at all. **This is what makes v0.1.0 a test release rather
+more were never run at all. **This is what makes v0.1.1 a test release rather
 than a 1.0.**
 
 **Tested up to the hardware, with the command that finishes it:**
@@ -161,6 +166,8 @@ than a 1.0.**
 | Four clients conversing                        | N-party audio is tested; the CPU cost of four at once needs four hosts                                           |
 | The self-hosting guide, followed by a stranger | written and half-measured; nobody has done it on a fresh Cloudflare account                                      |
 | A loudspeaker a metre away                     | the canceller was measured with the transducer against the capsule, which is a shorter delay than a desk speaker |
+| The crash reporter's second process            | `minidump::init` re-executes the binary, and no build with a DSN in it has been run — so the two-process path has never started. `bin/crash-drill --kind processes` is what checks it |
+| What the crash reporter costs                  | §4's RAM and cold-start budgets were measured without one. The soak samples the process tree, so a second process lands on both |
 
 The plan tracks each of these as a task with a definition of done and the
 command that proves it: [.harness/plan.md](.harness/plan.md), §7.7, §7.8, §7.11
