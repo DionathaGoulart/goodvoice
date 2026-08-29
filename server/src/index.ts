@@ -1,7 +1,21 @@
+import * as Sentry from "@sentry/cloudflare";
+
 import type { Env } from "./env";
 import { roomCodeSchema } from "./protocol";
+import * as report from "./report";
 
-export { Room } from "./room";
+import { Room as PlainRoom } from "./room";
+
+/**
+ * The Durable Object wrangler binds, wrapped so that a failure inside the room
+ * — an alarm that throws, a WebSocket handler that does — is reported the same
+ * way a request is. The name is what `wrangler.toml` names, so the wrapper has
+ * to keep it.
+ */
+export const Room = Sentry.instrumentDurableObjectWithSentry(
+  report.objectOptions,
+  PlainRoom,
+);
 
 /**
  * Self-hosters point clients at arbitrary Worker URLs, so there is no origin
@@ -95,9 +109,13 @@ const handler: ExportedHandler<Env> = {
       return withCors(await room.fetch(new Request(internal, request)));
     } catch (error) {
       console.error("room request failed", error);
+      // The only place an unexpected failure lands. `Room.fetch` answers every
+      // `RoomError` itself and rethrows everything else, so what arrives here
+      // is a bug in this Worker or in Realtime — never a client's doing.
+      report.unexpected(error, "room request");
       return withCors(new Response("internal error", { status: 500 }));
     }
   },
 };
 
-export default handler;
+export default Sentry.withSentry(report.options, handler);

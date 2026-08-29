@@ -17,4 +17,10 @@ export interface Env {
   MAX_AUDIO_BITRATE?: string;
   /** H.264 bitrate cap, bits per second. */
   MAX_VIDEO_BITRATE?: string;
+  /**
+   * Where crash reports go. Secret, and optional on purpose: a deploy without
+   * it — every self-host that has not asked for one, and `wrangler dev` —
+   * never initialises the SDK at all (`report.ts`).
+   */
+  SENTRY_DSN?: string;
 }

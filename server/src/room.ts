@@ -16,6 +16,7 @@ import {
   type ServerMessage,
   type TrackName,
 } from "./protocol";
+import * as report from "./report";
 import {
   createSfuSession,
   isSfuOperation,
@@ -140,6 +141,13 @@ export class Room extends DurableObject<Env> {
       }
     } catch (error) {
       if (error instanceof RoomError) {
+        // Four of the five codes are a client being told no, and answering is
+        // the whole of the handling. The fifth, `sfu_unavailable`, is Realtime
+        // being unreachable or this deploy missing its credentials — it still
+        // answers 502, and it also becomes an issue (`report.ts`).
+        if (report.isWorthReporting(error)) {
+          report.unexpected(error, "room fetch");
+        }
         return error.toResponse();
       }
       throw error;

@@ -12,6 +12,7 @@
     "test": "vitest run"
   },
   "dependencies": {
+    "@sentry/cloudflare": "^10.72.0",
     "zod": "^4.4.3"
   },
   "devDependencies": {

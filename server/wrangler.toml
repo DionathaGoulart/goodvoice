@@ -8,6 +8,9 @@ compatibility_flags = ["nodejs_compat"]
 #   CALLS_APP_SECRET     — Cloudflare Realtime (Calls) app secret
 #   TURN_KEY_ID          — TURN key id (optional; STUN-only without it)
 #   TURN_KEY_API_TOKEN   — TURN key API token (optional, pairs with the above)
+#   SENTRY_DSN           — where crash reports go (optional; unset means the
+#                          SDK never initialises, which is what a self-host
+#                          that has not asked for one gets — see src/report.ts)
 # TURN uses its own credential pair, not the Calls app's — see DR-1 in
 # .harness/plan.md. Full walkthrough in docs/self-hosting.md.
 
