@@ -719,13 +719,21 @@ impl Call {
             match connect_once(&signaling, &options).await {
                 Ok(session) => return Ok(Self::start(signaling, options, session, source, sink)),
                 Err(error) if attempt < JOIN_ATTEMPTS && error.is_worth_retrying() => {
-                    eprintln!("join attempt {attempt} failed ({error}); retrying");
+                    crate::note!("call", "join attempt {attempt} failed ({error}); retrying");
                     last = error;
                     tokio::time::sleep(JOIN_BACKOFF * attempt).await;
                 }
-                Err(error) => return Err(error),
+                Err(error) => {
+                    // The last attempt, or one not worth repeating. Reported
+                    // here rather than at the command boundary because this is
+                    // the only place that still knows *which* of the four ways
+                    // a join fails this was.
+                    report_join_failure(&error, attempt);
+                    return Err(error);
+                }
             }
         }
+        report_join_failure(&last, JOIN_ATTEMPTS);
         Err(last)
     }
 
@@ -1078,7 +1086,7 @@ async fn supervise(supervisor: Supervisor, first: Session) {
         }
 
         if let SessionEnd::Dropped(detail) = end {
-            eprintln!("call dropped ({detail}); reconnecting");
+            crate::note!("call", "call dropped ({detail}); reconnecting");
         }
 
         match reconnect(&supervisor, &mut backoff).await {
@@ -1087,11 +1095,63 @@ async fn supervise(supervisor: Supervisor, first: Session) {
                 backoff.reset();
             }
             Err(reason) => {
+                // The retry schedule ran out. `EndReason::Left` never reaches
+                // here — leaving is not a failure — so both arms of this are
+                // worth an issue.
+                let (kind, detail) = match &reason {
+                    EndReason::Refused { detail } => ("refused", detail.clone()),
+                    EndReason::Unreachable { detail } => ("unreachable", detail.clone()),
+                    EndReason::Left => ("left", String::new()),
+                };
+                if !matches!(reason, EndReason::Left) {
+                    crate::report::failure(
+                        "call-ended",
+                        &format!("the call ended {kind}: {detail}"),
+                        &[("end_reason", kind.to_owned())],
+                    );
+                }
                 supervisor.shared.finish(reason);
                 return;
             }
         }
     }
+}
+
+/// Reports a join that will not be retried.
+///
+/// The tag is the *variant*, not the message: `JoinRejected`, `Sfu`,
+/// `NotConnected` and `Http` are four different problems — a full room, an SFU
+/// that refused the track, a handshake that never completed, and a Worker that
+/// is not there — and they read as one failure on the window's red line. Which
+/// one it was is the whole of what makes the issue actionable.
+fn report_join_failure(error: &RtcError, attempts: u32) {
+    // Named one by one rather than with a wildcard: a variant added later
+    // should fail to compile here and be given a name, not arrive as "other"
+    // and be invisible in the issue list.
+    let kind = match error {
+        RtcError::JoinRejected { .. } => "join_rejected",
+        RtcError::NotConnected => "not_connected",
+        RtcError::Http(_) => "http",
+        RtcError::Sfu(_) => "sfu",
+        RtcError::Protocol(_) => "protocol",
+        RtcError::Transport(_) => "transport",
+        RtcError::Audio(_) => "audio",
+    };
+    let mut tags = vec![("join_error", kind.to_owned())];
+    // The room's own code for it — `room_full`, `bad_request` — which is a
+    // finer answer than `join_rejected` and the one that says whether this is
+    // a bug at all.
+    if let RtcError::JoinRejected {
+        code: Some(code), ..
+    } = error
+    {
+        tags.push(("room_code", code.clone()));
+    }
+    crate::report::failure(
+        "join-failed",
+        &format!("the join gave up after {attempts}: {error}"),
+        &tags,
+    );
 }
 
 /// Takes a new seat in the same room, on the schedule in [`super::reconnect`].
@@ -1211,6 +1271,15 @@ async fn reconcile_share(
             // retrying on a timer: clear the intent so the user is asked
             // again rather than being reconnected into a failure.
             subscriber.shared.set_share_intent(None);
+            // The window shows this in red and the client carries on, so
+            // nothing else would ever say it happened. `where` separates the
+            // capture refusing from the room refusing, which are different
+            // bugs with the same red line.
+            crate::report::failure(
+                "share-failed",
+                &format!("the capture would not open: {detail}"),
+                &[("share_stage", "capture".to_owned())],
+            );
             subscriber
                 .shared
                 .share
@@ -1233,6 +1302,11 @@ async fn reconcile_share(
             // `already_sharing` lands here, and it is the one refusal that is
             // about the room rather than this client (prd.md §8).
             subscriber.shared.set_share_intent(None);
+            crate::report::failure(
+                "share-failed",
+                &format!("the room would not take the screen: {error}"),
+                &[("share_stage", "publish".to_owned())],
+            );
             subscriber.shared.share.send_replace(ShareState::Failed {
                 detail: error.to_string(),
             });
@@ -1324,7 +1398,7 @@ async fn run_session(supervisor: &Supervisor, session: Session) -> SessionEnd {
                         reconcile_watch(&subscriber, &mut watching, &latest).await;
                     }
                     ServerMessage::Error { code, message } => {
-                        eprintln!("room error: {message} ({code})");
+                        crate::note!("call", "room error: {message} ({code})");
                     }
                 }
             }
@@ -2065,7 +2139,7 @@ async fn screen_loop(mut source: Box<dyn ScreenSource>, published: Published, sh
         if let Err(detail) = published.write(&frame.bytes, frame.duration).await {
             // The track is gone. The session is what rebuilds it, and the
             // share is restarted with the session.
-            eprintln!("screen track stopped: {detail}");
+            crate::note!("share", "screen track stopped: {detail}");
             break;
         }
     }
@@ -2154,7 +2228,7 @@ async fn publish_loop(
                 // A client on its way out has no working track by definition,
                 // so the first failure is the expected one rather than news.
                 if failures == 1 && !shared.leaving.load(Ordering::Relaxed) {
-                    eprintln!("microphone frame not sent: {error}");
+                    crate::note!("audio", "microphone frame not sent: {error}");
                 }
                 if failures >= PUBLISH_FAILURE_LIMIT {
                     failures = 0;
@@ -2223,7 +2297,7 @@ async fn reconcile(
         let Some(slot) = free_slot(playing) else {
             // Only reachable if the server's cap and this client's slot count
             // ever disagree; being silent about one speaker beats crashing.
-            eprintln!("no playback slot left for {}", peer.name);
+            crate::note!("call", "no playback slot left for {}", peer.name);
             continue;
         };
 
@@ -2231,7 +2305,7 @@ async fn reconcile(
             Ok(subscription) => {
                 playing.insert(peer.id.clone(), subscription);
             }
-            Err(error) => eprintln!("could not subscribe to {}: {error}", peer.name),
+            Err(error) => crate::note!("call", "could not subscribe to {}: {error}", peer.name),
         }
     }
 
@@ -2305,7 +2379,10 @@ async fn reconcile_watch(
             if let Err(error) = close_pull(subscriber, mid).await {
                 // Worth reporting and not worth ending the call for: the worst
                 // case is the bandwidth this used to spend unconditionally.
-                eprintln!("could not close the screen pull on m-line {mid}: {error}");
+                crate::note!(
+                    "share",
+                    "could not close the screen pull on m-line {mid}: {error}"
+                );
             }
         }
     }
@@ -2328,7 +2405,7 @@ async fn reconcile_watch(
         }
         // Worth reporting and not worth ending the call for: audio is never
         // gated on video (prd.md §3 F3). The retry tick calls back here.
-        Err(error) => eprintln!("could not watch {}'s screen: {error}", sharer.name),
+        Err(error) => crate::note!("share", "could not watch {}'s screen: {error}", sharer.name),
     }
 }
 

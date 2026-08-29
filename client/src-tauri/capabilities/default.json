@@ -1,7 +1,7 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
-  "description": "What a window is allowed to ask the client for. `invoke` reaches this crate's own commands without a permission \u2014 they are the app, not a plugin \u2014 so the only thing that has to be granted is the event channel the roster, the call's health, mute and deafen all arrive on. Without it every `listen` is refused by the ACL and the window shows a room that never changes. `screen` is the viewer window (task 5.4); it listens for the roster the same way, to know whether anybody is still sharing.",
+  "description": "What a window is allowed to ask the client for. `invoke` reaches this crate's own commands without a permission — they are the app, not a plugin — so the only thing that has to be granted is the event channel the roster, the call's health, mute and deafen all arrive on. Without it every `listen` is refused by the ACL and the window shows a room that never changes. `screen` is the viewer window (task 5.4); it listens for the roster the same way, to know whether anybody is still sharing. `sentry:default` is the plugin's own channel: the browser SDK it injects hands its events and breadcrumbs back to this process over it, which is what makes a JavaScript error arrive carrying the OS and the Rust side's story instead of arriving alone.",
   "windows": ["main", "screen"],
-  "permissions": ["core:event:default"]
+  "permissions": ["core:event:default", "sentry:default"]
 }

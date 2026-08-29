@@ -86,7 +86,7 @@ pub fn open(prefs: Arc<AudioPrefs>) -> Result<(Microphone, Speakers), AudioError
     let processing = match Processing::new(reference_rx, prefs.settings()) {
         Ok(processing) => Some(processing),
         Err(error) => {
-            eprintln!("{error}; the call will have no echo cancellation");
+            crate::note!("audio", "{error}; the call will have no echo cancellation");
             None
         }
     };

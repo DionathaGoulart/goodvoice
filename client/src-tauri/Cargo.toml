@@ -97,6 +97,23 @@ webrtc-vad = "0.4"
 # packages, which is the only shape that ships in an installer. See DR-11.
 webrtc-audio-processing = { version = "~2.1", features = ["bundled"] }
 anyhow = "1"
+# Crash reporting. The plugin is what makes *one* report out of three sources:
+# it injects `@sentry/browser` into the webview and routes its events back
+# through this process, so a JavaScript error arrives carrying the OS, the
+# device and the Rust breadcrumbs instead of arriving alone. It also carries
+# the minidump integration, which is the only thing that survives
+# `panic = "abort"` and a driver taking the process with it.
+#
+# Nothing is sent without a DSN and without consent — see `report.rs`.
+sentry = "0.49"
+tauri-plugin-sentry = "0.6"
+# The half of the story telemetry cannot tell. Audio that stutters and a
+# microphone that stops after an hour raise no error and crash nothing — there
+# is no event for a reporter to attach anything to. `note!` writes here as well
+# as to a breadcrumb, so the file is complete on a machine that consented to
+# nothing and has no network.
+log = "0.4"
+tauri-plugin-log = "2"
 tauri-plugin-deep-link = "2.4.9"
 tauri-plugin-single-instance = { version = "2.4.3", features = ["deep-link"] }
 

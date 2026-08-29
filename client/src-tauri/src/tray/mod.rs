@@ -219,7 +219,7 @@ pub fn show(app: &AppHandle) {
     tray.opening.store(false, Ordering::Release);
 
     if let Err(error) = opened {
-        eprintln!("the window could not be opened: {error}");
+        crate::note!("tray", "the window could not be opened: {error}");
     }
 }
 
@@ -234,7 +234,10 @@ fn open(app: &AppHandle) -> Result<(), tauri::Error> {
     let Some(mut config) = app.config().app.windows.first().cloned() else {
         // Nothing declares a window, so there is nothing to rebuild. Not fatal
         // and not silent: a tray whose Open does nothing needs explaining.
-        eprintln!("no window is declared in the app config; nothing to open");
+        crate::note!(
+            "tray",
+            "no window is declared in the app config; nothing to open"
+        );
         return Ok(());
     };
     // Where the last one was, written into the config the new one is built

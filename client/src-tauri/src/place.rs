@@ -132,7 +132,10 @@ pub fn remembered(app: &AppHandle) -> Option<Placement> {
     if place.is_reachable_on(&screens(app)) {
         return Some(place);
     }
-    eprintln!("the remembered window position is off every screen; letting Windows choose");
+    crate::note!(
+        "window",
+        "the remembered window position is off every screen; letting Windows choose"
+    );
     None
 }
 
@@ -235,11 +238,17 @@ pub fn restore(window: &Window) {
         return;
     };
     if let Err(error) = window.set_position(LogicalPosition::new(place.x, place.y)) {
-        eprintln!("the window would not go back where it was: {error}");
+        crate::note!(
+            "window",
+            "the window would not go back where it was: {error}"
+        );
         return;
     }
     if let Err(error) = window.set_size(LogicalSize::new(place.width, place.height)) {
-        eprintln!("the window would not go back to its size: {error}");
+        crate::note!(
+            "window",
+            "the window would not go back to its size: {error}"
+        );
     }
     if place.maximized {
         let _ = window.maximize();

@@ -11,6 +11,7 @@ pub mod home;
 pub mod invite;
 pub mod lang;
 pub mod place;
+pub mod report;
 pub mod rtc;
 pub mod tray;
 
@@ -138,6 +139,15 @@ pub struct ClientInfo {
     /// inherited from the build.
     #[serde(rename = "serverChosen")]
     pub server_chosen: bool,
+    /// Whether crash reports may be sent: `true`, `false`, or `null` for a
+    /// machine where the question has never been put. The window shows the
+    /// third differently — it is an offer, not a setting somebody turned off.
+    pub reports: Option<bool>,
+    /// Whether this build has anywhere to report *to*. A client built from
+    /// source has no DSN, and offering to send reports into nothing would be
+    /// a lie in the settings screen (`report::DSN`).
+    #[serde(rename = "reportsPossible")]
+    pub reports_possible: bool,
 }
 
 impl ClientInfo {
@@ -149,6 +159,8 @@ impl ClientInfo {
             server: home.server(),
             default_server: home.fallback().to_owned(),
             server_chosen: home.is_chosen(),
+            reports: home.telemetry(),
+            reports_possible: report::DSN.is_some(),
         }
     }
 }
@@ -276,7 +288,7 @@ impl Hotkey {
         }) {
             Ok(listener) => *bound = Some((code, listener)),
             Err(error) => {
-                eprintln!("push to talk is window-only: {error}");
+                crate::note!("hotkey", "push to talk is window-only: {error}");
             }
         }
     }
@@ -864,6 +876,93 @@ async fn set_server(home: State<'_, Home>, url: String) -> Result<ClientInfo, St
 /// # Errors
 ///
 /// Never. The `Result` is what an async command owes its caller.
+/// Answers the crash-report question, and remembers the answer.
+///
+/// # Why this does not switch reporting on for the run it is called in
+///
+/// The crash reporter is a *second process*, started above the Tauri builder
+/// before this window existed (`run`). There is no way to start one from here
+/// that would still be attached to the failure it is meant to catch, and half
+/// of it — events but no minidump, which is the half that matters least — is
+/// worse than a client that says plainly when it begins.
+///
+/// So this writes the answer and the next start acts on it, the same shape
+/// `set_server` already has for a call in progress.
+///
+/// # Errors
+///
+/// Never. The `Result` is what an async command owes its caller.
+#[tauri::command]
+async fn set_telemetry(home: State<'_, Home>, allowed: bool) -> Result<(), String> {
+    home.choose_telemetry(allowed);
+    Ok(())
+}
+
+/// Opens the folder the rotating log is written to.
+///
+/// Not "export the log": the file is already a file, and a folder somebody can
+/// see is one they can drag out of, rename, or read in Notepad without this
+/// app deciding for them where a copy should go.
+///
+/// # Errors
+///
+/// Returns an error when the host will not name a log directory, or when the
+/// shell refuses to open it.
+#[tauri::command]
+async fn open_log_folder(app: AppHandle) -> Result<(), String> {
+    let directory = app
+        .path()
+        .app_log_dir()
+        .map_err(|error| format!("no log directory: {error}"))?;
+    // The log is created on the first write, and the folder with it. Somebody
+    // opening this on a run that has said nothing yet should still see where
+    // the file will be, rather than an error about a path.
+    std::fs::create_dir_all(&directory).map_err(|error| format!("no log folder: {error}"))?;
+
+    #[cfg(windows)]
+    {
+        std::process::Command::new("explorer.exe")
+            .arg(&directory)
+            // `explorer.exe` exits non-zero even when it opened the window, so
+            // the status is deliberately not checked — only whether the
+            // process could be started at all.
+            .spawn()
+            .map_err(|error| format!("the folder would not open: {error}"))?;
+        Ok(())
+    }
+    #[cfg(not(windows))]
+    {
+        Err(format!(
+            "the log is at {}; opening a folder is Windows-only",
+            directory.display()
+        ))
+    }
+}
+
+/// Reports a failure the window saw and could not otherwise tell anyone about.
+///
+/// # Why this is a command and not a call into the injected browser SDK
+///
+/// Every one of the client's twenty-two commands returns `Result<_, String>`,
+/// and the window handles every rejection by showing something and carrying
+/// on. That is right for a person mid-call, and it is also why none of those
+/// failures would ever reach an issue: nothing throws, so nothing is caught.
+/// One wrapper around `invoke` in the window calls this, which covers all
+/// twenty-two at once — including the ones that do not exist yet.
+///
+/// # Errors
+///
+/// Never. The `Result` is what an async command owes its caller.
+#[tauri::command]
+async fn report_failure(where_: String, detail: String) -> Result<(), String> {
+    report::failure(
+        "ui-command",
+        &format!("{where_} failed: {detail}"),
+        &[("command", where_)],
+    );
+    Ok(())
+}
+
 #[tauri::command]
 async fn set_language(app: AppHandle, home: State<'_, Home>, tag: String) -> Result<(), String> {
     let language = Language::of(&tag);
@@ -997,7 +1096,7 @@ fn reveal(window: &tauri::Window, who: &str) {
         return;
     }
     if let Err(error) = window.show() {
-        eprintln!("the window could not be shown by {who}: {error}");
+        crate::note!("window", "the window could not be shown by {who}: {error}");
         return;
     }
     let _ = window.set_focus();
@@ -1019,7 +1118,10 @@ fn reveal_after_grace(window: &tauri::Window) {
     tauri::async_runtime::spawn(async move {
         tokio::time::sleep(REVEAL_GRACE).await;
         if !window.is_visible().unwrap_or(false) {
-            eprintln!("the webview never said it had painted; showing the window anyway");
+            crate::note!(
+                "window",
+                "the webview never said it had painted; showing the window anyway"
+            );
             reveal(&window, "the grace timer");
         }
     });
@@ -1033,7 +1135,11 @@ fn reveal_after_grace(window: &tauri::Window) {
 /// its own — the roster and health events are already flowing by the time it
 /// subscribes.
 async fn autojoin(app: AppHandle, room: String, since_start: Instant) {
-    println!("autojoin starting at {} ms", millis(since_start));
+    crate::note!(
+        "autojoin",
+        "autojoin starting at {} ms",
+        millis(since_start)
+    );
     let options = CallOptions {
         // The chosen server, not the built-in one: a self-hoster's client is
         // pointed at their Worker, and a join that ignored that would reach a
@@ -1047,13 +1153,14 @@ async fn autojoin(app: AppHandle, room: String, since_start: Instant) {
     };
 
     match join_call(&app, options).await {
-        Ok(status) => println!(
+        Ok(status) => crate::note!(
+            "autojoin",
             "autojoined {} as {} at {} ms",
             status.room,
             status.self_id,
             millis(since_start)
         ),
-        Err(error) => eprintln!("autojoin failed: {error}"),
+        Err(error) => crate::note!("autojoin", "autojoin failed: {error}"),
     }
 }
 
@@ -1083,7 +1190,7 @@ async fn open_invite(app: AppHandle, url: String) {
     let asked = match invite::parse(&url) {
         Ok(asked) => asked,
         Err(reason) => {
-            eprintln!("ignoring {url}: {reason}");
+            crate::note!("invite", "ignoring {url}: {reason}");
             return;
         }
     };
@@ -1125,7 +1232,7 @@ async fn open_invite(app: AppHandle, url: String) {
         prefs: Arc::clone(&app.state::<CurrentCall>().prefs),
     };
     if let Err(error) = join_call(&app, options).await {
-        eprintln!("could not join from a link: {error}");
+        crate::note!("invite", "could not join from a link: {error}");
         offer_invite(
             &app,
             InviteOffer {
@@ -1266,6 +1373,37 @@ async fn push_state(
     }
 }
 
+/// Brings up crash reporting before there is an app, and hands back the two
+/// things that have to stay alive for as long as one runs.
+///
+/// # Everything in here runs in two processes
+///
+/// `minidump::init` re-executes this binary as a crash reporter — a second
+/// process whose whole job is to outlive this one and send the minidump when
+/// it dies. The child arrives here too, and only stops when it reaches that
+/// call.
+///
+/// So this must be the first thing [`run`] does, and nothing may be moved
+/// above it that a second process must not do twice: no audio device, no tray
+/// icon, no `goodvoice://` registration, no window. Reading one small file is
+/// the whole of what is allowed here, which is why the consent comes off the
+/// disk rather than from the [`Home`] that `setup` builds — there is no app to
+/// hold one yet, and there cannot be one this early.
+///
+/// The separate process is the point. `panic = "abort"` and a display driver
+/// taking the process with it both kill an SDK that lives inside it, and a
+/// dead SDK sends nothing.
+fn start_reporting() -> (
+    Option<sentry::ClientInitGuard>,
+    Option<tauri_plugin_sentry::minidump::Handle>,
+) {
+    let client = report::start(home::reports_allowed());
+    let reporter = client
+        .as_ref()
+        .and_then(|client| tauri_plugin_sentry::minidump::init(client).ok());
+    (client, reporter)
+}
+
 /// Builds and runs the Tauri application.
 ///
 /// # Panics
@@ -1273,11 +1411,37 @@ async fn push_state(
 /// Panics if the webview host cannot be created — there is no useful degraded
 /// mode for a windowless GUI client.
 pub fn run() {
+    // First, and above everything — see `start_reporting`.
+    let (reporting, _crash_reporter) = start_reporting();
+
     // Taken before anything else this process does, so the marks the autojoin
     // prints are measured from the earliest point Rust code owns (task 4.4).
     let since_start = Instant::now();
 
-    tauri::Builder::default()
+    let mut builder = tauri::Builder::default();
+    // Only when there is a client: the plugin injects `@sentry/browser` into
+    // every webview, and a build that reports nowhere should not be paying
+    // for that injection or carrying it in its CSP surface.
+    if let Some(client) = reporting.as_ref() {
+        builder = builder.plugin(tauri_plugin_sentry::init(client));
+    }
+    builder
+        // The log every `note!` lands in, consent or no consent. Bounded on
+        // purpose in both directions: a single file that rotates at a megabyte
+        // and keeps three of them is enough to hold an evening's play — the
+        // span a "it did it again last night" report is about — and cannot
+        // grow into a disk-space bug of its own on a machine nobody is
+        // watching.
+        .plugin(
+            tauri_plugin_log::Builder::new()
+                .target(tauri_plugin_log::Target::new(
+                    tauri_plugin_log::TargetKind::LogDir { file_name: None },
+                ))
+                .rotation_strategy(tauri_plugin_log::RotationStrategy::KeepSome(3))
+                .max_file_size(1_000_000)
+                .level(log::LevelFilter::Info)
+                .build(),
+        )
         // First, and before anything that could take time: Windows starts a
         // *new process* for a `goodvoice://` link, and without this the second
         // one would be a second client — its own tray icon, its own seat in
@@ -1299,11 +1463,20 @@ pub fn run() {
             let config = app.path().app_config_dir().ok();
             app.manage(Home::open(config.as_deref(), DEFAULT_SERVER));
 
+            // Cheap to send and hard to reconstruct afterwards. The Windows
+            // build, the CPU and the memory arrive on their own; which of the
+            // two languages a person is reading does not, and it is the axis a
+            // layout bug in one of them separates along.
+            report::tag("lang", app.state::<Home>().language().tag());
+
             // A host that will not give us a tray is not a reason to refuse to
             // run — it is a reason to keep a window that closes normally, which
             // is what `Tray` staying uninstalled means (task 4.1).
             if let Err(error) = tray::install(app.handle(), app.state::<Home>().language()) {
-                eprintln!("no tray icon: {error}; the window will close rather than hide");
+                crate::note!(
+                    "tray",
+                    "no tray icon: {error}; the window will close rather than hide"
+                );
             }
 
             // The window this build declares is hidden until it has painted
@@ -1338,7 +1511,7 @@ pub fn run() {
                 // installer first.
                 #[cfg(debug_assertions)]
                 if let Err(error) = app.deep_link().register_all() {
-                    eprintln!("could not register {}: {error}", invite::SCHEME);
+                    crate::note!("invite", "could not register {}: {error}", invite::SCHEME);
                 }
 
                 // **The link that started the app is not handled by anything
@@ -1358,7 +1531,7 @@ pub fn run() {
                 // How much of a cold start is gone before any of this runs is
                 // the first thing to know about it: `setup` happens after the
                 // window and its webview exist.
-                println!("setup at {} ms", millis(since_start));
+                crate::note!("startup", "setup at {} ms", millis(since_start));
                 tauri::async_runtime::spawn(autojoin(app.handle().clone(), room, since_start));
             }
             Ok(())
@@ -1368,6 +1541,9 @@ pub fn run() {
             client_info,
             set_server,
             set_language,
+            set_telemetry,
+            open_log_folder,
+            report_failure,
             invite_link,
             current_status,
             dismiss_invite,

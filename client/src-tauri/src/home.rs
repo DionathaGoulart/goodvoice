@@ -55,6 +55,15 @@ pub struct Stored {
     /// the second it takes to paint (`ui/i18n.ts`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub language: Option<Language>,
+    /// Whether crash reports may leave this machine.
+    ///
+    /// Three states, and the third is the point: `Some(true)` is yes,
+    /// `Some(false)` is no, and **`None` is nobody has been asked yet** —
+    /// which [`reports_allowed`] reads as no. A voice client that
+    /// started sending on a default would be sending because somebody
+    /// installed it, not because they agreed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub telemetry: Option<bool>,
 }
 
 /// The file name inside the app's config directory.
@@ -150,6 +159,34 @@ impl Home {
         true
     }
 
+    /// Whether crash reports may be sent, and whether the question has been
+    /// put yet.
+    ///
+    /// `None` is the fresh install the window turns into a question.
+    #[must_use]
+    pub fn telemetry(&self) -> Option<bool> {
+        self.stored.read().ok().and_then(|stored| stored.telemetry)
+    }
+
+    /// Records the answer and writes the file.
+    ///
+    /// Returns whether anything changed, for the same reason
+    /// [`Home::choose_language`] does: the window sends its whole state on
+    /// every mount, and a mount happens on every trip back from the tray.
+    pub fn choose_telemetry(&self, allowed: bool) -> bool {
+        {
+            let Ok(mut stored) = self.stored.write() else {
+                return false;
+            };
+            if stored.telemetry == Some(allowed) {
+                return false;
+            }
+            stored.telemetry = Some(allowed);
+        }
+        self.save();
+        true
+    }
+
     /// Where the window was last seen, as it was written.
     ///
     /// Unchecked: whether that rectangle is still on a screen is
@@ -222,7 +259,7 @@ impl Home {
             let _ = fs::create_dir_all(parent);
         }
         if let Err(error) = fs::write(path, text) {
-            eprintln!("could not write the settings: {error}");
+            crate::note!("settings", "could not write the settings: {error}");
         }
     }
 }
@@ -265,9 +302,49 @@ pub fn normalise(url: &str) -> Result<String, String> {
     Ok(trimmed.to_owned())
 }
 
+/// This bundle's identifier, spelled out rather than asked for.
+///
+/// `app.path().app_config_dir()` is the authority and is what [`Home`] is
+/// given in `setup`. The consent gate cannot wait for it: the crash reporter
+/// has to start before the Tauri builder exists (`report`), and it
+/// must not start on a machine where nobody agreed to it. So the directory is
+/// worked out twice, and [`tests::the_identifier_matches_the_manifest`] is
+/// what keeps the two spellings from drifting.
+pub const IDENTIFIER: &str = "art.good.goodvoice";
+
+/// Where [`Stored`] lives, worked out before Tauri can be asked.
+///
+/// Windows only, deliberately: `%APPDATA%` is where Tauri's own resolution
+/// lands on the one platform this client ships on, and a wrong guess anywhere
+/// else would be worse than no guess. `None` elsewhere means the early read
+/// finds nothing, which is read as "not consented" — the safe direction.
+#[must_use]
+pub fn config_dir() -> Option<PathBuf> {
+    if cfg!(windows) {
+        std::env::var_os("APPDATA").map(|base| PathBuf::from(base).join(IDENTIFIER))
+    } else {
+        None
+    }
+}
+
+/// Whether crash reports may be sent, read straight off the disk.
+///
+/// For the one caller that runs before there is an app to hold a [`Home`].
+/// Every way this can fail — no directory, no file, a truncated file, the key
+/// absent because nobody has been asked — answers the same way: no.
+#[must_use]
+pub fn reports_allowed() -> bool {
+    config_dir()
+        .map(|directory| directory.join(FILE))
+        .and_then(|path| fs::read_to_string(path).ok())
+        .and_then(|text| serde_json::from_str::<Stored>(&text).ok())
+        .and_then(|stored| stored.telemetry)
+        .unwrap_or(false)
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{normalise, Home};
+    use super::{normalise, Home, IDENTIFIER};
     use crate::lang::Language;
 
     const FALLBACK: &str = "https://goodvoice.example.workers.dev";
@@ -361,6 +438,49 @@ mod tests {
         // The whole file is rewritten on every change, so the thing to check
         // is that the *other* settings survived the language being written.
         assert_eq!(second.language(), Language::BrazilianPortuguese);
+
+        let _ = std::fs::remove_dir_all(&directory);
+    }
+
+    /// The consent gate reads the settings file before Tauri exists to say
+    /// where it is, so `IDENTIFIER` is a second copy of the manifest's. A
+    /// rename that changed one and not the other would move the file and
+    /// leave the gate reading an empty directory — which fails closed, and so
+    /// would silently stop reporting rather than break.
+    #[test]
+    fn the_identifier_matches_the_manifest() {
+        let manifest = include_str!("../tauri.conf.json");
+        let config: serde_json::Value =
+            serde_json::from_str(manifest).expect("tauri.conf.json parses");
+        assert_eq!(
+            config["identifier"].as_str(),
+            Some(IDENTIFIER),
+            "home::IDENTIFIER and tauri.conf.json have drifted apart"
+        );
+    }
+
+    #[test]
+    fn nobody_asked_means_no() {
+        let directory = std::env::temp_dir().join("goodvoice-telemetry-test");
+        let _ = std::fs::remove_dir_all(&directory);
+        std::fs::create_dir_all(&directory).expect("temp dir");
+
+        let home = Home::open(Some(&directory), FALLBACK);
+        assert_eq!(home.telemetry(), None, "a fresh install has not been asked");
+
+        assert!(home.choose_telemetry(true));
+        assert!(
+            !home.choose_telemetry(true),
+            "saying yes twice changes nothing"
+        );
+        assert_eq!(home.telemetry(), Some(true));
+
+        assert!(home.choose_telemetry(false));
+        assert_eq!(
+            Home::open(Some(&directory), FALLBACK).telemetry(),
+            Some(false),
+            "the answer outlives the run"
+        );
 
         let _ = std::fs::remove_dir_all(&directory);
     }
