@@ -1400,7 +1400,7 @@ fn start_reporting() -> (
     let client = report::start(home::reports_allowed());
     let reporter = client
         .as_ref()
-        .and_then(|client| tauri_plugin_sentry::minidump::init(client).ok());
+        .and_then(|client| report::minidump_reporter(client).ok());
     (client, reporter)
 }
 

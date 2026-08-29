@@ -228,6 +228,27 @@ pub fn failure(category: &'static str, message: &str, tags: &[(&str, String)]) {
     );
 }
 
+/// Starts the crash reporter: the second process that outlives this one.
+///
+/// Re-exported through this module so that the only place naming
+/// `tauri_plugin_sentry` is `lib.rs` and the drill in the harness package can
+/// reach it without depending on a Tauri plugin of its own.
+///
+/// **The caller must hold the handle.** Dropping it stops the reporter, and a
+/// stopped reporter is indistinguishable from a working one until the day
+/// something crashes.
+///
+/// # Errors
+///
+/// When the reporter process cannot be started. `lib.rs` degrades — an app
+/// with no crash reporting is still an app — and `bin/crash-drill` does not,
+/// because proving the reporter works is the whole of what it does.
+pub fn minidump_reporter(
+    client: &ClientInitGuard,
+) -> anyhow::Result<tauri_plugin_sentry::minidump::Handle> {
+    Ok(tauri_plugin_sentry::minidump::init(client)?)
+}
+
 /// Records something true for the rest of this run.
 ///
 /// The Windows build, the CPU and how much memory the machine has arrive on
