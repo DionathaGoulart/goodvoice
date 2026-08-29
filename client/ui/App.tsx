@@ -17,6 +17,7 @@ import {
   type PaletteOption,
 } from "./appearance";
 import { choose as chooseLanguage, lang, t } from "./i18n";
+import { report } from "./report";
 import { LANG_NAMES, LANGS } from "./strings";
 import { currentMode, currentTheme, pickPalette, prefs, update } from "./theme";
 
@@ -42,6 +43,13 @@ interface ClientInfo {
   defaultServer: string;
   /** Whether the server above was chosen by a person (prd.md §9). */
   serverChosen: boolean;
+  /**
+   * Whether crash reports may be sent. `null` is a machine where the question
+   * has never been put, which is neither of the two buttons being pressed.
+   */
+  reports: boolean | null;
+  /** Whether this build has anywhere to report to at all (`report.rs`). */
+  reportsPossible: boolean;
 }
 
 /** Mirrors `Participant` in `src-tauri/src/rtc/signaling.rs`. */
@@ -361,6 +369,34 @@ const App: Component = () => {
     }
   };
 
+  /**
+   * Answers the crash-report question.
+   *
+   * `client_info` is read back rather than the answer being assumed: the
+   * client is the authority on what it stored, and this screen is rebuilt from
+   * scratch on every trip back from the tray.
+   *
+   * It takes effect on the next start, not this one — the crash reporter is a
+   * second process that had to exist before this window did (`lib.rs`).
+   */
+  const chooseReports = async (allowed: boolean) => {
+    try {
+      await invoke("set_telemetry", { allowed });
+      setInfo(await invoke<ClientInfo>("client_info"));
+    } catch (reason) {
+      report("set_telemetry", reason);
+    }
+  };
+
+  /** Opens the folder the rotating log is in, for attaching to an issue. */
+  const openLogFolder = async () => {
+    try {
+      await invoke("open_log_folder");
+    } catch (reason) {
+      report("open_log_folder", reason);
+    }
+  };
+
   const [room, setRoom] = createSignal("");
   const [name, setName] = createSignal("");
   const [joining, setJoining] = createSignal(false);
@@ -440,7 +476,7 @@ const App: Component = () => {
   if (held) {
     void invoke<AudioSettings>("set_audio_settings", { settings: held })
       .then(setAudio)
-      .catch(() => {});
+      .catch((reason) => report("set_audio_settings", reason));
   }
 
   // Subscribed once for the life of the window: the room the events belong to
@@ -545,7 +581,13 @@ const App: Component = () => {
       // same one. All this window is missing is the answer.
       void invoke<boolean>("talk_key_is_global")
         .then(setGlobalKey)
-        .catch(() => setGlobalKey(false));
+        .catch((reason) => {
+          // Falling back to window-only is the safe answer and is what the
+          // window shows. It is also indistinguishable, from the outside,
+          // from push-to-talk quietly not working over a game.
+          setGlobalKey(false);
+          report("talk_key_is_global", reason);
+        });
     })
     .catch(() => {
       // A client that cannot say what it is doing is a client that is not in a
@@ -751,9 +793,11 @@ const App: Component = () => {
     localStorage.setItem(AUDIO_STORE, JSON.stringify(next));
     void invoke<AudioSettings>("set_audio_settings", { settings: next })
       .then(setAudio)
-      .catch(() => {
+      .catch((reason) => {
         // Nothing to recover: the settings are already stored, and the next
-        // change sends the whole set again.
+        // change sends the whole set again. Worth reporting all the same —
+        // a run of these is a microphone that ignored every slider.
+        report("set_audio_settings", reason);
       });
   };
 
@@ -771,7 +815,10 @@ const App: Component = () => {
       void invoke("set_transmit_mode", { mode: next })
         .then(() => invoke<boolean>("talk_key_is_global"))
         .then(setGlobalKey)
-        .catch(() => setGlobalKey(false));
+        .catch((reason) => {
+          setGlobalKey(false);
+          report("set_transmit_mode", reason);
+        });
     }
   };
 
@@ -1136,6 +1183,53 @@ const App: Component = () => {
             )}
           </For>
         </div>
+      </div>
+
+      {/* Last on the screen and deliberately not first: nothing here is on
+          until somebody turns it on, so it is a setting to find rather than a
+          question to get past. Hidden entirely on a build with nowhere to
+          report to — offering to send reports into nothing would be a lie. */}
+      <Show when={info()?.reportsPossible}>
+        <h2 class="section">{t().reports}</h2>
+
+        <div class="field">
+          <div class="controls">
+            <button
+              class="action"
+              classList={{ "action-picked": info()?.reports === true }}
+              type="button"
+              aria-pressed={info()?.reports === true}
+              onClick={() => void chooseReports(true)}
+            >
+              {t().reportsOn}
+            </button>
+            <button
+              class="action"
+              classList={{ "action-picked": info()?.reports === false }}
+              type="button"
+              aria-pressed={info()?.reports === false}
+              onClick={() => void chooseReports(false)}
+            >
+              {t().reportsOff}
+            </button>
+          </div>
+          <p class="notice">{t().reportsHint}</p>
+        </div>
+      </Show>
+
+      <h2 class="section">{t().logs}</h2>
+
+      <div class="field">
+        <div class="controls">
+          <button
+            class="action"
+            type="button"
+            onClick={() => void openLogFolder()}
+          >
+            {t().openLogFolder}
+          </button>
+        </div>
+        <p class="notice">{t().logsHint}</p>
       </div>
 
       <button

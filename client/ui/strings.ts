@@ -149,6 +149,22 @@ export interface Strings {
   readonly skin: string;
   readonly skins: Record<SkinId, { label: string; hint: string }>;
   readonly language: string;
+
+  /**
+   * Settings — crash reports and the log.
+   *
+   * The hint says what leaves the machine in the same breath as what never
+   * does. Somebody deciding this is deciding about a voice app, and "we
+   * collect diagnostics" is not an answer to the question they are actually
+   * asking.
+   */
+  readonly reports: string;
+  readonly reportsHint: string;
+  readonly reportsOn: string;
+  readonly reportsOff: string;
+  readonly logs: string;
+  readonly logsHint: string;
+  readonly openLogFolder: string;
 }
 
 const en: Strings = {
@@ -271,6 +287,15 @@ const en: Strings = {
     terminal: { label: "terminal", hint: "crt, prompts, phosphor" },
   },
   language: "language",
+
+  reports: "crash reports",
+  reportsHint:
+    "what broke, the windows version and the audio device. never what is said in a call.",
+  reportsOn: "send",
+  reportsOff: "off",
+  logs: "log",
+  logsHint: "the file to attach to an issue when something went wrong quietly.",
+  openLogFolder: "open the folder",
 };
 
 /*
@@ -409,6 +434,15 @@ const ptBR: Strings = {
     terminal: { label: "terminal", hint: "crt, prompts, fósforo" },
   },
   language: "idioma",
+
+  reports: "relatórios de erro",
+  reportsHint:
+    "o que quebrou, a versão do windows e o dispositivo de áudio. nunca o que é dito numa chamada.",
+  reportsOn: "enviar",
+  reportsOff: "desligado",
+  logs: "registro",
+  logsHint: "o arquivo para anexar numa issue quando algo falhou em silêncio.",
+  openLogFolder: "abrir a pasta",
 };
 
 export const CATALOG: Record<Lang, Strings> = { en, "pt-BR": ptBR };

@@ -1,10 +1,12 @@
 /* @refresh reload */
 import { invoke } from "@tauri-apps/api/core";
+import { ErrorBoundary } from "solid-js";
 import { render } from "solid-js/web";
 
 import { App } from "./App";
 import { Viewer } from "./Viewer";
 import { boot as bootLanguage } from "./i18n";
+import { report } from "./report";
 import { boot as bootTheme } from "./theme";
 import "./styles/app.css";
 
@@ -33,7 +35,36 @@ bootTheme();
  * rather than a query so the dev server and the embedded protocol resolve it
  * the same way. `open_screen_viewer` in `lib.rs` is what builds it.
  */
-render(() => (location.hash === "#screen" ? <Viewer /> : <App />), root);
+/*
+ * The boundary exists for one failure: a render that throws takes the whole
+ * tree with it and leaves a window that is blank and does nothing — which
+ * looks, to the person in front of it, exactly like the app having frozen
+ * mid-call. There is nothing to retry into, so this does not offer to: it says
+ * what happened and points at the log, which is the only thing that will still
+ * be true tomorrow.
+ *
+ * Not translated, and deliberately: `t()` reads a signal from a tree that has
+ * just failed to render, and a fallback that throws while reporting a throw
+ * leaves the blank window this exists to prevent.
+ */
+const Fallback = (failure: unknown) => {
+  report("render", failure);
+  return (
+    <p class="notice notice-error" role="alert">
+      goodvoice stopped drawing this window. the log has the details — restart
+      the app, and if it happens again, send the log.
+    </p>
+  );
+};
+
+render(
+  () => (
+    <ErrorBoundary fallback={Fallback}>
+      {location.hash === "#screen" ? <Viewer /> : <App />}
+    </ErrorBoundary>
+  ),
+  root,
+);
 
 /*
  * The window is built hidden and this is what shows it (DR-38, `lib.rs`).
