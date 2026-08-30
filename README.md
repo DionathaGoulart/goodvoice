@@ -190,8 +190,8 @@ than a 1.0.**
 | Four clients conversing                        | N-party audio is tested; the CPU cost of four at once needs four hosts                                           |
 | The self-hosting guide, followed by a stranger | written and half-measured; nobody has done it on a fresh Cloudflare account                                      |
 | A loudspeaker a metre away                     | the canceller was measured with the transducer against the capsule, which is a shorter delay than a desk speaker |
-| The crash reporter's second process            | `minidump::init` re-executes the binary, and no build with a DSN in it has been run — so the two-process path has never started. `bin/crash-drill --kind processes` is what checks it |
-| What the crash reporter costs                  | §4's RAM and cold-start budgets were measured without one. The soak samples the process tree, so a second process lands on both |
+| The crash reporter's second process            | `bin/crash-drill --kind processes` starts it and counts two, 8.6 MB and 8.5 MB. What has never done that is the app: `minidump::init` re-executes the binary, and no crash in a real 0.1.1 has been watched arriving |
+| What the crash reporter costs                  | §4's RAM and cold-start budgets were measured without one. The soak samples the process tree, so the drill's 8.5 MB lands on a 120 MB budget and neither harness has been re-run |
 
 The first four are tasks in the plan, each with a definition of done and the
 command that proves it: [.harness/plan.md](.harness/plan.md), §7.7, §7.8, §7.11

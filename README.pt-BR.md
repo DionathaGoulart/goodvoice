@@ -200,8 +200,8 @@ uma versão de testes e não uma 1.0.**
 | Quatro clientes conversando                   | o áudio N-para-N está testado; o custo de CPU de quatro ao mesmo tempo precisa de quatro máquinas                      |
 | O guia de auto-hospedagem, seguido por alguém | escrito e medido pela metade; ninguém o seguiu numa conta Cloudflare nova                                              |
 | Um alto-falante a um metro                    | o cancelador foi medido com o transdutor encostado na cápsula, o que é um atraso menor que o de uma caixa sobre a mesa |
-| O segundo processo do repórter de crash       | `minidump::init` reexecuta o binário, e nenhuma build com DSN dentro foi executada — o caminho dos dois processos nunca subiu. `bin/crash-drill --kind processes` é o que confere |
-| O que o repórter de crash custa               | os orçamentos de RAM e início a frio da §4 foram medidos sem ele. O soak amostra a árvore de processos, então um segundo processo cai nos dois |
+| O segundo processo do repórter de crash       | o `bin/crash-drill --kind processes` sobe o repórter e conta dois, de 8,6 MB e 8,5 MB. Quem nunca fez isso é o app: o `minidump::init` reexecuta o binário, e nenhum crash numa 0.1.1 de verdade foi visto chegando |
+| O que o repórter de crash custa               | os orçamentos de RAM e início a frio da §4 foram medidos sem ele. O soak amostra a árvore de processos, então os 8,5 MB do drill caem num orçamento de 120 MB e nenhum dos dois harnesses foi refeito |
 
 Os quatro primeiros são tarefas no plano, cada uma com uma definição de pronto
 e o comando que a prova: [.harness/plan.md](.harness/plan.md), §7.7, §7.8, §7.11
