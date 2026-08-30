@@ -152,6 +152,12 @@ Windows.Graphics.Capture, hardware H.264) · Cloudflare Workers + Durable
 Objects for signaling · Cloudflare Realtime SFU for media. No database, no
 accounts, rooms are ephemeral and die when the last person leaves.
 
+Reporting is Sentry on both ends — `sentry` and `tauri-plugin-sentry` in the
+client, `@sentry/cloudflare` in the Worker — and both are compiled in rather
+than configured. A build with no DSN in it, which is every build from source,
+reports nowhere and needs no opt-out; a build that has one still sends nothing
+until the settings screen has been answered.
+
 ## Self-hosting
 
 Bring your own free-tier Cloudflare account: create a Realtime app, set

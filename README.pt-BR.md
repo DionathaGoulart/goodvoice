@@ -161,6 +161,13 @@ H.264 por hardware) · Cloudflare Workers + Durable Objects para sinalização �
 Cloudflare Realtime SFU para mídia. Sem banco de dados, sem contas, e as salas
 são efêmeras: morrem quando a última pessoa sai.
 
+Os relatórios são Sentry nas duas pontas — `sentry` e `tauri-plugin-sentry` no
+cliente, `@sentry/cloudflare` no Worker — e os dois são compilados junto, não
+configurados. Uma build sem DSN dentro, que é toda build feita a partir do
+código, não reporta a lugar nenhum e não precisa de opção para desligar; uma
+build que tem um DSN ainda assim não envia nada enquanto a tela de ajustes não
+for respondida.
+
 ## Hospedando você mesmo
 
 Traga sua própria conta gratuita da Cloudflare: crie um app Realtime, defina
