@@ -179,7 +179,7 @@ Guia completo: [docs/self-hosting.md](docs/self-hosting.md) (em inglês).
 
 Um número que ninguém mediu não é uma promessa. Uma coisa que esta versão
 afirma está testada até o limite do hardware que o teste dela precisa e nada
-além disso, e outras quatro nunca foram executadas. **É isso que faz da v0.1.1
+além disso, e outras seis nunca foram executadas. **É isso que faz da v0.1.1
 uma versão de testes e não uma 1.0.**
 
 **Testado até onde o hardware permitiu, com o comando que termina o serviço:**
@@ -203,9 +203,10 @@ uma versão de testes e não uma 1.0.**
 | O segundo processo do repórter de crash       | `minidump::init` reexecuta o binário, e nenhuma build com DSN dentro foi executada — o caminho dos dois processos nunca subiu. `bin/crash-drill --kind processes` é o que confere |
 | O que o repórter de crash custa               | os orçamentos de RAM e início a frio da §4 foram medidos sem ele. O soak amostra a árvore de processos, então um segundo processo cai nos dois |
 
-O plano acompanha cada um deles como uma tarefa com uma definição de pronto e o
-comando que a prova: [.harness/plan.md](.harness/plan.md), §7.7, §7.8, §7.11 e
-§7.13.
+Os quatro primeiros são tarefas no plano, cada uma com uma definição de pronto
+e o comando que a prova: [.harness/plan.md](.harness/plan.md), §7.7, §7.8, §7.11
+e §7.13. As duas linhas do repórter ainda não têm tarefa — elas apareceram ao
+construí-lo, depois que a última seção do plano já havia fechado.
 
 **Um visualizador que abre sobre um compartilhamento parado espera até 2,5 s
 pela primeira imagem.** Isso estava na lista acima como algo a corrigir e não é

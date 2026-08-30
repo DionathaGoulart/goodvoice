@@ -168,7 +168,7 @@ Full guide: [docs/self-hosting.md](docs/self-hosting.md).
 ## What this release has not been through
 
 A measured number nobody has taken is not a promise. One thing this version
-claims is tested up to the hardware its test needs and no further, and four
+claims is tested up to the hardware its test needs and no further, and six
 more were never run at all. **This is what makes v0.1.1 a test release rather
 than a 1.0.**
 
@@ -193,9 +193,10 @@ than a 1.0.**
 | The crash reporter's second process            | `minidump::init` re-executes the binary, and no build with a DSN in it has been run — so the two-process path has never started. `bin/crash-drill --kind processes` is what checks it |
 | What the crash reporter costs                  | §4's RAM and cold-start budgets were measured without one. The soak samples the process tree, so a second process lands on both |
 
-The plan tracks each of these as a task with a definition of done and the
+The first four are tasks in the plan, each with a definition of done and the
 command that proves it: [.harness/plan.md](.harness/plan.md), §7.7, §7.8, §7.11
-and §7.13.
+and §7.13. The two reporter rows have no task yet — they were found by building
+the thing, after the last section of the plan had closed.
 
 **A viewer opening onto a still share waits up to 2.5 s for its first picture.**
 That was on the list above as something to fix and it is not fixable from here:
