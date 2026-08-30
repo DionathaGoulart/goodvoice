@@ -109,6 +109,24 @@ viewer subscribes to no video track at all — **and a viewer that closes gives
 the subscription back**, which is a thing this client did not do until the
 wire was read rather than the process's IO counters (DR-45).
 
+## Appearance
+
+Ten palettes and two skins, picked in the settings screen and independent of
+each other: a palette says which colours, a skin says what they are painted on,
+and every palette works under either skin. Light and dark follow the machine
+until you pick one yourself.
+
+Every screenshot above is `terminal` — a CRT's idea of a voice client, prompts
+and phosphor. The other skin is `neobrutal`: a thick frame, square corners and a
+hard shadow with no blur in it.
+
+![The share picker under neobrutal](docs/ui/share-picker-retro.png)
+
+Adding a palette is a block in `client/ui/styles/themes.css`, an entry in
+`client/ui/appearance.ts` and a name in both languages — the same type checker
+that guards the strings guards this, so an unnamed palette fails the build
+instead of shipping as a blank swatch.
+
 ## Language
 
 English and Brazilian Portuguese, from the installer onwards. The NSIS setup

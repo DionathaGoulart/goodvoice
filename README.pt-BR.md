@@ -119,6 +119,24 @@ um visualizador que fecha devolve a assinatura**, que é uma coisa que este
 cliente não fazia até que alguém lesse a rede em vez dos contadores de IO do
 processo (DR-45).
 
+## Aparência
+
+Dez paletas e duas peles, escolhidas na tela de ajustes e independentes entre
+si: a paleta diz quais cores, a pele diz sobre o que elas são pintadas, e toda
+paleta funciona sob qualquer uma das peles. Claro e escuro seguem a máquina até
+você escolher um.
+
+Toda captura de tela acima é a `terminal` — a ideia que um CRT teria de um
+cliente de voz, com prompts e fósforo. A outra pele é a `neobrutal`: moldura
+grossa, cantos retos e uma sombra dura, sem borrão nenhum.
+
+![O seletor de compartilhamento sob a neobrutal](docs/ui/share-picker-retro.png)
+
+Adicionar uma paleta é um bloco em `client/ui/styles/themes.css`, uma entrada em
+`client/ui/appearance.ts` e um nome nos dois idiomas — o mesmo verificador de
+tipos que guarda as strings guarda isto, então uma paleta sem nome quebra o
+build em vez de virar um quadradinho em branco.
+
 ## Idioma
 
 Inglês e português do Brasil, do instalador em diante. O setup NSIS pergunta em
