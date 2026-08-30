@@ -234,7 +234,7 @@ Os gates, todos eles rodados pela CI a cada push:
 cd client\src-tauri
 cargo fmt --all --check
 cargo clippy --workspace --all-targets -- -D warnings
-cargo test --workspace          # 197 testes
+cargo test --workspace          # 204 testes
 cd ..;        npm run format:check; npm run typecheck
 cd ..\server; npm run format:check; npm run typecheck; npm test   # 85 testes
 ```
@@ -242,7 +242,7 @@ cd ..\server; npm run format:check; npm run typecheck; npm test   # 85 testes
 ## Como isto foi construído
 
 Toda decisão não óbvia é um registro numerado em
-[.harness/plan.md](.harness/plan.md) — 46 deles, cada um com o que foi medido e
+[.harness/plan.md](.harness/plan.md) — 47 deles, cada um com o que foi medido e
 o que aquilo refutou. Alguns que valem a leitura por si só: DR-14 (uma única URL
 de STUN inalcançável travava toda entrada), DR-22 (a build de release era um app
 diferente do que estava sendo medido), DR-27 (o instalador empacotou o binário

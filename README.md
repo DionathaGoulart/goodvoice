@@ -223,7 +223,7 @@ The gates, all of which CI runs on every push:
 cd client\src-tauri
 cargo fmt --all --check
 cargo clippy --workspace --all-targets -- -D warnings
-cargo test --workspace          # 197 tests
+cargo test --workspace          # 204 tests
 cd ..;        npm run format:check; npm run typecheck
 cd ..\server; npm run format:check; npm run typecheck; npm test   # 85 tests
 ```
@@ -231,7 +231,7 @@ cd ..\server; npm run format:check; npm run typecheck; npm test   # 85 tests
 ## How this was built
 
 Every non-obvious decision is a numbered record in
-[.harness/plan.md](.harness/plan.md) — 46 of them, each with what was measured
+[.harness/plan.md](.harness/plan.md) — 47 of them, each with what was measured
 and what it refuted. A few worth reading on their own: DR-14 (one unreachable
 STUN URL hung every join), DR-22 (the release build was a different app than
 the one being measured), DR-27 (the installer packaged the wrong binary because
