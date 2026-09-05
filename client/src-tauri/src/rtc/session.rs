@@ -1249,6 +1249,19 @@ async fn reconcile_share(
         if wanted.is_some() && !current.task.is_finished() {
             return;
         }
+        // Finished while the user still wants it: the capture or the track
+        // under it gave out and the re-open below is a restart, not a start.
+        // Worth an issue of its own even though `capture::share` reports the
+        // encoder error directly — this is the one that says the share is
+        // *flapping*, and it is also the only report on the paths that end
+        // without a `CaptureError` at all (the screen track going away).
+        if wanted.is_some() && current.task.is_finished() {
+            crate::report::failure(
+                "share-restarted",
+                "the share stopped on its own while it was still wanted",
+                &[("share_stage", "running".to_owned())],
+            );
+        }
         if let Some(current) = sharing.take() {
             current.stop();
         }

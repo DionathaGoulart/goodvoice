@@ -279,7 +279,10 @@ fn run(
             }
             // The window closed or the display went away. Ending the channel
             // is how the rest of the client finds out.
-            Err(_) => break,
+            Err(error) => {
+                died(&pipeline, "capture", &error);
+                break;
+            }
         };
 
         // Faster than the rate we publish at: drop it. Dropping is a frame the
@@ -298,7 +301,8 @@ fn run(
         let (width, height) = frame.size();
         if width != pipeline.config().source_width || height != pipeline.config().source_height {
             drop(frame);
-            if pipeline.resize(quality).is_err() {
+            if let Err(error) = pipeline.resize(quality) {
+                died(&pipeline, "resize", &error);
                 break;
             }
             // A keyframe from before the resize describes a picture of a
@@ -313,11 +317,12 @@ fn run(
         }
 
         encoded.clear();
-        if pipeline
+        if let Err(error) = pipeline
             .encoder
             .encode(frame.texture(), frame.time(), &mut encoded)
-            .is_err()
         {
+            drop(frame);
+            died(&pipeline, "encode", &error);
             break;
         }
         // Held only as long as the encode: a frame not returned is one of the
@@ -352,6 +357,57 @@ fn run(
             }
         }
     }
+}
+
+/// Reports the share ending on something other than being asked to.
+///
+/// # Why this exists at all
+///
+/// Every one of [`run`]'s three failure arms used to be `.is_err()` and a
+/// `break`. That reads fine — the thread has nothing useful left to do — and
+/// it is also why a share that died mid-call was invisible: the packet channel
+/// closes exactly as it does when the user presses stop, so the rest of the
+/// client cannot tell the two apart, and the `CaptureError` carrying the
+/// HRESULT was dropped on the floor one line earlier.
+///
+/// # It cannot spend the quota, for two reasons
+///
+/// Each arm `break`s straight after calling this, so one dead share is one
+/// call and not one per frame. The loop that could still run away is the outer
+/// one — `rtc::session::reconcile_share` re-opens a share whose thread died
+/// while the user still wants it, so a machine whose encoder fails every time
+/// will come back here every time. That is what [`crate::report`]'s minute of
+/// quiet is for, and what makes it work here is the message being the error's
+/// own text: the same failure is one fingerprint however often it arrives.
+///
+/// `stage` is written at the call site rather than derived from the variant
+/// because the variant does not separate them — a `CaptureError::Encoder` from
+/// the rebuild after a resize and one from the steady-state encode are the
+/// same type and different bugs.
+fn died(pipeline: &Pipeline, stage: &'static str, error: &CaptureError) {
+    // The window closing is how a share of a window is *supposed* to end.
+    // It arrives here because it arrives as an error, but it is not one.
+    if matches!(error, CaptureError::Stopped) {
+        crate::note!("share", "the capture stopped: the target went away");
+        return;
+    }
+    let config = pipeline.config();
+    crate::report::failure(
+        "share-died",
+        &format!("the share stopped on its own during {stage}: {error}"),
+        &[
+            ("share_stage", stage.to_owned()),
+            ("encoder", pipeline.encoder.name().to_owned()),
+            (
+                "encoder_hardware",
+                pipeline.encoder.is_hardware().to_string(),
+            ),
+            (
+                "share_size",
+                format!("{}x{}", config.source_width, config.source_height),
+            ),
+        ],
+    );
 }
 
 /// The capturer and the encoder, which are rebuilt together or not at all.
