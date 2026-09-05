@@ -290,7 +290,7 @@ const en: Strings = {
 
   reports: "crash reports",
   reportsHint:
-    "what broke, the windows version and the audio device. never what is said in a call.",
+    "what broke, the windows version and the audio device. never what is said in a call. takes effect the next time goodvoice starts.",
   reportsOn: "send",
   reportsOff: "off",
   logs: "log",
@@ -437,7 +437,7 @@ const ptBR: Strings = {
 
   reports: "relatórios de erro",
   reportsHint:
-    "o que quebrou, a versão do windows e o dispositivo de áudio. nunca o que é dito numa chamada.",
+    "o que quebrou, a versão do windows e o dispositivo de áudio. nunca o que é dito numa chamada. vale a partir da próxima vez que o goodvoice abrir.",
   reportsOn: "enviar",
   reportsOff: "desligado",
   logs: "registro",
