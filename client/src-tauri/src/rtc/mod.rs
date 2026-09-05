@@ -10,7 +10,13 @@
 //! track without knowing that a monitor exists. [`wire`] is the measurement
 //! seam under all of it: what the transport carried, whether or not anything
 //! read it.
+//!
+//! [`order`] sits between the transport and the decoder, and is the one piece
+//! of the voice path that is about the *network* rather than the sound: RTP
+//! arrives reordered and incomplete, and Opus is stateful enough that both of
+//! those have to be answered before a packet reaches a decoder.
 
+pub mod order;
 pub mod reconnect;
 pub mod screen;
 pub mod session;

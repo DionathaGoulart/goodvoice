@@ -58,6 +58,7 @@ use webrtc::{
 };
 
 use super::{
+    order::{Sequence, Step},
     reconnect::{Backoff, CallState, EndReason},
     screen::{starts_with_idr, ScreenSink, ScreenSource, ScreenSourceFactory, ShareState},
     signaling::{
@@ -2766,16 +2767,37 @@ async fn take_matching(inbox: &Arc<TrackInbox>, ssrc: Option<u32>) -> Option<Arc
 ///
 /// The RTP payload of an Opus stream *is* the Opus packet — there is no
 /// aggregation header to strip — so depacketising and decoding are one step.
+///
+/// What is *not* one step is the order they arrive in. Packets come off the
+/// network reordered and with holes in them, and Opus carries state across
+/// them, so [`super::order::Sequence`] stands between the two: it hands over
+/// the packets in the order they were spoken, and names the ones that never
+/// came so the decoder can conceal them instead of the ring playing a gap.
 async fn playback_loop(track: Arc<dyn TrackRemote>, slot: usize, shared: Arc<Shared>) {
     let Ok(mut decoder) = VoiceDecoder::new() else {
         return;
     };
     let mut frame = silent_frame();
+    let mut sequence = Sequence::new();
+    // Reused across packets: in a stream with nothing wrong with it this holds
+    // one `Step` and is cleared, and never allocates again.
+    let mut steps: Vec<Step> = Vec::new();
 
     while let Some(event) = track.poll().await {
         match event {
             TrackRemoteEvent::OnRtpPacket(packet) => {
-                play_packet(&mut decoder, &packet.payload, &mut frame, slot, &shared);
+                steps.clear();
+                sequence.accept(packet.header.sequence_number, &packet.payload, &mut steps);
+                for step in &steps {
+                    match step {
+                        Step::Play(payload) => {
+                            play_packet(&mut decoder, payload, &mut frame, slot, &shared);
+                        }
+                        Step::Lost => {
+                            conceal_packet(&mut decoder, &mut frame, slot, &shared);
+                        }
+                    }
+                }
             }
             TrackRemoteEvent::OnEnded => break,
             _ => {}
@@ -2863,6 +2885,25 @@ fn play_packet(
     shared.sink.play(slot, frame);
 }
 
+/// Fills in 20 ms that never arrived.
+///
+/// Opus extrapolates from what it has already decoded, which is why this is a
+/// call into the decoder rather than a frame of silence written here: silence
+/// in the middle of a word is the click, and it is the same click the ring
+/// produced on its own before anything noticed the packet was missing.
+///
+/// Deafened conceals for the reason it decodes — the decoder's state has to
+/// stay level with the stream, or un-deafening starts in artefacts.
+fn conceal_packet(decoder: &mut VoiceDecoder, frame: &mut Frame, slot: usize, shared: &Shared) {
+    if decoder.conceal(frame).is_err() {
+        return;
+    }
+    if shared.deafened.load(Ordering::Relaxed) {
+        return;
+    }
+    shared.sink.play(slot, frame);
+}
+
 // --- SDP ------------------------------------------------------------------
 
 fn sdp_of(answer: &Value) -> Result<String, RtcError> {
@@ -2907,8 +2948,8 @@ fn ssrc_for_mid(sdp: &str, mid: &str) -> Option<u32> {
 #[cfg(test)]
 mod tests {
     use super::{
-        is_starting_up, play_packet, publish_loop, silent_frame, ssrc_for_mid, ssrc_of,
-        track_error, wait_for_gathering, AudioPrefs, Events, PacketSink,
+        conceal_packet, is_starting_up, play_packet, publish_loop, silent_frame, ssrc_for_mid,
+        ssrc_of, track_error, wait_for_gathering, AudioPrefs, Events, PacketSink,
         PeerConnectionEventHandler, RTCIceCandidateType, RTCIceGatheringState,
         RTCPeerConnectionIceEvent, Shared, TransmitMode, CONNECT_TIMEOUT, GATHER_QUIET,
     };
@@ -3176,6 +3217,56 @@ mod tests {
         play_packet(&mut decoder, &[], &mut frame, 0, &shared);
 
         assert_eq!(ears.slot(0).frames, 0);
+    }
+
+    #[test]
+    fn a_lost_packet_is_played_as_concealment_rather_than_a_gap() {
+        // The whole point of `rtc::order`: a hole in the sequence reaches the
+        // ring as 20 ms the decoder extrapolated, not as 20 ms of nothing.
+        let (shared, ears) = listening();
+        let mut decoder = VoiceDecoder::new().expect("decoder");
+        let mut frame = silent_frame();
+        let mut buffer = [0_u8; MAX_PACKET_BYTES];
+        let written = packet(&mut buffer);
+
+        // Something has to have been decoded first: concealment extrapolates
+        // from the stream, and there is nothing to extrapolate from at the
+        // very start of one.
+        for _ in 0..5 {
+            play_packet(&mut decoder, &buffer[..written], &mut frame, 0, &shared);
+        }
+        conceal_packet(&mut decoder, &mut frame, 0, &shared);
+
+        assert_eq!(ears.slot(0).frames, 6, "the lost frame reached the ring");
+        assert!(
+            frame.iter().any(|&sample| sample != 0),
+            "concealment produced silence, which is the artefact it replaces"
+        );
+    }
+
+    #[test]
+    fn concealment_still_runs_while_deafened() {
+        // For the reason decoding does (see
+        // `deafening_stops_playback_without_stopping_the_decoder`): the
+        // decoder's state has to stay level with the stream, or un-deafening
+        // starts in artefacts.
+        let (shared, ears) = listening();
+        let mut decoder = VoiceDecoder::new().expect("decoder");
+        let mut frame = silent_frame();
+        let mut buffer = [0_u8; MAX_PACKET_BYTES];
+        let written = packet(&mut buffer);
+
+        for _ in 0..5 {
+            play_packet(&mut decoder, &buffer[..written], &mut frame, 0, &shared);
+        }
+        shared.deafened.store(true, Ordering::Relaxed);
+        conceal_packet(&mut decoder, &mut frame, 0, &shared);
+
+        assert_eq!(ears.slot(0).frames, 5, "concealment reached the speakers");
+        assert!(
+            frame.iter().any(|&sample| sample != 0),
+            "the frame was never concealed while deafened"
+        );
     }
 
     #[test]
