@@ -69,6 +69,7 @@ use super::{
 };
 use crate::audio::{
     device::{AudioSink, AudioSource, MAX_REMOTE_SLOTS},
+    health::{self, Health},
     mixer::{peak, Meter, MAX_GAIN},
     opus::{
         silent_frame, Frame, VoiceDecoder, VoiceEncoder, FRAME_MS, MAX_PACKET_BYTES, SAMPLE_RATE_HZ,
@@ -767,11 +768,12 @@ impl Call {
         // wire while it has no seat in the room.
         let (published, sinks) = watch::channel(None);
 
-        let tasks = vec![tokio::spawn(publish_loop(
-            source,
-            sinks,
-            Arc::clone(&shared),
-        ))];
+        let tasks = vec![
+            tokio::spawn(publish_loop(source, sinks, Arc::clone(&shared))),
+            // For the life of the call rather than of a session: a reconnect
+            // is one of the things worth seeing the voice path either side of.
+            tokio::spawn(health_loop()),
+        ];
         let supervisor = tokio::spawn(supervise(
             Supervisor {
                 signaling,
@@ -2885,6 +2887,76 @@ fn play_packet(
     shared.sink.play(slot, frame);
 }
 
+/// How long one window of [`health_loop`] covers.
+///
+/// Long enough that a single stumble does not become an issue on its own, and
+/// short enough that a two-minute call still produces four of them. It is also
+/// half of `report`'s quiet window, so a call that is bad throughout costs one
+/// event a minute rather than one per window.
+const HEALTH_WINDOW: Duration = Duration::from_secs(30);
+
+/// Watches how well the voice path is running, for the life of the call.
+///
+/// # Why the numbers are tags and the message is a constant
+///
+/// `report::failure` fingerprints an event by its *message*, and holds a
+/// repeat for a minute (`report::QUIET`). Putting the counts in the message
+/// would give every window a fingerprint of its own, which is exactly the
+/// runaway the quiet window exists to prevent — a bad call would send one
+/// event every thirty seconds for as long as it lasted. The message is
+/// therefore fixed, and everything that varies is a tag, which Sentry shows on
+/// the event and does not fingerprint on.
+///
+/// # The good windows are not wasted
+///
+/// A window with nothing wrong leaves a breadcrumb and no event. That is not
+/// nothing: breadcrumbs travel attached to whatever fails next, so an issue
+/// raised twenty minutes into a call arrives carrying the shape of the forty
+/// windows in front of it — which is the difference between "the audio broke"
+/// and "the audio had been drifting for ten minutes and then broke".
+async fn health_loop() {
+    let mut window = tokio::time::interval(HEALTH_WINDOW);
+    // The first tick of a tokio interval is immediate, and would describe a
+    // window that has not happened yet. Taking the counters here and throwing
+    // them away is what stops the tail of the *previous* call being read as
+    // the first thirty seconds of this one.
+    window.tick().await;
+    let _ = Health::take();
+
+    loop {
+        window.tick().await;
+        let health = Health::take();
+        if health.is_quiet() {
+            continue;
+        }
+
+        crate::note!(
+            "audio",
+            "voice: {} frames, {:.1}% concealed, {} starved, {} overflowed, {} deepest",
+            health.played,
+            health.loss() * 100.0,
+            health.starved,
+            health.overflowed,
+            health.deepest
+        );
+
+        if health.is_bad() {
+            crate::report::failure(
+                "voice-degraded",
+                "the voice path is not keeping up",
+                &[
+                    ("voice_shape", health.shape().to_owned()),
+                    ("voice_starved", health.starved.to_string()),
+                    ("voice_overflowed", health.overflowed.to_string()),
+                    ("voice_concealed", health.concealed.to_string()),
+                    ("voice_played", health.played.to_string()),
+                    ("voice_deepest", health.deepest.to_string()),
+                ],
+            );
+        }
+    }
+}
+
 /// Fills in 20 ms that never arrived.
 ///
 /// Opus extrapolates from what it has already decoded, which is why this is a
@@ -2898,6 +2970,7 @@ fn conceal_packet(decoder: &mut VoiceDecoder, frame: &mut Frame, slot: usize, sh
     if decoder.conceal(frame).is_err() {
         return;
     }
+    health::concealed();
     if shared.deafened.load(Ordering::Relaxed) {
         return;
     }

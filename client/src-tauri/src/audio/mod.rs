@@ -10,11 +10,15 @@
 //! cleans up what does go — echo, noise and level. [`burst`] is not part of the
 //! voice path at all: it is the measurement apparatus the latency harnesses
 //! share, and [`tone`] is the same for the echo harnesses. [`prefs`] is what
-//! the user is allowed to move while all of that is running.
+//! the user is allowed to move while all of that is running. [`health`] is the
+//! one that only watches: it counts what the ring and the decoder had to paper
+//! over, so that "the voices are breaking up" can be answered with which of
+//! the three causes it was.
 
 pub mod burst;
 pub mod device;
 pub mod hardware;
+pub mod health;
 pub mod mixer;
 pub mod opus;
 pub mod prefs;

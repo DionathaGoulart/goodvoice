@@ -26,7 +26,7 @@ use ringbuf::{
     HeapCons, HeapProd, HeapRb,
 };
 
-use super::opus::Frame;
+use super::{health, opus::Frame};
 
 /// The largest block the render path handles in one pass. Bigger device
 /// buffers are processed in several, so the scratch array stays on the stack.
@@ -221,6 +221,15 @@ impl Mixer {
             }
 
             let read = slot.pop_slice(taken);
+            // Half a block is a ring that ran out mid-word, which is audible
+            // every time. An empty one is a slot whose owner is not talking,
+            // and is the ordinary state of most slots most of the time — see
+            // `health::starved`.
+            if read > 0 && read < taken.len() {
+                health::starved();
+            }
+            health::deep(slot.occupied_len());
+
             let gain = self.meters.gains[index].load(Ordering::Relaxed);
             let mut loudest = 0_u16;
 
@@ -254,6 +263,16 @@ impl Playback {
         let Ok(mut producer) = producer.lock() else {
             return;
         };
+        health::played();
+        // What `push_slice` does with a frame that will not fit is write the
+        // part that does, which is a discontinuity in the middle of 20 ms
+        // rather than at the edge of it. Refusing the whole frame keeps the
+        // break on a boundary, and counting it is what tells the difference
+        // between a link that is behind and a clock that is fast.
+        if producer.vacant_len() < frame.len() {
+            health::overflowed();
+            return;
+        }
         producer.push_slice(frame);
     }
 
@@ -556,5 +575,23 @@ mod tests {
 
         assert_ne!(out[0], 0);
         assert!(out[FRAME_SAMPLES..].iter().all(|&sample| sample == 0));
+    }
+
+    #[test]
+    fn a_frame_that_will_not_fit_is_refused_whole_rather_than_torn() {
+        // Room for one frame and half of another.
+        let (_mixer, playback) = open(1, FRAME_SAMPLES + FRAME_SAMPLES / 2);
+        playback.play(0, &tone(1_000));
+
+        // Writing the half that fits would put the break in the middle of
+        // 20 ms rather than at the edge of it, which is the more audible of
+        // the two and the harder one to count.
+        playback.play(0, &tone(2_000));
+
+        assert_eq!(
+            playback.queued(0),
+            FRAME_SAMPLES,
+            "half a frame was written into the ring"
+        );
     }
 }
